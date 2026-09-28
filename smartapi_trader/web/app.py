@@ -39,8 +39,8 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-if os.path.exists(REACT_ASSETS):
-    app.mount("/assets", StaticFiles(directory=REACT_ASSETS), name="react_assets")
+os.makedirs(REACT_ASSETS, exist_ok=True)
+app.mount("/assets", StaticFiles(directory=REACT_ASSETS), name="react_assets")
 
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
@@ -731,7 +731,11 @@ async def websocket_telemetry_endpoint(websocket: WebSocket):
 # SPA Client-Side Routing Fallback
 @app.get("/{full_path:path}")
 async def serve_spa_fallback(full_path: str, request: Request):
-    """Fallback route serving React SPA for client-side routing."""
+    """Fallback route serving React SPA for client-side routing, or static assets from dist."""
+    target_file = os.path.join(REACT_DIST, full_path)
+    if os.path.isfile(target_file):
+        return FileResponse(target_file)
+    
     react_index = os.path.join(REACT_DIST, "index.html")
     if os.path.exists(react_index):
         return FileResponse(react_index)
