@@ -228,9 +228,9 @@ export default function PaperTrade({
 
         <div className="hud-card" style={{ borderLeft: '3px solid var(--accent-orange)' }}>
           <div className="card-header-line">
-            <span>Brokerage & Taxes</span>
+            <span>Brokerages</span>
             <span className="mono font-semibold" style={{ color: 'var(--accent-orange)' }}>
-              ANGEL ONE + TAX
+              TAX
             </span>
           </div>
           <div className="metric-big mono font-bold" style={{ color: 'var(--accent-orange)' }}>

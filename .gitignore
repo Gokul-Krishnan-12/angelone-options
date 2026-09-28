@@ -26,8 +26,10 @@ pnpm-debug.log*
 
 # SQLite & Data caches
 *.db
+*.db-*
 *.sqlite3
 data/*.db
+data/*.db-*
 data/instruments.db
 data/trading_storage.db
 
