@@ -35,7 +35,6 @@ data/trading_storage.db
 
 # Frontend dependencies & build artifacts
 frontend/node_modules/
-frontend/dist/
 frontend/dist-ssr/
 frontend/.oxlint_cache/
 
