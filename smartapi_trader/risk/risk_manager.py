@@ -7,6 +7,7 @@ from smartapi_trader.core.events import (
 from smartapi_trader.core.event_bus import EventBus
 from smartapi_trader.core.state_manager import StateManager
 from smartapi_trader.utils.logger import logger
+from smartapi_trader.utils.tz import ist_time
 
 class RiskManager:
     """
@@ -96,7 +97,7 @@ class RiskManager:
         ignore_time = self.cfg.get("ignore_time_filter_in_paper", False) and is_paper
 
         if not ignore_time:
-            now_time = datetime.now().time()
+            now_time = ist_time()
             # Midday chop filter
             if time(11, 15) <= now_time <= time(13, 30):
                 self._raise_alert("WARNING", "MiddayChopFilter", "Order rejected: Midday consolidation window (11:15-13:30 IST).")
@@ -252,7 +253,7 @@ class RiskManager:
         is_paper = (self.state_mgr.execution_mode == "PAPER")
         ignore_time = self.cfg.get("ignore_time_filter_in_paper", False) and is_paper
         
-        now_time = datetime.now().time()
+        now_time = ist_time()
         if now_time >= time(15, 12) and not self.state_mgr.is_halted and not ignore_time:
             open_positions = [p for p in self.state_mgr.positions.values() if p.is_open]
             if open_positions:

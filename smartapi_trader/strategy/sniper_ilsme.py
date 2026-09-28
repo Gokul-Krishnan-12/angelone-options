@@ -7,6 +7,7 @@ from smartapi_trader.core.state_manager import StateManager
 from smartapi_trader.data.instrument_loader import InstrumentLoader
 from smartapi_trader.strategy.base_strategy import BaseStrategy
 from smartapi_trader.utils.logger import logger
+from smartapi_trader.utils.tz import ist_time, now_ist
 
 class SniperILSMEStrategy(BaseStrategy):
     """
@@ -76,13 +77,13 @@ class SniperILSMEStrategy(BaseStrategy):
 
     def _is_midday_chop(self) -> bool:
         """Checks if current time falls in 11:15 - 13:30 IST midday consolidation."""
-        now = datetime.now().time()
+        now = ist_time()
         start = time(11, 15)
         end = time(13, 30)
         return start <= now <= end
 
     def _is_market_hours(self) -> bool:
-        now = datetime.now().time()
+        now = ist_time()
         start = time(9, 15)
         end = time(15, 12)
         return start <= now <= end
@@ -150,7 +151,7 @@ class SniperILSMEStrategy(BaseStrategy):
         if bar.low < st["pdl"] and bar.close > st["pdl"] and lower_wick >= self.cfg.get("min_wick_ratio", 0.30):
             st["sweep_status"] = "BULLISH_SWEEP"
             st["sweep_price"] = bar.low
-            st["sweep_time"] = datetime.now()
+            st["sweep_time"] = now_ist()
             status_msg = f"Sweep Detected ({underlying} Bullish): Waiting for 3m Displacement"
             self.state_mgr.set_strategy_status(status_msg)
             logger.info(f"[STRATEGY] {underlying} 15m BULLISH LIQUIDITY SWEEP at {bar.low:.2f} (Wick: {lower_wick:.1%})")
@@ -159,7 +160,7 @@ class SniperILSMEStrategy(BaseStrategy):
         elif bar.high > st["pdh"] and bar.close < st["pdh"] and upper_wick >= self.cfg.get("min_wick_ratio", 0.30):
             st["sweep_status"] = "BEARISH_SWEEP"
             st["sweep_price"] = bar.high
-            st["sweep_time"] = datetime.now()
+            st["sweep_time"] = now_ist()
             status_msg = f"Sweep Detected ({underlying} Bearish): Waiting for 3m Displacement"
             self.state_mgr.set_strategy_status(status_msg)
             logger.info(f"[STRATEGY] {underlying} 15m BEARISH LIQUIDITY SWEEP at {bar.high:.2f} (Wick: {upper_wick:.1%})")
@@ -269,10 +270,11 @@ class SniperILSMEStrategy(BaseStrategy):
         opt_type = "CE" if "CE" in signal_type else "PE"
         
         # Check expiry day theta protection rule:
-        now_time = datetime.now().time()
+        cur_ist = now_ist()
+        now_time = cur_ist.time()
         expiry_idx = 0
         if now_time < time(13, 0):
-            today_weekday = datetime.now().weekday()
+            today_weekday = cur_ist.weekday()
             is_expiry_day = (
                 (underlying in ["NIFTY", "BANKNIFTY"] and today_weekday == 1) or
                 (underlying == "SENSEX" and today_weekday == 3)

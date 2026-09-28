@@ -139,11 +139,11 @@ class TradingOrchestrator:
         while True:
             try:
                 await asyncio.sleep(15)
-                from datetime import datetime
-                now = datetime.now()
+                from smartapi_trader.utils.tz import now_ist
+                now = now_ist()
                 now_str = now.strftime("%Y-%m-%d")
                 
-                # Check target EOD time (default 15:15)
+                # Check target EOD time (default 15:15 IST)
                 eod_time_str = self.settings.get("telegram", {}).get("eod_report_time", "15:15")
                 parts = eod_time_str.split(":")
                 target_hour = int(parts[0])

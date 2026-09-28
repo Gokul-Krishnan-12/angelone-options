@@ -9,6 +9,7 @@ import urllib.request
 import urllib.error
 import concurrent.futures
 from typing import Any, Dict, List, Optional, Tuple
+from smartapi_trader.utils.tz import now_ist
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,7 @@ class TelegramNotifier:
 
         risk_pts = max(0.1, entry_price - stop_loss)
         risk_pct = (risk_pts / entry_price * 100.0) if entry_price > 0 else 0.0
-        now_str = datetime.datetime.now().strftime("%H:%M:%S")
+        now_str = now_ist().strftime("%H:%M:%S")
 
         dir_icon = "🟢" if "CE" in opt_type else "🔴"
         mode_tag = "📝 PAPER SIMULATED" if mode == "PAPER" else "⚡ ANGEL ONE LIVE"
@@ -140,7 +141,7 @@ class TelegramNotifier:
         gain_pts = float(trade.get("gain_pts", 0.0) or 0.0)
         pnl = float(trade.get("pnl", 0.0) or 0.0)
         mode = trade.get("mode", "PAPER")
-        now_str = datetime.datetime.now().strftime("%H:%M:%S")
+        now_str = now_ist().strftime("%H:%M:%S")
 
         message = (
             f"🎯 <b>TARGET 1 HIT (+1.8R) — PARTIAL GAINS BOOKED</b>\n\n"
@@ -161,7 +162,7 @@ class TelegramNotifier:
         symbol = trade.get("symbol", "N/A")
         be_price = float(trade.get("entry_price", 0.0) or 0.0)
         current_ltp = float(trade.get("current_ltp", 0.0) or 0.0)
-        now_str = datetime.datetime.now().strftime("%H:%M:%S")
+        now_str = now_ist().strftime("%H:%M:%S")
 
         message = (
             f"🛡 <b>RISK FREE: STOP-LOSS MOVED TO BREAKEVEN</b>\n\n"
@@ -187,7 +188,7 @@ class TelegramNotifier:
         net_pnl = float(trade.get("net_pnl", gross_pnl - total_charges))
         reason = str(trade.get("reason", "TARGET")).upper()
         mode = trade.get("mode", "PAPER")
-        now_str = datetime.datetime.now().strftime("%H:%M:%S")
+        now_str = now_ist().strftime("%H:%M:%S")
 
         is_profit = net_pnl >= 0
         if is_profit:
@@ -217,7 +218,7 @@ class TelegramNotifier:
 
     def notify_panic_triggered(self, reason: str = "Operator Manual Panic"):
         """Emergency circuit breaker notification."""
-        now_str = datetime.datetime.now().strftime("%H:%M:%S")
+        now_str = now_ist().strftime("%H:%M:%S")
         message = (
             f"🚨 <b>EMERGENCY CIRCUIT BREAKER ACTIVATED</b>\n\n"
             f"⚠️ <b>Action:</b> Panic switch triggered! All open options positions liquidated at market.\n"
@@ -235,8 +236,8 @@ class TelegramNotifier:
         if not self.enabled:
             return
 
-        date_str = datetime.datetime.now().strftime("%d %b %Y")
-        now_str = datetime.datetime.now().strftime("%H:%M:%S")
+        date_str = now_ist().strftime("%d %b %Y")
+        now_str = now_ist().strftime("%H:%M:%S")
         mode = mode_override or state_mgr.execution_mode
 
         is_paper = (mode == "PAPER")
