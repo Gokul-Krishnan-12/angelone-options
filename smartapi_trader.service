@@ -1,0 +1,16 @@
+[Unit]
+Description=SmartAPI Index Options Algorithmic Engine & Web Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=trader
+WorkingDirectory=/opt/smartapi_trader
+ExecStart=/opt/smartapi_trader/venv/bin/python main.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/smartapi_trader/output.log
+StandardError=append:/var/log/smartapi_trader/error.log
+
+[Install]
+WantedBy=multi-user.target

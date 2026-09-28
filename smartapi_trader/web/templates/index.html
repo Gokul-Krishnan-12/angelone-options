@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SmartAPI Sniper // Quantitative Index Options Trading Engine</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+  <!-- Top Header Control Bar -->
+  <header class="top-header">
+    <div class="brand-wrapper">
+      <div class="brand-badge">ILSME v2.0</div>
+      <div>
+        <div class="brand-title">ANGEL ONE SMARTAPI SNIPER</div>
+        <div class="brand-subtitle">Low-Frequency Index Options Algorithmic Execution Plane</div>
+      </div>
+    </div>
+
+    <div class="header-actions">
+      <!-- Heartbeat & Latency Indicator -->
+      <div class="heartbeat-pill">
+        <span class="pulse-dot" id="heartbeat-dot"></span>
+        <span id="ws-status-text" class="mono font-semibold">FEED CONNECTED</span>
+        <span class="mono text-dim">|</span>
+        <span id="latency-text" class="mono text-dim">12ms</span>
+      </div>
+
+      <!-- Prominent Mode Switcher Toggle -->
+      <button id="mode-btn" class="mode-toggle-btn mode-paper" onclick="openModeModal()">
+        <span class="pulse-dot"></span>
+        PAPER TRADING [Simulated]
+      </button>
+
+      <!-- Global Panic Kill Switch -->
+      <button class="panic-btn" onclick="openPanicModal()">
+        <svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
+        PANIC / KILL SWITCH
+      </button>
+    </div>
+  </header>
+
+  <!-- Emergency Panic Alert Banner -->
+  <div id="panic-indicator" style="display: none; background: rgba(255,23,68,0.2); border-bottom: 1px solid #ff1744; padding: 0.75rem 1.5rem; text-align: center;">
+    <span class="mono font-bold" style="color: #ff5252; margin-right: 1rem;">⚠️ EMERGENCY PANIC ACTIVE — STRATEGY HALTED & ALL POSITIONS LIQUIDATED</span>
+    <button class="reset-panic-btn" onclick="resetPanic()">Clear Panic & Resume Strategy</button>
+  </div>
+
+  <main class="dashboard-container">
+
+    <!-- METRICS HUD -->
+    <section class="metrics-hud">
+      <!-- Real-time P&L -->
+      <div class="card">
+        <div class="card-title">
+          <span>Real-Time Intraday P&L</span>
+          <span class="mono" id="hud-pnl-pct">+0.00%</span>
+        </div>
+        <div class="metric-value mono text-profit" id="hud-pnl">+₹0.00</div>
+        <div class="metric-subtitle">Net Realized + Unrealized Options P&L</div>
+      </div>
+
+      <!-- Account Equity -->
+      <div class="card">
+        <div class="card-title">
+          <span>Account Equity</span>
+          <span class="brand-badge">CAPITAL</span>
+        </div>
+        <div class="metric-value mono" id="hud-equity">₹100,000.00</div>
+        <div class="metric-subtitle">Total Portfolio Valuation</div>
+      </div>
+
+      <!-- Available Margin -->
+      <div class="card">
+        <div class="card-title">
+          <span>Available Margin</span>
+          <span class="mono text-dim">RMS</span>
+        </div>
+        <div class="metric-value mono" id="hud-margin">₹100,000.00</div>
+        <div class="metric-subtitle">Free Cash for Intraday Buying</div>
+      </div>
+
+      <!-- Daily Drawdown Gauge -->
+      <div class="card">
+        <div class="card-title">
+          <span>Daily Risk Monitor</span>
+          <span class="mono" style="color: #ff5252;">Max Limit: 3.0%</span>
+        </div>
+        <div class="metric-value mono" id="hud-drawdown">0.00%</div>
+        <div class="drawdown-bar-track">
+          <div class="drawdown-bar-fill" id="drawdown-fill"></div>
+          <div class="drawdown-threshold-marker"></div>
+        </div>
+        <div class="metric-subtitle">Circuit breaker triggers liquidation at 3.0%</div>
+      </div>
+
+      <!-- Trade Budget Counter -->
+      <div class="card">
+        <div class="card-title">
+          <span>Daily Trade Quota</span>
+          <span class="brand-badge">ILSME</span>
+        </div>
+        <div class="metric-value mono" id="hud-trades-counter" style="font-size: 1.45rem;">0 of 2 Trades Taken</div>
+        <div class="trade-slots">
+          <div class="slot-dot" id="slot-1"></div>
+          <div class="slot-dot" id="slot-2"></div>
+        </div>
+        <div class="metric-subtitle">Strict 2 setups/day preserves edge & reduces churn</div>
+      </div>
+    </section>
+
+    <!-- MARKET RADAR & SNIPER SIGNAL MONITOR -->
+    <section class="radar-grid">
+      <!-- Underlying Spot Tickers -->
+      <div class="card">
+        <div class="card-title">
+          <span>Market Radar // Spot Indices Telemetry</span>
+          <span class="mono text-dim">NSE / BSE Live</span>
+        </div>
+        <div class="index-ticker-row">
+          <!-- Nifty 50 -->
+          <div class="index-box">
+            <div class="index-name">
+              <span>NIFTY 50</span>
+              <span class="brand-badge">WEEKLY</span>
+            </div>
+            <div class="index-price mono" id="spot-NIFTY">24,850.00</div>
+            <div class="index-levels mono">
+              <span id="vwap-NIFTY">VWAP: 24,845.00</span>
+              <span id="range-NIFTY">PDH: 24,950 | PDL: 24,720</span>
+            </div>
+          </div>
+
+          <!-- Bank Nifty -->
+          <div class="index-box">
+            <div class="index-name">
+              <span>BANK NIFTY</span>
+              <span class="brand-badge" style="background:#ffab00; color:#000;">MONTHLY</span>
+            </div>
+            <div class="index-price mono" id="spot-BANKNIFTY">52,400.00</div>
+            <div class="index-levels mono">
+              <span id="vwap-BANKNIFTY">VWAP: 52,380.00</span>
+              <span id="range-BANKNIFTY">PDH: 52,700 | PDL: 52,100</span>
+            </div>
+          </div>
+
+          <!-- Sensex -->
+          <div class="index-box">
+            <div class="index-name">
+              <span>BSE SENSEX</span>
+              <span class="brand-badge">WEEKLY</span>
+            </div>
+            <div class="index-price mono" id="spot-SENSEX">81,200.00</div>
+            <div class="index-levels mono">
+              <span id="vwap-SENSEX">VWAP: 81,180.00</span>
+              <span id="range-SENSEX">PDH: 81,600 | PDL: 80,800</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Sniper Strategy State Machine Monitor -->
+      <div class="card strategy-status-card">
+        <div class="card-title">
+          <span>Sniper State Machine // ILSME</span>
+          <span class="mono text-dim">15m Macro + 3m Micro</span>
+        </div>
+
+        <div style="font-size: 0.95rem; font-weight: 600; color: var(--neon-cyan); margin-top: 0.25rem;" id="strategy-status-text">
+          Scanning for Liquidity Sweep
+        </div>
+
+        <div class="state-step-container">
+          <div class="state-step active" id="step-scan">1. Scanning</div>
+          <div class="state-step" id="step-sweep">2. Sweep</div>
+          <div class="state-step" id="step-fvg">3. FVG Armed</div>
+          <div class="state-step" id="step-trade">4. In Trade</div>
+        </div>
+
+        <div>
+          <div style="font-size: 0.72rem; color: var(--text-dim); text-transform: uppercase; margin-bottom: 0.35rem;">Operator Trigger Simulator</div>
+          <div class="test-triggers">
+            <button class="btn-trigger" onclick="triggerTestSignal('NIFTY', 'BUY_CE')">Trigger Nifty Call</button>
+            <button class="btn-trigger" onclick="triggerTestSignal('NIFTY', 'BUY_PE')">Trigger Nifty Put</button>
+            <button class="btn-trigger" onclick="triggerTestSignal('BANKNIFTY', 'BUY_CE')">Trigger BNF Call</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ACTIVE POSITIONS & WORKING ORDERS -->
+    <section class="card">
+      <div class="card-title">
+        <span>Active Derivatives Exposure & Bracket Management</span>
+        <span class="mono text-dim">Live Delta 0.50-0.55 Contracts</span>
+      </div>
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>Contract Symbol</th>
+              <th>Type</th>
+              <th>Lots (Units)</th>
+              <th>Entry Price</th>
+              <th>Live LTP</th>
+              <th>Unrealized P&L</th>
+              <th>Stop Loss (Displacement)</th>
+              <th>Target 1 (+2.0R)</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="positions-body">
+            <tr>
+              <td colspan="9" style="text-align:center; color: var(--text-dim); padding: 2rem;">
+                No active options positions. Waiting for Institutional Sweep setup.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- WORKING ORDERS & EVENT LOG -->
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem;">
+      <!-- Orders Table -->
+      <section class="card">
+        <div class="card-title">
+          <span>Execution Order Book</span>
+          <span class="mono text-dim">Audit Trail</span>
+        </div>
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>Order ID</th>
+                <th>Symbol</th>
+                <th>Type</th>
+                <th>Quantity @ Price</th>
+                <th>Status</th>
+                <th>Time</th>
+              </tr>
+            </thead>
+            <tbody id="orders-body">
+              <tr>
+                <td colspan="6" style="text-align:center; color: var(--text-dim); padding: 1.5rem;">
+                  No recent orders.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Live Event Console Log -->
+      <section class="card">
+        <div class="card-title">
+          <span>Live Execution Event Console</span>
+          <span class="mono text-dim">Loguru Telemetry</span>
+        </div>
+        <div class="console-box" id="console-logs">
+          <div class="log-line mono">
+            <span class="log-time">[BOOT]</span>
+            <span class="log-level-INFO">[SYSTEM]</span>
+            <span>SmartAPI Quantitative Index Options Execution Engine initialized.</span>
+          </div>
+        </div>
+      </section>
+    </div>
+
+  </main>
+
+  <!-- Mode Confirmation Modal -->
+  <div class="modal-overlay" id="mode-modal">
+    <div class="modal-box">
+      <div class="modal-title">Confirm Execution Mode Switch</div>
+      <div class="modal-desc" id="mode-warning-text">
+        Are you sure you want to change the active execution venue?
+      </div>
+      <div class="modal-actions">
+        <button class="btn-secondary" onclick="closeModeModal()">Cancel</button>
+        <button class="btn-danger" id="confirm-mode-btn" onclick="confirmModeChange()">Confirm Switch to <span id="target-mode-name"></span></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Panic Confirmation Modal -->
+  <div class="modal-overlay" id="panic-modal">
+    <div class="modal-box" style="border-color: #ff1744;">
+      <div class="modal-title" style="color: #ff1744;">⚠️ ACTIVATE GLOBAL EMERGENCY PANIC?</div>
+      <div class="modal-desc">
+        This action will immediately bypass all queues, cancel all open working broker orders, execute emergency market liquidations on active positions, and halt the strategy runner.
+      </div>
+      <div class="modal-actions">
+        <button class="btn-secondary" onclick="closePanicModal()">Cancel</button>
+        <button class="btn-danger" onclick="confirmPanic()">CONFIRM EMERGENCY SQUARED-OFF</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/dashboard.js"></script>
+</body>
+</html>

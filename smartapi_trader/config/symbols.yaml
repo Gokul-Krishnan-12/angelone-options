@@ -1,0 +1,43 @@
+# =====================================================================
+# Index Derivatives Specification & Mapping Table
+# =====================================================================
+
+indices:
+  NIFTY:
+    symbol: "NIFTY"
+    name: "Nifty 50"
+    spot_token: "99926000"
+    exchange: "NSE"
+    deriv_exchange: "NFO"
+    lot_size: 65
+    strike_interval: 50
+    tick_size: 0.05
+    expiry_cycle: "WEEKLY"
+    token_prefix: "NIFTY"
+    is_active: true
+
+  BANKNIFTY:
+    symbol: "BANKNIFTY"
+    name: "Bank Nifty"
+    spot_token: "99926009"
+    exchange: "NSE"
+    deriv_exchange: "NFO"
+    lot_size: 30
+    strike_interval: 100
+    tick_size: 0.05
+    expiry_cycle: "MONTHLY" # Under SEBI rules, Bank Nifty is monthly only
+    token_prefix: "BANKNIFTY"
+    is_active: true
+
+  SENSEX:
+    symbol: "SENSEX"
+    name: "BSE Sensex"
+    spot_token: "99919000"
+    exchange: "BSE"
+    deriv_exchange: "BFO"
+    lot_size: 20
+    strike_interval: 100
+    tick_size: 0.05
+    expiry_cycle: "WEEKLY"
+    token_prefix: "SENSEX"
+    is_active: true

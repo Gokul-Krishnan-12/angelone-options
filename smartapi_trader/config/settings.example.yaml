@@ -1,0 +1,80 @@
+broker:
+  api_key: "YOUR_SMARTAPI_API_KEY"
+  base_url: https://apiconnect.angelbroking.com
+  client_code: "YOUR_CLIENT_CODE"
+  feed_token: ''
+  jwt_token: ''
+  max_reconnect_attempts: 10
+  pin: "YOUR_PIN"
+  rate_limit_orders_per_sec: 10
+  reconnect_delay_seconds: 5
+  refresh_token: ''
+  totp_secret: "YOUR_BASE32_TOTP_SECRET"
+  websocket_url: wss://smartapisocket.angelone.in/smart-stream
+data:
+  db_path: data/instruments.db
+  premarket_download_time: 08:30
+  scrip_master_url: https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json
+  storage_db_path: data/trading_storage.db
+execution:
+  execution_mode: PAPER
+  max_slippage_pct: 2.0
+  paper_initial_capital: 50000.0
+  simulated_latency_ms: 200
+  slippage_factor: 0.2
+risk:
+  breakeven_mode: STRUCTURAL_SWING_BREAK
+  breakeven_trigger_r: 0.8
+  consecutive_loss_limit: 2
+  correlation_guard: true
+  dynamic_sl_buffer: true
+  expiry_0dte_block_until: '13:00'
+  ignore_time_filter_in_paper: true
+  initial_sl_percent: 0.1
+  mandatory_square_off: '15:12'
+  market_close_time: '15:30'
+  market_open_time: 09:15
+  max_daily_drawdown_pct: 0.03
+  max_sl_buffer_pct: 0.055
+  max_trades_per_day: 2
+  midday_chop_filter_end: '13:30'
+  midday_chop_filter_start: '11:15'
+  min_capital_required: 50000.0
+  min_sl_buffer_pct: 0.035
+  partial_exit_qty_pct: 0.6
+  partial_exit_r: 1.8
+  risk_per_trade_pct: 0.015
+  stagnation_timeout_mins: 45
+  structural_swing_break_confirmation: true
+  trail_remainder_swing: true
+strategy:
+  active_indices:
+  - NIFTY
+  - BANKNIFTY
+  - SENSEX
+  fvg_min_points: 2.5
+  macro_timeframe_minutes: 15
+  max_bid_ask_spread_pct: 1.5
+  micro_timeframe_minutes: 3
+  min_open_interest: 50000
+  min_wick_ratio: 0.35
+  name: ILSME_Sniper
+  preferred_delta_max: 0.6
+  preferred_delta_min: 0.48
+  volume_expansion_multiplier: 1.8
+  volume_sma_period: 20
+telegram:
+  bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
+  chat_id: "YOUR_TELEGRAM_CHAT_ID"
+  enable_bot_commands: true
+  enabled: false
+  eod_report_time: '15:15'
+  notify_on_breakeven: true
+  notify_on_session_end: true
+  notify_on_tp1: true
+  notify_on_trade_entry: true
+  notify_on_trade_exit: true
+web:
+  host: 0.0.0.0
+  port: 5000
+  reload: false
