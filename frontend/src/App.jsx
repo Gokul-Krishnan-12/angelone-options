@@ -12,6 +12,7 @@ import ActivityLog from './pages/ActivityLog';
 import SystemWorkflow from './pages/SystemWorkflow';
 import ApiKeysModal from './components/ApiKeysModal';
 import { PanicModal } from './components/Modals';
+import Login from './components/Login';
 
 export default function App() {
   const [state, setState] = useState({
@@ -62,13 +63,65 @@ export default function App() {
     },
   ]);
 
+  const [isAuthenticated, setIsAuthenticated] = useState(null);
+  const [token, setToken] = useState(() => localStorage.getItem('sniper_session_token') || '');
+
   const wsRef = useRef(null);
   const pingTimestampRef = useRef(0);
   const heartbeatTimerRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const isMountedRef = useRef(true);
 
+  // Check existing session on mount
   useEffect(() => {
+    checkAuthStatus();
+  }, []);
+
+  const checkAuthStatus = async () => {
+    try {
+      const curToken = localStorage.getItem('sniper_session_token') || '';
+      const res = await fetch('/api/auth/status', {
+        headers: curToken ? { Authorization: `Bearer ${curToken}` } : {},
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setIsAuthenticated(Boolean(data.authenticated));
+      } else {
+        setIsAuthenticated(false);
+      }
+    } catch (e) {
+      setIsAuthenticated(false);
+    }
+  };
+
+  const handleLoginSuccess = (newToken) => {
+    localStorage.setItem('sniper_session_token', newToken);
+    setToken(newToken);
+    setIsAuthenticated(true);
+  };
+
+  const handleLogout = async () => {
+    try {
+      const curToken = token || localStorage.getItem('sniper_session_token') || '';
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: curToken ? { Authorization: `Bearer ${curToken}` } : {},
+      });
+    } catch (e) {
+      console.error('Logout error:', e);
+    }
+    localStorage.removeItem('sniper_session_token');
+    setToken('');
+    setIsAuthenticated(false);
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+  };
+
+  // Main data polling & telemetry stream (active only when authenticated)
+  useEffect(() => {
+    if (!isAuthenticated) return;
     isMountedRef.current = true;
     fetchState();
     checkBrokerConfig();
@@ -91,7 +144,7 @@ export default function App() {
         wsRef.current = null;
       }
     };
-  }, []);
+  }, [isAuthenticated]);
 
   const checkBrokerConfig = async () => {
     try {
@@ -126,8 +179,9 @@ export default function App() {
 
   const setupWebSocket = () => {
     if (!isMountedRef.current) return;
+    const curToken = token || localStorage.getItem('sniper_session_token') || '';
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/telemetry`;
+    const wsUrl = `${protocol}//${window.location.host}/ws/telemetry${curToken ? `?token=${encodeURIComponent(curToken)}` : ''}`;
 
     try {
       if (wsRef.current) {
@@ -395,6 +449,23 @@ export default function App() {
     }
   };
 
+  // Security gate: Loading state
+  if (isAuthenticated === null) {
+    return (
+      <div className="login-viewport" style={{ background: 'var(--bg-dark)' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.9rem' }}>
+          <div className="pulse-dot" style={{ width: 14, height: 14, background: 'var(--accent-orange)' }} />
+          <span className="mono text-muted" style={{ fontSize: '0.8rem' }}>Verifying 2FA session status...</span>
+        </div>
+      </div>
+    );
+  }
+
+  // Security gate: Unauthenticated state -> render Login Screen
+  if (isAuthenticated === false) {
+    return <Login onLoginSuccess={handleLoginSuccess} />;
+  }
+
   return (
     <BrowserRouter>
       <div className="app-shell">
@@ -414,6 +485,7 @@ export default function App() {
             onRefreshBalance={handleRefreshBalance}
             onOpenPanic={() => setIsPanicModalOpen(true)}
             isRefreshingBalance={isRefreshingBalance}
+            onLogout={handleLogout}
           />
 
           {/* Panic Override Warning Banner */}

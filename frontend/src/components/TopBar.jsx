@@ -1,5 +1,5 @@
 import React from 'react';
-import { ShieldAlert, Play, Pause, RefreshCw, Wallet, Zap } from 'lucide-react';
+import { ShieldAlert, Play, Pause, RefreshCw, Wallet, Zap, LogOut } from 'lucide-react';
 import { formatINR } from './MetricsHud';
 
 export default function TopBar({
@@ -12,7 +12,8 @@ export default function TopBar({
   onPauseReal,
   onRefreshBalance,
   onOpenPanic,
-  isRefreshingBalance
+  isRefreshingBalance,
+  onLogout
 }) {
   const isPaper = state.execution_mode === 'PAPER';
   const isLive = state.execution_mode === 'LIVE';
@@ -81,6 +82,37 @@ export default function TopBar({
         <button className="panic-button" onClick={onOpenPanic} title="Emergency Kill Switch">
           <ShieldAlert size={13} />
           <span>Panic</span>
+        </button>
+
+        {/* 2FA Logout Button */}
+        <button
+          className="logout-button"
+          onClick={onLogout}
+          title="Lock / Logout of terminal"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.35rem',
+            background: 'var(--bg-surface-elevated)',
+            border: '1px solid var(--border-light)',
+            color: 'var(--text-muted)',
+            borderRadius: '6px',
+            padding: '0.4rem 0.65rem',
+            fontSize: '0.72rem',
+            cursor: 'pointer',
+            transition: 'all 0.15s ease',
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.color = 'var(--accent-orange)';
+            e.currentTarget.style.borderColor = 'rgba(237, 76, 34, 0.4)';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.color = 'var(--text-muted)';
+            e.currentTarget.style.borderColor = 'var(--border-light)';
+          }}
+        >
+          <LogOut size={12} />
+          <span>Lock</span>
         </button>
       </div>
     </header>

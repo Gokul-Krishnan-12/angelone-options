@@ -1,10 +1,14 @@
 import os
 import json
+import time
+import secrets
 import asyncio
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -13,12 +17,6 @@ from smartapi_trader.core.event_bus import EventBus
 from smartapi_trader.core.state_manager import StateManager
 from smartapi_trader.core.events import EventType, BaseEvent
 from smartapi_trader.utils.logger import logger, add_log_listener, remove_log_listener
-
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
 
 # Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -119,6 +117,185 @@ async def serve_dashboard(request: Request):
         return FileResponse(react_index)
     snapshot = ctx.state_manager.get_snapshot() if ctx.state_manager else {}
     return templates.TemplateResponse(request=request, name="index.html", context={"snapshot": snapshot})
+
+# ==========================================
+# 2FA TELEGRAM AUTHENTICATION & SESSIONS
+# ==========================================
+AUTH_TOKEN_COOKIE = "sniper_session_token"
+valid_sessions: Dict[str, float] = {}  # token -> expires_at
+otp_store: Dict[str, Any] = {
+    "code": None,
+    "expires_at": 0.0,
+    "last_sent_at": 0.0,
+    "attempts": 0,
+}
+
+def verify_authenticated_request(request: Request) -> bool:
+    auth_header = request.headers.get("Authorization", "")
+    token = None
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:].strip()
+    if not token:
+        token = request.cookies.get(AUTH_TOKEN_COOKIE)
+    if not token:
+        return False
+    exp = valid_sessions.get(token)
+    if not exp or time.time() > exp:
+        valid_sessions.pop(token, None)
+        return False
+    return True
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    # Allow non-API routes (frontend SPA, static assets, templates) and auth routes
+    if not path.startswith("/api/") or path.startswith("/api/auth/"):
+        return await call_next(request)
+    
+    if not verify_authenticated_request(request):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Authentication required. Please verify via Telegram OTP."}
+        )
+    return await call_next(request)
+
+class VerifyOTPRequest(BaseModel):
+    otp: str
+
+@app.get("/api/auth/status")
+async def auth_status(request: Request):
+    """Checks whether the current user is authenticated."""
+    is_auth = verify_authenticated_request(request)
+    return {"authenticated": is_auth}
+
+@app.post("/api/auth/send_otp")
+async def send_login_otp(request: Request):
+    """Generates a secure 6-digit OTP and delivers it via Telegram."""
+    now = time.time()
+    # Rate limit: 25 seconds cooldown between resends
+    if now - otp_store.get("last_sent_at", 0) < 25:
+        remaining = int(25 - (now - otp_store.get("last_sent_at", 0)))
+        raise HTTPException(
+            status_code=429,
+            detail=f"Please wait {remaining} seconds before requesting a new code."
+        )
+
+    code = f"{secrets.randbelow(900000) + 100000}"
+    otp_store["code"] = code
+    otp_store["expires_at"] = now + 300  # 5 minutes
+    otp_store["last_sent_at"] = now
+    otp_store["attempts"] = 0
+
+    client_ip = (request.headers.get("x-forwarded-for") or (request.client.host if request.client else "unknown")).split(",")[0].strip()
+    time_str = datetime.now().strftime("%I:%M:%S %p")
+
+    msg = (
+        f"🔐 <b>Angel One Sniper Web Access</b>\n\n"
+        f"Your One-Time Passcode (OTP):\n"
+        f"👉 <code>{code}</code> 👈\n\n"
+        f"⏱ Valid for: <b>5 minutes</b>\n"
+        f"🌐 IP: <code>{client_ip}</code>\n"
+        f"⏰ Time: <code>{time_str}</code>\n\n"
+        f"<i>Enter this code in your browser to access the control plane.</i>"
+    )
+
+    notifier = ctx.notifier
+    if not notifier:
+        cfg_path = os.path.join(BASE_DIR, "../config/settings.yaml")
+        if os.path.exists(cfg_path):
+            import yaml
+            with open(cfg_path, "r") as f:
+                cfg = yaml.safe_load(f)
+                from smartapi_trader.utils.telegram_notifier import TelegramNotifier
+                notifier = TelegramNotifier(cfg.get("telegram", {}))
+
+    if not notifier or not notifier.bot_token or not notifier.chat_id:
+        raise HTTPException(
+            status_code=500,
+            detail="Telegram notifier is not configured. Please check telegram.bot_token and chat_id in settings.yaml."
+        )
+
+    ok, err = notifier.send_message_sync(msg)
+    if not ok:
+        logger.error(f"[AUTH] Failed to send Telegram OTP: {err}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to deliver code to Telegram: {err}"
+        )
+
+    cid = notifier.chat_id
+    masked_cid = f"...{cid[-4:]}" if len(cid) > 4 else cid
+    return {
+        "status": "success",
+        "message": f"Passcode sent to Telegram (Chat ID ending in {masked_cid})",
+        "expires_in": 300,
+        "cooldown": 25,
+    }
+
+@app.post("/api/auth/verify_otp")
+async def verify_login_otp(req: VerifyOTPRequest, request: Request):
+    """Validates the 6-digit OTP and issues a persistent session token."""
+    now = time.time()
+    if not otp_store.get("code") or now > otp_store.get("expires_at", 0):
+        raise HTTPException(
+            status_code=400,
+            detail="Verification code has expired or was not requested. Please click 'Send Code' again."
+        )
+
+    if otp_store.get("attempts", 0) >= 5:
+        otp_store["code"] = None
+        raise HTTPException(
+            status_code=400,
+            detail="Too many incorrect attempts. Passcode invalidated. Please request a new code."
+        )
+
+    user_code = req.otp.strip()
+    if user_code != otp_store.get("code"):
+        otp_store["attempts"] = otp_store.get("attempts", 0) + 1
+        rem = 5 - otp_store["attempts"]
+        raise HTTPException(
+            status_code=400,
+            detail=f"Incorrect verification code. {rem} attempt(s) remaining."
+        )
+
+    # Valid! Issue session token
+    token = secrets.token_urlsafe(32)
+    valid_sessions[token] = now + (86400 * 30)  # 30 days validity
+    otp_store["code"] = None  # Consume OTP
+
+    client_ip = (request.headers.get("x-forwarded-for") or (request.client.host if request.client else "unknown")).split(",")[0].strip()
+    logger.info(f"[AUTH] Successful operator login from IP {client_ip}.")
+
+    response = JSONResponse(content={
+        "status": "success",
+        "message": "Authentication successful",
+        "token": token
+    })
+    response.set_cookie(
+        key=AUTH_TOKEN_COOKIE,
+        value=token,
+        max_age=86400 * 30,
+        httponly=True,
+        samesite="lax",
+        path="/"
+    )
+    return response
+
+@app.post("/api/auth/logout")
+async def logout(request: Request):
+    """Terminates session and clears credentials."""
+    auth_header = request.headers.get("Authorization", "")
+    token = None
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:].strip()
+    if not token:
+        token = request.cookies.get(AUTH_TOKEN_COOKIE)
+    if token:
+        valid_sessions.pop(token, None)
+
+    response = JSONResponse(content={"status": "success", "message": "Logged out successfully"})
+    response.delete_cookie(key=AUTH_TOKEN_COOKIE, path="/")
+    return response
 
 @app.get("/api/state")
 async def get_state():
@@ -709,6 +886,11 @@ async def send_telegram_eod():
 @app.websocket("/ws/telemetry")
 async def websocket_telemetry_endpoint(websocket: WebSocket):
     """High-frequency WebSocket channel streaming live telemetry and tick updates to UI."""
+    token = websocket.query_params.get("token") or websocket.cookies.get(AUTH_TOKEN_COOKIE)
+    if not token or token not in valid_sessions or time.time() > valid_sessions[token]:
+        await websocket.close(code=4401)
+        return
+
     await ws_manager.connect(websocket)
     try:
         # Send initial full snapshot on connection
