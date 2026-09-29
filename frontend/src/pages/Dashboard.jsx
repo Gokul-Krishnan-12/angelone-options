@@ -269,6 +269,8 @@ export default function Dashboard({
         <PositionsTable
           positions={positions}
           onExitPosition={onExitPosition}
+          showVenueTabs={true}
+          title="Active Derivatives Exposure (Portfolio Overview)"
         />
       ) : (
         <div className="hud-card">

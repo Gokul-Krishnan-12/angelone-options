@@ -976,4 +976,336 @@ body {
   margin-top: 0.2rem;
 }
 
+/* =========================================================================
+   Mobile Hamburger & Drawer Navigation
+   ========================================================================= */
+
+.mobile-hamburger-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  background: var(--bg-surface-elevated);
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  color: var(--text-main);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.mobile-hamburger-btn:hover {
+  background: var(--bg-surface-hover);
+  border-color: var(--border-medium);
+  color: var(--accent-orange);
+}
+
+.sidebar-close-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-muted);
+  cursor: pointer;
+  margin-left: auto;
+}
+
+.sidebar-close-btn:hover {
+  color: #fff;
+  background: var(--bg-surface-hover);
+}
+
+.sidebar-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(4px);
+  z-index: 998;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+}
+
+.sidebar-backdrop.show {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.btn-label-desktop {
+  display: inline;
+}
+
+.btn-label-mobile {
+  display: none;
+}
+
+/* =========================================================================
+   Live Derivatives Exposure Table & P&L Stream Elements
+   ========================================================================= */
+
+.live-feed-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.22rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.22);
+  color: var(--accent-emerald);
+}
+
+.live-pulse-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-emerald);
+  animation: live-pulse 1.5s infinite ease-in-out;
+}
+
+@keyframes live-pulse {
+  0%, 100% {
+    opacity: 0.4;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.2);
+    box-shadow: 0 0 6px rgba(16, 185, 129, 0.8);
+  }
+}
+
+.btn-refresh-ltp {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: var(--bg-surface-elevated);
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  color: var(--text-main);
+  padding: 0.3rem 0.65rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-refresh-ltp:hover:not(:disabled) {
+  background: var(--bg-surface-hover);
+  border-color: rgba(237, 76, 34, 0.4);
+  color: var(--accent-orange);
+}
+
+.btn-refresh-ltp:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.spin-anim {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  100% { transform: rotate(360deg); }
+}
+
+.positions-pnl-summary-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.55rem 0.85rem;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  margin-bottom: 0.85rem;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.venue-filter-group {
+  display: flex;
+  gap: 0.25rem;
+  background: #141312;
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  padding: 2px;
+}
+
+.venue-filter-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0.22rem 0.5rem;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.venue-filter-btn:hover {
+  color: #fff;
+}
+
+.venue-filter-btn.active {
+  background: rgba(237, 76, 34, 0.15);
+  color: var(--accent-orange);
+}
+
+.venue-pill {
+  display: inline-block;
+  padding: 0.18rem 0.45rem;
+  border-radius: 4px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+/* =========================================================================
+   Responsive Media Queries for Mobile & Tablet
+   ========================================================================= */
+
+@media (max-width: 850px) {
+  .app-shell {
+    flex-direction: column;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 260px;
+    height: 100vh;
+    transform: translateX(-100%);
+    transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+    z-index: 1000;
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.75);
+    background: #141312;
+  }
+
+  .sidebar.mobile-open {
+    transform: translateX(0);
+  }
+
+  .sidebar-backdrop {
+    display: block;
+  }
+
+  .sidebar-close-btn {
+    display: flex;
+  }
+
+  .mobile-hamburger-btn {
+    display: flex;
+  }
+
+  .top-bar {
+    padding: 0.5rem 0.85rem;
+    height: auto;
+    min-height: 52px;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .top-bar-left {
+    gap: 0.65rem;
+  }
+
+  .top-bar-right {
+    gap: 0.5rem;
+  }
+
+  .page-container {
+    padding: 0.85rem 0.75rem;
+    gap: 1rem;
+  }
+
+  .grid-metrics {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .spot-grid, .index-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .grid-radar-sniper {
+    grid-template-columns: 1fr;
+  }
+
+  .bottom-status-bar {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.45rem;
+    padding: 0.65rem 0.85rem;
+    font-size: 0.68rem;
+    height: auto;
+  }
+
+  .bottom-status-bar > div {
+    flex-wrap: wrap;
+    gap: 0.75rem !important;
+  }
+
+  .table-wrapper {
+    -webkit-overflow-scrolling: touch;
+    border: 1px solid var(--border-light);
+    border-radius: 8px;
+  }
+
+  .fintech-table th, .fintech-table td {
+    padding: 0.55rem 0.65rem;
+    white-space: nowrap;
+  }
+}
+
+@media (max-width: 540px) {
+  .topbar-stream-text {
+    display: none;
+  }
+
+  .topbar-broker-badge {
+    font-size: 0.62rem;
+    padding: 0.15rem 0.4rem;
+  }
+
+  .btn-label-desktop {
+    display: none;
+  }
+
+  .btn-label-mobile {
+    display: inline;
+  }
+
+  .grid-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .panic-button span {
+    display: none;
+  }
+
+  .panic-button {
+    padding: 0.35rem 0.45rem;
+  }
+
+  .logout-button span {
+    display: none;
+  }
+
+  .logout-button {
+    padding: 0.35rem 0.45rem;
+  }
+
+  .balance-chip {
+    padding: 0.25rem 0.45rem;
+  }
+}
+
 

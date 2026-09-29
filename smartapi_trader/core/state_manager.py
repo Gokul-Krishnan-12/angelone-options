@@ -530,6 +530,8 @@ class StateManager:
             "is_halted": self.is_halted,
             "strategy_status": self.strategy_status,
             "positions": [pos.to_dict() for pos in self.positions.values() if pos.is_open],
+            "real_positions": [pos.to_dict() for pos in self.positions.values() if pos.is_open and not getattr(pos, 'is_paper', False) and getattr(pos, 'execution_mode', '') == 'LIVE'],
+            "paper_positions": [pos.to_dict() for pos in self.positions.values() if pos.is_open and (getattr(pos, 'is_paper', False) or getattr(pos, 'execution_mode', '') == 'PAPER')],
             "orders": [ord.to_dict() for ord in list(self.orders.values())[-20:]], # recent 20
             "completed_trades": self.completed_trades[-20:],
             "trade_history": self.trade_history[:50],

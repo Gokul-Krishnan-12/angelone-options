@@ -140,6 +140,8 @@ class PositionEvent(BaseEvent):
     swing_invalidation_level: float = 0.0 # 3m structural level to confirm breakeven
     partial_taken: bool = False
     is_open: bool = True
+    is_paper: bool = True
+    execution_mode: str = "PAPER"
 
 @dataclass
 class RiskAlertEvent(BaseEvent):

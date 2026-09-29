@@ -54,6 +54,7 @@ export default function App() {
   const [isPanicModalOpen, setIsPanicModalOpen] = useState(false);
   const [isConfigured, setIsConfigured] = useState(false);
   const [isConnectModalOpen, setIsConnectModalOpen] = useState(false);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   const [logs, setLogs] = useState([
     {
@@ -249,11 +250,14 @@ export default function App() {
         break;
       case 'TICK': {
         const tick = msg.data;
-        if (['99926000', '99926009', '99919000'].includes(tick.token)) {
+        if (!tick) break;
+        const tickToken = String(tick.token || '');
+
+        if (['99926000', '99926009', '99919000'].includes(tickToken)) {
           const key =
-            tick.token === '99926000'
+            tickToken === '99926000'
               ? 'NIFTY'
-              : tick.token === '99926009'
+              : tickToken === '99926009'
               ? 'BANKNIFTY'
               : 'SENSEX';
           setState((prev) => ({
@@ -266,6 +270,63 @@ export default function App() {
               },
             },
           }));
+        }
+
+        // Live dynamic option tick processing for open derivative positions
+        setState((prev) => {
+          let posChanged = false;
+          const updatedPositions = (prev.positions || []).map((pos) => {
+            if (String(pos.token) === tickToken || pos.symbol === tick.symbol) {
+              posChanged = true;
+              const newLtp = parseFloat(tick.ltp) || pos.current_ltp;
+              const entry = parseFloat(pos.entry_price) || 0;
+              const qty = parseInt(pos.quantity) || 0;
+              const diff = newLtp - entry;
+              const unrealized = Math.round(diff * qty * 100) / 100;
+              const unrealizedPct = entry > 0 ? Math.round((diff / entry) * 10000) / 100 : 0;
+              return {
+                ...pos,
+                current_ltp: newLtp,
+                unrealized_pnl: unrealized,
+                unrealized_pnl_pct: unrealizedPct,
+                last_tick_time: Date.now(),
+              };
+            }
+            return pos;
+          });
+
+          if (!posChanged) return prev;
+
+          const totalUnrealized = updatedPositions.reduce(
+            (sum, p) => sum + (parseFloat(p.unrealized_pnl) || 0),
+            0
+          );
+          return {
+            ...prev,
+            positions: updatedPositions,
+            unrealized_pnl: Math.round(totalUnrealized * 100) / 100,
+          };
+        });
+        break;
+      }
+      case 'POSITION_UPDATE': {
+        if (msg.data) {
+          setState((prev) => {
+            const pos = msg.data;
+            const existingIdx = (prev.positions || []).findIndex(
+              (p) => p.symbol === pos.symbol
+            );
+            let nextPositions;
+            if (pos.is_open === false) {
+              nextPositions = (prev.positions || []).filter((p) => p.symbol !== pos.symbol);
+            } else if (existingIdx >= 0) {
+              nextPositions = [...prev.positions];
+              nextPositions[existingIdx] = { ...nextPositions[existingIdx], ...pos };
+            } else {
+              nextPositions = [pos, ...(prev.positions || [])];
+            }
+            return { ...prev, positions: nextPositions };
+          });
         }
         break;
       }
@@ -469,8 +530,12 @@ export default function App() {
   return (
     <BrowserRouter>
       <div className="app-shell">
-        {/* Persistent Navigation Sidebar */}
-        <Sidebar state={state} />
+        {/* Persistent Navigation Sidebar with Mobile Drawer */}
+        <Sidebar
+          state={state}
+          isOpen={isMobileMenuOpen}
+          onClose={() => setIsMobileMenuOpen(false)}
+        />
 
         <div className="main-wrapper">
           {/* Persistent Top Header */}
@@ -486,6 +551,7 @@ export default function App() {
             onOpenPanic={() => setIsPanicModalOpen(true)}
             isRefreshingBalance={isRefreshingBalance}
             onLogout={handleLogout}
+            onToggleMobileMenu={() => setIsMobileMenuOpen((prev) => !prev)}
           />
 
           {/* Panic Override Warning Banner */}

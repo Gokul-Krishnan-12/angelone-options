@@ -120,6 +120,7 @@ class TradingOrchestrator:
         self.event_bus.subscribe(EventType.TICK, self.candle_aggregator.on_tick)
         self.event_bus.subscribe(EventType.TICK, self.strategy.on_tick)
         self.event_bus.subscribe(EventType.BAR, self.strategy.on_bar)
+        self.event_bus.subscribe(EventType.POSITION_UPDATE, self._on_position_update)
 
         # Inject context for Web UI
         ctx.event_bus = self.event_bus
@@ -132,6 +133,15 @@ class TradingOrchestrator:
         ctx.risk_manager = self.risk_manager
         ctx.notifier = self.notifier
         ctx.telegram_bot = self.telegram_bot
+
+    async def _on_position_update(self, event: Any):
+        """Dynamically registers WebSocket feed subscription for any opened options contract."""
+        if getattr(event, 'is_open', False) and getattr(event, 'token', None):
+            exch = getattr(event, 'exchange', '') or ("BFO" if "SENSEX" in getattr(event, 'symbol', '') else "NFO")
+            token_str = str(event.token)
+            symbol_str = str(event.symbol)
+            self.stream_client.subscribe(token=token_str, symbol=symbol_str, exchange=exch, mode=2)
+            logger.info(f"[ORCHESTRATOR] 🎯 Live tick subscription active for open position: {symbol_str} (Token: {token_str}, Exch: {exch})")
 
     async def _eod_monitor_loop(self):
         """Monitors clock and dispatches daily EOD report to Telegram at 15:15 IST."""
@@ -180,8 +190,9 @@ class TradingOrchestrator:
         # Re-subscribe to any active open positions recovered from storage for SL/TP management
         for sym, pos in self.state_mgr.positions.items():
             if pos.is_open and pos.token:
-                self.stream_client.subscribe(token=str(pos.token), symbol=sym, exchange="NFO", mode=2)
-                logger.info(f"[ORCHESTRATOR] 🛡️ Subscribed to recovered position: {sym} (Token: {pos.token})")
+                pos_exch = pos.exchange or ("BFO" if "SENSEX" in sym else "NFO")
+                self.stream_client.subscribe(token=str(pos.token), symbol=sym, exchange=pos_exch, mode=2)
+                logger.info(f"[ORCHESTRATOR] 🛡️ Subscribed to recovered position: {sym} (Token: {pos.token}, Exch: {pos_exch})")
 
         # Sync live spot quotes and RMS margin balance from Angel One if authenticated
         if self.auth_manager and not self.auth_manager.is_simulated:

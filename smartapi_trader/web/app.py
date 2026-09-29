@@ -454,6 +454,38 @@ async def exit_single_position(symbol: str):
     logger.info(f"[OPERATOR] Surgical manual exit executed for position: {symbol}")
     return {"status": "success", "symbol": symbol}
 
+@app.post("/api/positions/refresh_ltp")
+async def refresh_positions_ltp():
+    """Polls real exchange LTP for all active open positions and recalculates unrealized P&L."""
+    if not ctx.state_manager:
+        raise HTTPException(status_code=503, detail="State manager not initialized")
+    
+    updated_count = 0
+    for symbol, pos in list(ctx.state_manager.positions.items()):
+        if not pos.is_open:
+            continue
+        ltp = None
+        if ctx.auth_manager and not ctx.auth_manager.is_simulated and pos.token:
+            exch = pos.exchange or ("BFO" if "SENSEX" in symbol else "NFO")
+            ltp = await asyncio.to_thread(ctx.auth_manager.get_token_ltp, exch, symbol, str(pos.token))
+        
+        if ltp and ltp > 0:
+            pos.current_ltp = float(ltp)
+            diff = pos.current_ltp - pos.entry_price
+            pos.unrealized_pnl = round(diff * pos.quantity, 2)
+            pos.unrealized_pnl_pct = round((diff / pos.entry_price) * 100.0, 2) if pos.entry_price > 0 else 0.0
+            updated_count += 1
+    
+    if updated_count > 0:
+        ctx.state_manager._recalculate_portfolio()
+        ctx.state_manager.broadcast_state()
+    
+    return {
+        "status": "success",
+        "updated": updated_count,
+        "positions": [p.to_dict() for p in ctx.state_manager.positions.values() if p.is_open]
+    }
+
 class TestSignalRequest(BaseModel):
     underlying: str = "NIFTY"
     signal_type: str = "BUY_CE"

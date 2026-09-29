@@ -228,10 +228,14 @@ export default function AgentControl({
         </div>
       </div>
 
-      {/* 4. Active Real Positions Table */}
+      {/* 4. Active Real Positions Table (Filtered exclusively to Live Angel One Trades) */}
       <PositionsTable
-        positions={state.positions || []}
+        positions={(state.real_positions || state.positions || []).filter(
+          (pos) => !pos.is_paper && (pos.execution_mode === 'LIVE' || pos.execution_venue === 'SMARTAPI')
+        )}
         onExitPosition={onExitPosition}
+        title="Active Angel One Real Live Positions"
+        emptyText="No active real positions on Angel One broker. (Simulated trades are isolated to Paper Trade tab)."
       />
     </div>
   );

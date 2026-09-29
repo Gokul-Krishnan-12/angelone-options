@@ -1,5 +1,5 @@
 import React from 'react';
-import { ShieldAlert, Play, Pause, RefreshCw, Wallet, Zap, LogOut } from 'lucide-react';
+import { ShieldAlert, Play, Pause, RefreshCw, Wallet, Zap, LogOut, Menu } from 'lucide-react';
 import { formatINR } from './MetricsHud';
 
 export default function TopBar({
@@ -13,7 +13,8 @@ export default function TopBar({
   onRefreshBalance,
   onOpenPanic,
   isRefreshingBalance,
-  onLogout
+  onLogout,
+  onToggleMobileMenu
 }) {
   const isPaper = state.execution_mode === 'PAPER';
   const isLive = state.execution_mode === 'LIVE';
@@ -24,15 +25,25 @@ export default function TopBar({
   return (
     <header className="top-bar">
       <div className="top-bar-left">
+        {/* Mobile Hamburger Toggle */}
+        <button
+          className="mobile-hamburger-btn"
+          onClick={onToggleMobileMenu}
+          title="Open Menu"
+          aria-label="Open Navigation Drawer"
+        >
+          <Menu size={19} />
+        </button>
+
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
           <span className="pulse-dot" style={{ background: isConnected ? 'var(--accent-emerald)' : 'var(--accent-red)' }} />
-          <span className="mono" style={{ fontSize: '0.72rem', color: isConnected ? 'var(--text-muted)' : 'var(--accent-red)' }}>
+          <span className="mono topbar-stream-text" style={{ fontSize: '0.72rem', color: isConnected ? 'var(--text-muted)' : 'var(--accent-red)' }}>
             {isConnected ? `Stream ${latency}ms` : 'Disconnected'}
           </span>
         </div>
 
         <span
-          className="pill-badge"
+          className="pill-badge topbar-broker-badge"
           style={{
             background: isLiveSynced ? 'rgba(16, 185, 129, 0.12)' : 'rgba(237, 76, 34, 0.12)',
             color: isLiveSynced ? 'var(--accent-emerald)' : 'var(--accent-orange)',
@@ -56,7 +67,8 @@ export default function TopBar({
           }}
         >
           {realRunning ? <Pause size={12} /> : <Zap size={12} />}
-          <span>Real Agent {realRunning ? 'Live' : 'Paused'}</span>
+          <span className="btn-label-desktop">Real Agent {realRunning ? 'Live' : 'Paused'}</span>
+          <span className="btn-label-mobile">{realRunning ? 'Live' : 'Off'}</span>
         </button>
 
         {/* Live Angel One Balance Chip */}

@@ -176,7 +176,9 @@ class RiskManager:
             target_1=signal.target_1,
             exchange=signal.exchange,
             swing_invalidation_level=getattr(signal, "swing_invalidation_level", 0.0),
-            is_open=True
+            is_open=True,
+            is_paper=(self.state_mgr.execution_mode == "PAPER"),
+            execution_mode=self.state_mgr.execution_mode
         )
         await self.bus.publish(pos_event)
         await self.bus.publish(order_event)

@@ -300,9 +300,11 @@ class SniperILSMEStrategy(BaseStrategy):
         live_opt_ltp = None
 
         if self.auth_mgr:
+            opt_exch = option_contract.get("exchange") or ("BFO" if underlying == "SENSEX" else "NFO")
             liq_metrics = self.auth_mgr.get_option_liquidity_metrics(
-                exchange=option_contract.get("exchange", "NFO"),
-                token=option_contract.get("symboltoken", "")
+                exchange=opt_exch,
+                token=option_contract.get("symboltoken", ""),
+                tradingsymbol=option_contract.get("tradingsymbol", "")
             )
             live_opt_ltp = liq_metrics.get("ltp")
             oi = liq_metrics.get("oi", 0)
@@ -316,12 +318,23 @@ class SniperILSMEStrategy(BaseStrategy):
             if spread_pct > max_spread_pct:
                 logger.warning(f"[STRATEGY] ⚠️ High Bid-Ask Spread ({spread_pct}% > {max_spread_pct}%) on {option_contract['tradingsymbol']}. Slippage guard active.")
 
-        base_premium = 180.0 if underlying == "NIFTY" else (350.0 if underlying == "BANKNIFTY" else 220.0)
+        # Realistic intrinsic + time value estimation model if live exchange LTP is unreachable
+        strike_val = float(option_contract.get("strike", spot))
+        if opt_type == "PE":
+            intrinsic = max(0.0, strike_val - spot)
+        else:
+            intrinsic = max(0.0, spot - strike_val)
+        atm_extrinsic = 180.0 if underlying == "NIFTY" else (350.0 if underlying == "BANKNIFTY" else 300.0)
+        distance = abs(spot - strike_val)
+        decay_factor = max(0.15, 1.0 - (distance / max(100.0, strike_val * 0.03)))
+        estimated_premium = round(intrinsic + (atm_extrinsic * decay_factor), 2)
+        base_premium = max(15.0, estimated_premium)
+
         entry_price = round(live_opt_ltp, 2) if (live_opt_ltp and live_opt_ltp > 0) else round(base_premium, 2)
         if live_opt_ltp and live_opt_ltp > 0:
             logger.info(f"[STRATEGY] 🎯 Fetched real live option price from Angel One: {option_contract['tradingsymbol']} = ₹{entry_price}")
         else:
-            logger.info(f"[STRATEGY] Using estimated base premium for {option_contract['tradingsymbol']}: ₹{entry_price}")
+            logger.warning(f"[STRATEGY] Real exchange LTP unavailable for {option_contract['tradingsymbol']}; using dynamic model premium: ₹{entry_price} (Intrinsic: ₹{intrinsic:.2f}, Extrinsic: ₹{atm_extrinsic * decay_factor:.2f})")
         
         # Hard stop-loss ~10% (from risk settings)
         sl_pct = self.risk_cfg.get("initial_sl_percent", 0.10)

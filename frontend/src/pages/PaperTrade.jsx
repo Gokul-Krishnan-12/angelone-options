@@ -341,10 +341,14 @@ export default function PaperTrade({
         </div>
       </div>
 
-      {/* Simulated Active Positions Table */}
+      {/* Simulated Active Positions Table (Strictly Isolated to Virtual Paper Trades) */}
       <PositionsTable
-        positions={state.positions || []}
+        positions={(state.paper_positions || state.positions || []).filter(
+          (pos) => pos.is_paper || pos.execution_mode === 'PAPER' || pos.execution_venue === 'PAPER'
+        )}
         onExitPosition={onExitPosition}
+        title="Active Simulated Paper Positions (Virtual Ledger)"
+        emptyText="No active paper positions. Engine scanning for Institutional Liquidity Sweep setup."
       />
 
       {/* Historical P&L Calendar & Per-Date Breakdown */}
