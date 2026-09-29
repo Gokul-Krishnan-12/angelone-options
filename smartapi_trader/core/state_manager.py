@@ -349,7 +349,14 @@ class StateManager:
 
     def _recalculate_portfolio(self):
         """Recalculates equity, unrealized P&L, daily drawdown %."""
-        total_unrealized = sum(p.unrealized_pnl for p in self.positions.values() if p.is_open)
+        # Auto-retire any positions where quantity is zero
+        for p in list(self.positions.values()):
+            if p.is_open and p.quantity <= 0:
+                p.is_open = False
+                if self.storage:
+                    self.storage.mark_position_closed(p.symbol, realized_pnl=p.realized_pnl)
+
+        total_unrealized = sum(p.unrealized_pnl for p in self.positions.values() if p.is_open and p.quantity > 0)
         self.unrealized_pnl = round(total_unrealized, 2)
         self.daily_pnl = round(self.realized_pnl + self.unrealized_pnl, 2)
         self.equity = round(self.starting_equity + self.daily_pnl, 2)
@@ -529,9 +536,9 @@ class StateManager:
             "is_panic_active": self.is_panic_active,
             "is_halted": self.is_halted,
             "strategy_status": self.strategy_status,
-            "positions": [pos.to_dict() for pos in self.positions.values() if pos.is_open],
-            "real_positions": [pos.to_dict() for pos in self.positions.values() if pos.is_open and not getattr(pos, 'is_paper', False) and getattr(pos, 'execution_mode', '') == 'LIVE'],
-            "paper_positions": [pos.to_dict() for pos in self.positions.values() if pos.is_open and (getattr(pos, 'is_paper', False) or getattr(pos, 'execution_mode', '') == 'PAPER')],
+            "positions": [pos.to_dict() for pos in self.positions.values() if pos.is_open and pos.quantity > 0],
+            "real_positions": [pos.to_dict() for pos in self.positions.values() if pos.is_open and pos.quantity > 0 and not getattr(pos, 'is_paper', False) and getattr(pos, 'execution_mode', '') == 'LIVE'],
+            "paper_positions": [pos.to_dict() for pos in self.positions.values() if pos.is_open and pos.quantity > 0 and (getattr(pos, 'is_paper', False) or getattr(pos, 'execution_mode', '') == 'PAPER')],
             "orders": [ord.to_dict() for ord in list(self.orders.values())[-20:]], # recent 20
             "completed_trades": self.completed_trades[-20:],
             "trade_history": self.trade_history[:50],

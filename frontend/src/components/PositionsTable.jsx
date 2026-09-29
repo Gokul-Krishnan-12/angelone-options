@@ -31,8 +31,10 @@ export default function PositionsTable({
     }
   };
 
-  // Filter positions by selected venue tab if enabled
+  // Filter positions by selected venue tab and only include active positions with quantity > 0
   const displayedPositions = (positions || []).filter((pos) => {
+    const qty = parseInt(pos.quantity) || 0;
+    if (qty <= 0 || pos.is_open === false) return false;
     if (filterVenue === 'REAL') {
       return !pos.is_paper && pos.execution_mode === 'LIVE';
     }

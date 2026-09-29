@@ -342,6 +342,12 @@ class RiskManager:
                 qty_to_close = lots_to_close * pos.lot_size
                 remaining_qty = max(0, pos.quantity - qty_to_close)
 
+                if remaining_qty == 0:
+                    # 1-lot position: TP1 fully closes the position and locks in 100% of realized gains
+                    logger.info(f"[RISK] Target 1 (+2.0R) HIT for single-lot {symbol}! Fully booking gains @ ₹{ltp:.2f}")
+                    await self._exit_position(pos, ltp, "Target 1 (+2.0R) Hit")
+                    return
+
                 pos.partial_taken = True
                 pos.quantity = remaining_qty
                 pos.lots = max(0, pos.lots - lots_to_close)

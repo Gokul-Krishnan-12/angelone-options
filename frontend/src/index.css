@@ -1171,6 +1171,10 @@ body {
    Responsive Media Queries for Mobile & Tablet
    ========================================================================= */
 
+/* =========================================================================
+   Responsive Media Queries for Mobile & Tablet (Ultra-Sleek & Compact)
+   ========================================================================= */
+
 @media (max-width: 850px) {
   .app-shell {
     flex-direction: column;
@@ -1181,12 +1185,12 @@ body {
     top: 0;
     left: 0;
     bottom: 0;
-    width: 260px;
+    width: 235px;
     height: 100vh;
     transform: translateX(-100%);
-    transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+    transition: transform 0.24s cubic-bezier(0.4, 0, 0.2, 1);
     z-index: 1000;
-    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.75);
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.85);
     background: #141312;
   }
 
@@ -1204,75 +1208,196 @@ body {
 
   .mobile-hamburger-btn {
     display: flex;
+    width: 30px;
+    height: 30px;
   }
 
+  /* Compact Sleek TopBar */
   .top-bar {
-    padding: 0.5rem 0.85rem;
-    height: auto;
-    min-height: 52px;
-    flex-wrap: wrap;
-    gap: 0.5rem;
+    padding: 0.35rem 0.65rem;
+    height: 46px;
+    min-height: 46px;
+    gap: 0.4rem;
   }
 
   .top-bar-left {
-    gap: 0.65rem;
+    gap: 0.45rem;
   }
 
   .top-bar-right {
+    gap: 0.35rem;
+  }
+
+  .topbar-stream-text {
+    font-size: 0.68rem;
+  }
+
+  .topbar-broker-badge {
+    font-size: 0.62rem;
+    padding: 0.14rem 0.4rem;
+  }
+
+  /* Compact Page Spacing */
+  .page-container {
+    padding: 0.55rem 0.65rem;
+    gap: 0.65rem;
+  }
+
+  /* Sleek 2-Column HUD Metrics */
+  .grid-metrics {
+    grid-template-columns: repeat(2, 1fr);
     gap: 0.5rem;
   }
 
-  .page-container {
-    padding: 0.85rem 0.75rem;
-    gap: 1rem;
+  .hud-card {
+    padding: 0.65rem 0.75rem;
+    border-radius: 8px;
   }
 
-  .grid-metrics {
-    grid-template-columns: repeat(2, 1fr);
+  .card-header-line {
+    font-size: 0.65rem;
+    margin-bottom: 0.25rem;
   }
 
+  .metric-big {
+    font-size: 1.18rem;
+    letter-spacing: -0.01em;
+  }
+
+  /* Compact Tickers */
   .spot-grid, .index-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.45rem;
+  }
+
+  .spot-tile, .index-tile {
+    padding: 0.45rem 0.55rem;
+    border-radius: 6px;
+  }
+
+  .index-header {
+    font-size: 0.65rem;
+  }
+
+  .index-price-val {
+    font-size: 0.98rem;
+    margin: 0.15rem 0;
+  }
+
+  .index-meta {
+    font-size: 0.62rem;
   }
 
   .grid-radar-sniper {
     grid-template-columns: 1fr;
+    gap: 0.65rem;
   }
 
+  /* Compact Action Buttons & Chips */
+  .agent-toggle-btn {
+    padding: 0.22rem 0.45rem;
+    font-size: 0.7rem;
+  }
+
+  .balance-chip {
+    padding: 0.22rem 0.45rem;
+    font-size: 0.7rem;
+    gap: 0.35rem;
+  }
+
+  .panic-button {
+    padding: 0.22rem 0.45rem;
+    font-size: 0.7rem;
+  }
+
+  .logout-button {
+    padding: 0.22rem 0.45rem;
+    font-size: 0.7rem;
+  }
+
+  /* High Density Tables */
+  .table-wrapper {
+    -webkit-overflow-scrolling: touch;
+    border: 1px solid var(--border-light);
+    border-radius: 6px;
+  }
+
+  .fintech-table th {
+    padding: 0.45rem 0.55rem;
+    font-size: 0.62rem;
+    white-space: nowrap;
+  }
+
+  .fintech-table td {
+    padding: 0.45rem 0.55rem;
+    font-size: 0.72rem;
+    white-space: nowrap;
+  }
+
+  .brand-badge {
+    padding: 0.1rem 0.35rem;
+    font-size: 0.58rem;
+  }
+
+  .venue-pill {
+    padding: 0.1rem 0.35rem;
+    font-size: 0.58rem;
+  }
+
+  .btn-liquidate {
+    padding: 0.18rem 0.45rem;
+    font-size: 0.65rem;
+  }
+
+  .btn-refresh-ltp {
+    padding: 0.22rem 0.45rem;
+    font-size: 0.65rem;
+  }
+
+  .live-feed-pill {
+    padding: 0.15rem 0.45rem;
+  }
+
+  .positions-pnl-summary-bar {
+    padding: 0.4rem 0.65rem;
+    font-size: 0.68rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .venue-filter-btn {
+    padding: 0.18rem 0.4rem;
+    font-size: 0.65rem;
+  }
+
+  /* Sleek Bottom Bar */
   .bottom-status-bar {
     flex-direction: column;
     align-items: flex-start;
-    gap: 0.45rem;
-    padding: 0.65rem 0.85rem;
-    font-size: 0.68rem;
+    gap: 0.35rem;
+    padding: 0.45rem 0.65rem;
+    font-size: 0.64rem;
     height: auto;
   }
 
   .bottom-status-bar > div {
     flex-wrap: wrap;
-    gap: 0.75rem !important;
-  }
-
-  .table-wrapper {
-    -webkit-overflow-scrolling: touch;
-    border: 1px solid var(--border-light);
-    border-radius: 8px;
-  }
-
-  .fintech-table th, .fintech-table td {
-    padding: 0.55rem 0.65rem;
-    white-space: nowrap;
+    gap: 0.5rem !important;
   }
 }
 
-@media (max-width: 540px) {
+@media (max-width: 500px) {
+  .top-bar {
+    padding: 0.3rem 0.5rem;
+    height: 44px;
+    min-height: 44px;
+  }
+
   .topbar-stream-text {
     display: none;
   }
 
   .topbar-broker-badge {
-    font-size: 0.62rem;
-    padding: 0.15rem 0.4rem;
+    display: none;
   }
 
   .btn-label-desktop {
@@ -1283,28 +1408,34 @@ body {
     display: inline;
   }
 
-  .grid-metrics {
-    grid-template-columns: 1fr;
-  }
-
   .panic-button span {
     display: none;
-  }
-
-  .panic-button {
-    padding: 0.35rem 0.45rem;
   }
 
   .logout-button span {
     display: none;
   }
 
-  .logout-button {
-    padding: 0.35rem 0.45rem;
+  .spot-grid, .index-grid {
+    grid-template-columns: 1fr;
   }
 
-  .balance-chip {
-    padding: 0.25rem 0.45rem;
+  .grid-metrics {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.4rem;
+  }
+
+  .hud-card {
+    padding: 0.55rem 0.65rem;
+  }
+
+  .metric-big {
+    font-size: 1.08rem;
+  }
+
+  .page-container {
+    padding: 0.45rem 0.5rem;
+    gap: 0.5rem;
   }
 }
 
