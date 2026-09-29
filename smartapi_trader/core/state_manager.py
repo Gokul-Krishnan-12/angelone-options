@@ -157,10 +157,18 @@ class StateManager:
                     import re
                     strike_val = 0.0
                     opt_val = ""
-                    m = re.search(r'(\d{4,6})\s*(CE|PE)', symbol, re.IGNORECASE)
+                    # Indian index strikes are 5 digits (e.g. 72200, 53900, 22600) or 4 digits (<10000)
+                    m = re.search(r'(\d{5})\s*(CE|PE)$', symbol, re.IGNORECASE)
                     if m:
                         strike_val = float(m.group(1))
                         opt_val = m.group(2).upper()
+                    else:
+                        m4 = re.search(r'(\d{4})\s*(CE|PE)$', symbol, re.IGNORECASE)
+                        if m4:
+                            strike_val = float(m4.group(1))
+                            opt_val = m4.group(2).upper()
+                    if strike_val > 100000:
+                        strike_val = strike_val % 100000
 
                     exit_reason = "Target 1 (+2.0R) Hit" if gross_pnl > 0 else "Stop Loss Hit"
                     trade_id = f"TR_{s_date.replace('-', '')[4:]}_001"
@@ -250,7 +258,13 @@ class StateManager:
             # Load completed trades
             self.completed_trades = self.storage.load_todays_trades(is_paper=False)
             self.paper_completed_trades = self.storage.load_todays_trades(is_paper=True)
-            self.trade_history = self.storage.load_all_trades(limit=100)
+            # Sanitize any legacy strike prices with expiry prefix (e.g. 172200 -> 72200)
+            for tr_list in (self.completed_trades, self.paper_completed_trades, self.trade_history):
+                for tr in tr_list:
+                    sp = float(tr.get("strike_price") or 0.0)
+                    if sp > 100000:
+                        tr["strike_price"] = sp % 100000
+
             logger.info(f"[STATE] Restored trades: {len(self.completed_trades)} live, {len(self.paper_completed_trades)} paper, {len(self.trade_history)} total history.")
 
             # Self-healing ledger recalculation from completed trades
@@ -522,19 +536,25 @@ class StateManager:
         net = round(pnl - total_fee, 2)
 
         # Resolve strike price and option type
+        # Resolve strike price and option type
         resolved_strike = float(strike_price or 0.0)
         resolved_opt = option_type or ""
         if symbol:
             import re
-            m = re.search(r'(\d{4,6})\s*(CE|PE)', symbol, re.IGNORECASE)
+            m = re.search(r'(\d{5})\s*(CE|PE)$', symbol, re.IGNORECASE)
+            if not m:
+                m = re.search(r'(\d{4})\s*(CE|PE)$', symbol, re.IGNORECASE)
             if m:
-                if resolved_strike == 0.0:
+                if resolved_strike == 0.0 or resolved_strike > 100000:
                     try:
                         resolved_strike = float(m.group(1))
                     except Exception:
                         pass
                 if not resolved_opt:
                     resolved_opt = m.group(2).upper()
+
+        if resolved_strike > 100000:
+            resolved_strike = resolved_strike % 100000
 
         trade_num = len(self.completed_trades) + len(self.paper_completed_trades) + 1
         is_paper_trade = bool(is_paper or self.execution_mode == "PAPER")

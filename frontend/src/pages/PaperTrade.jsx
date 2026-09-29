@@ -24,17 +24,32 @@ export default function PaperTrade({
   const [successMsg, setSuccessMsg] = useState('');
 
   const getStrikeDisplay = (tr) => {
-    if (tr.strike_price && tr.strike_price > 0) {
-      const opt = tr.option_type || (tr.symbol?.toUpperCase().includes('PE') ? 'PE' : 'CE');
-      return { strike: tr.strike_price, type: opt };
-    }
+    let strike = tr.strike_price || 0;
+    let opt = tr.option_type || '';
+
     if (tr.symbol) {
-      const m = tr.symbol.match(/(\d{4,6})\s*(CE|PE)/i);
-      if (m) {
-        return { strike: parseFloat(m[1]), type: m[2].toUpperCase() };
+      const m5 = tr.symbol.match(/(\d{5})\s*(CE|PE)$/i);
+      if (m5) {
+        strike = parseFloat(m5[1]);
+        if (!opt) opt = m5[2].toUpperCase();
+      } else {
+        const m4 = tr.symbol.match(/(\d{4})\s*(CE|PE)$/i);
+        if (m4) {
+          strike = parseFloat(m4[1]);
+          if (!opt) opt = m4[2].toUpperCase();
+        }
       }
     }
-    return { strike: null, type: tr.option_type || '--' };
+
+    if (strike > 100000) {
+      strike = strike % 100000;
+    }
+
+    if (!opt && tr.symbol) {
+      opt = tr.symbol.toUpperCase().includes('PE') ? 'PE' : 'CE';
+    }
+
+    return { strike: strike > 0 ? strike : null, type: opt || '--' };
   };
 
   const handleResetTrades = async () => {

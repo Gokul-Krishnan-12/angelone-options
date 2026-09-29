@@ -287,9 +287,18 @@ export default function Orders({ state, onExitPosition, onRefresh }) {
                   </tr>
                 ) : (
                   history.map((h, i) => {
-                    const strike = h.strike_price || (() => {
-                      const m = h.symbol?.match(/(\d{4,6})\s*(CE|PE)/i);
-                      return m ? `${m[1]} ${m[2].toUpperCase()}` : '--';
+                    const strike = (() => {
+                      let s = h.strike_price || 0;
+                      if (h.symbol) {
+                        const m5 = h.symbol.match(/(\d{5})\s*(CE|PE)$/i);
+                        if (m5) s = parseFloat(m5[1]);
+                        else {
+                          const m4 = h.symbol.match(/(\d{4})\s*(CE|PE)$/i);
+                          if (m4) s = parseFloat(m4[1]);
+                        }
+                      }
+                      if (s > 100000) s = s % 100000;
+                      return s > 0 ? `₹${s.toLocaleString('en-IN')}` : '--';
                     })();
                     const pnl = h.net_pnl !== undefined ? h.net_pnl : (h.pnl !== undefined ? h.pnl : (h.gross_pnl || 0));
                     return (
