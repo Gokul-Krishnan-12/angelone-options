@@ -371,13 +371,29 @@ class RiskManager:
                 
                 # Execute partial sell
                 await self._execute_partial_exit(pos, qty_to_close, ltp)
+
+                # Record completed trade for the closed partial quantity
+                partial_pnl = round((ltp - pos.entry_price) * qty_to_close, 2)
+                self.state_mgr.record_completed_trade(
+                    pnl=partial_pnl,
+                    entry_price=pos.entry_price,
+                    exit_price=ltp,
+                    quantity=qty_to_close,
+                    symbol=pos.symbol,
+                    exchange=getattr(pos, 'exchange', 'NFO'),
+                    is_paper=(self.state_mgr.execution_mode == "PAPER"),
+                    strike_price=getattr(pos, 'strike_price', 0.0),
+                    option_type=getattr(pos, 'option_type', ''),
+                    exit_reason="Target 1 (+2.0R) Partial (60%)"
+                )
+
                 if self.notifier:
                     self.notifier.notify_partial_tp1({
                         "symbol": symbol,
                         "booked_qty": qty_to_close,
                         "price": ltp,
                         "gain_pts": profit_points,
-                        "pnl": profit_points * qty_to_close,
+                        "pnl": partial_pnl,
                         "mode": self.state_mgr.execution_mode
                     })
 
@@ -387,12 +403,14 @@ class RiskManager:
             order_id=f"ORD_EXIT_PARTIAL_{int(datetime.now().timestamp() * 1000)}",
             symbol=pos.symbol,
             token=pos.token,
+            exchange=getattr(pos, 'exchange', 'NFO'),
             transaction_type="SELL",
             order_type="LIMIT",
             quantity=qty,
             price=price,
             status="PENDING",
-            variety="NORMAL"
+            variety="NORMAL",
+            is_paper=(self.state_mgr.execution_mode == "PAPER")
         )
         await self.bus.publish(exit_order)
 
@@ -415,12 +433,14 @@ class RiskManager:
             order_id=f"ORD_EXIT_FULL_{int(datetime.now().timestamp() * 1000)}",
             symbol=pos.symbol,
             token=pos.token,
+            exchange=getattr(pos, 'exchange', 'NFO'),
             transaction_type="SELL",
             order_type="MARKET",
             quantity=pos.quantity,
             price=price,
             status="PENDING",
-            variety="NORMAL"
+            variety="NORMAL",
+            is_paper=(self.state_mgr.execution_mode == "PAPER")
         )
         self.state_mgr.record_completed_trade(
             pnl=pnl,
@@ -428,6 +448,7 @@ class RiskManager:
             exit_price=price,
             quantity=pos.quantity,
             symbol=pos.symbol,
+            exchange=getattr(pos, 'exchange', 'NFO'),
             is_paper=(self.state_mgr.execution_mode == "PAPER"),
             strike_price=getattr(pos, 'strike_price', 0.0),
             option_type=getattr(pos, 'option_type', ''),

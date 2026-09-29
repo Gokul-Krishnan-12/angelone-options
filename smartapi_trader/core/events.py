@@ -99,6 +99,7 @@ class OrderEvent(BaseEvent):
     filled_quantity: int = 0
     average_price: float = 0.0
     rejection_reason: str = ""
+    is_paper: bool = True
 
 @dataclass
 class FillEvent(BaseEvent):

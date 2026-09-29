@@ -83,11 +83,129 @@ class StateManager:
         if self.storage:
             self._restore_from_storage()
 
+    def _reconcile_unrecorded_trades(self):
+        """
+        Self-healing reconciliation: Scans filled exit orders against the trades table.
+        If a position was exited (sell order filled) but no trade was recorded in SQLite,
+        reconstructs the completed trade, cancels lingering trigger-pending SL orders,
+        and saves the trade to storage.
+        """
+        if not self.storage:
+            return
+        try:
+            with self.storage._get_connection() as conn:
+                # Find filled SELL orders that represent completed position exits
+                sell_orders = conn.execute("""
+                    SELECT * FROM orders 
+                    WHERE transaction_type = 'SELL' 
+                      AND status = 'FILLED' 
+                      AND order_id NOT LIKE 'ORD_SL_%'
+                    ORDER BY created_at ASC
+                """).fetchall()
+
+                for s_row in sell_orders:
+                    s_ord = dict(s_row)
+                    symbol = s_ord.get("symbol", "")
+                    s_qty = int(s_ord.get("filled_quantity") or s_ord.get("quantity") or 0)
+                    s_price = float(s_ord.get("average_price") or s_ord.get("price") or 0.0)
+                    s_time = s_ord.get("created_at", "")
+                    s_date = s_time[:10] if s_time else datetime.now().strftime("%Y-%m-%d")
+                    is_paper = bool(s_ord.get("is_paper", 1))
+
+                    if not symbol or s_qty <= 0:
+                        continue
+
+                    # Check if a trade already exists for this symbol and date
+                    existing = conn.execute("""
+                        SELECT COUNT(*) as cnt FROM trades 
+                        WHERE symbol = ? AND (date = ? OR timestamp LIKE ?)
+                    """, (symbol, s_date, f"{s_date}%")).fetchone()
+
+                    if existing and existing["cnt"] > 0:
+                        continue  # Already recorded
+
+                    # Find corresponding filled BUY order
+                    b_row = conn.execute("""
+                        SELECT * FROM orders 
+                        WHERE symbol = ? AND transaction_type = 'BUY' AND status = 'FILLED'
+                        ORDER BY created_at ASC LIMIT 1
+                    """, (symbol,)).fetchone()
+
+                    b_price = 0.0
+                    b_exchange = "NSE"
+                    if b_row:
+                        b_ord = dict(b_row)
+                        b_price = float(b_ord.get("average_price") or b_ord.get("price") or 0.0)
+                        b_exchange = b_ord.get("exchange") or "NSE"
+
+                    # If no buy order found, look in positions table
+                    if b_price == 0.0:
+                        pos_row = conn.execute("SELECT * FROM positions WHERE symbol = ?", (symbol,)).fetchone()
+                        if pos_row:
+                            p_dict = dict(pos_row)
+                            b_price = float(p_dict.get("entry_price") or 0.0)
+                            b_exchange = p_dict.get("exchange") or "NSE"
+
+                    if b_price == 0.0:
+                        b_price = s_price
+
+                    gross_pnl = round((s_price - b_price) * s_qty, 2)
+                    charges = calculate_option_charges(b_price, s_price, s_qty, b_exchange)
+                    total_fee = charges.get("total_charges", 61.79)
+                    net_pnl = round(gross_pnl - total_fee, 2)
+
+                    import re
+                    strike_val = 0.0
+                    opt_val = ""
+                    m = re.search(r'(\d{4,6})\s*(CE|PE)', symbol, re.IGNORECASE)
+                    if m:
+                        strike_val = float(m.group(1))
+                        opt_val = m.group(2).upper()
+
+                    exit_reason = "Target 1 (+2.0R) Hit" if gross_pnl > 0 else "Stop Loss Hit"
+                    trade_id = f"TR_{s_date.replace('-', '')[4:]}_001"
+
+                    trade_record = {
+                        "id": trade_id,
+                        "timestamp": s_time.replace("T", " ")[:19] if s_time else datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "date": s_date,
+                        "symbol": symbol,
+                        "strike_price": strike_val,
+                        "option_type": opt_val,
+                        "quantity": s_qty,
+                        "entry_price": b_price,
+                        "exit_price": s_price,
+                        "gross_pnl": gross_pnl,
+                        "brokerage": charges.get("brokerage", 40.0),
+                        "total_charges": total_fee,
+                        "net_pnl": net_pnl,
+                        "is_paper": 1 if is_paper else 0,
+                        "exit_reason": exit_reason
+                    }
+
+                    self.storage.save_trade(trade_record)
+                    self.storage.mark_position_closed(symbol, realized_pnl=gross_pnl)
+                    logger.info(f"[STATE] 🛠️ Reconciled unrecorded completed trade for {symbol}: Gross=₹{gross_pnl:+.2f}, Net=₹{net_pnl:+.2f}")
+
+                    # Cancel lingering resting SL orders for this symbol
+                    conn.execute("""
+                        UPDATE orders 
+                        SET status = 'CANCELLED', updated_at = ? 
+                        WHERE symbol = ? AND order_id LIKE 'ORD_SL_%' AND status = 'TRIGGER_PENDING'
+                    """, (datetime.now().isoformat(), symbol))
+                    conn.commit()
+
+        except Exception as e:
+            logger.error(f"[STATE] Error in _reconcile_unrecorded_trades: {e}")
+
     def _restore_from_storage(self):
         """Restores ledger, active positions, and trade history from SQLite storage."""
         if not self.storage:
             return
         try:
+            # First reconcile any unrecorded exit executions
+            self._reconcile_unrecorded_trades()
+
             today_str = datetime.now().strftime("%Y-%m-%d")
             ledger = self.storage.load_daily_ledger(today_str)
             if ledger:
@@ -134,6 +252,19 @@ class StateManager:
             self.paper_completed_trades = self.storage.load_todays_trades(is_paper=True)
             self.trade_history = self.storage.load_all_trades(limit=100)
             logger.info(f"[STATE] Restored trades: {len(self.completed_trades)} live, {len(self.paper_completed_trades)} paper, {len(self.trade_history)} total history.")
+
+            # Self-healing ledger recalculation from completed trades
+            if self.paper_completed_trades:
+                self._recalculate_paper_ledger()
+                self._sync_ledger_to_storage()
+
+            if self.completed_trades:
+                self.realized_pnl = round(sum(float(t.get("gross_pnl", 0.0)) for t in self.completed_trades), 2)
+                self.total_brokerage = round(sum(float(t.get("total_charges", 0.0)) for t in self.completed_trades), 2)
+                self.net_pnl = round(sum(float(t.get("net_pnl", 0.0)) for t in self.completed_trades), 2)
+                self.daily_pnl = self.net_pnl
+                self.trades_taken_today = len(self.completed_trades)
+                self._sync_ledger_to_storage()
 
             self._recalculate_portfolio()
         except Exception as e:
@@ -332,8 +463,10 @@ class StateManager:
     async def _on_order_update(self, event: OrderEvent):
         self.orders[event.order_id] = event
         if self.storage:
-            is_paper = (self.execution_mode == "PAPER") or ("PAPER" in event.order_id or "ORD_NIFTY_" in event.order_id or "ORD_BANKNIFTY_" in event.order_id or "MANUAL_EXIT_" in event.order_id)
-            self.storage.save_order(event, is_paper=is_paper)
+            is_paper = getattr(event, "is_paper", None)
+            if is_paper is None:
+                is_paper = (self.execution_mode == "PAPER") or ("PAPER" in event.order_id or "ORD_NIFTY_" in event.order_id or "ORD_BANKNIFTY_" in event.order_id or "ORD_SENSEX_" in event.order_id or "MANUAL_EXIT_" in event.order_id)
+            self.storage.save_order(event, is_paper=bool(is_paper))
         self.broadcast_state()
 
     async def _on_fill(self, event: FillEvent):
@@ -393,7 +526,7 @@ class StateManager:
         resolved_opt = option_type or ""
         if symbol:
             import re
-            m = re.search(r'(\d+)\s*(CE|PE)', symbol, re.IGNORECASE)
+            m = re.search(r'(\d{4,6})\s*(CE|PE)', symbol, re.IGNORECASE)
             if m:
                 if resolved_strike == 0.0:
                     try:
@@ -404,9 +537,12 @@ class StateManager:
                     resolved_opt = m.group(2).upper()
 
         trade_num = len(self.completed_trades) + len(self.paper_completed_trades) + 1
+        is_paper_trade = bool(is_paper or self.execution_mode == "PAPER")
+        today_date_str = datetime.now().strftime("%Y-%m-%d")
         trade_record = {
             "id": f"TR_{datetime.now().strftime('%m%d')}_{trade_num:03d}",
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "date": today_date_str,
             "symbol": symbol or "OPTIDX",
             "strike_price": resolved_strike,
             "option_type": resolved_opt,
@@ -417,11 +553,11 @@ class StateManager:
             "brokerage": charges.get("brokerage", 40.0),
             "total_charges": total_fee,
             "net_pnl": net,
-            "is_paper": is_paper,
+            "is_paper": 1 if is_paper_trade else 0,
             "exit_reason": exit_reason
         }
 
-        if is_paper or self.execution_mode == "PAPER":
+        if is_paper_trade:
             self.paper_realized_pnl += round(pnl, 2)
             self.paper_total_brokerage += total_fee
             self.paper_net_pnl += net
