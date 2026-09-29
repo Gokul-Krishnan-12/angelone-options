@@ -646,17 +646,36 @@ async def pause_real_agent():
     return {"status": "success", "real_agent": "PAUSED"}
 
 @app.get("/api/orders")
-async def get_all_orders():
+async def get_all_orders(include_paper: bool = False):
     """Returns active positions, recent orders, and trade history for Orders page."""
     if not ctx.state_manager:
         raise HTTPException(status_code=503, detail="State manager not initialized")
     
-    positions = [pos.to_dict() for pos in ctx.state_manager.positions.values() if pos.is_open]
-    orders = [ord.to_dict() for ord in ctx.state_manager.orders.values()]
+    if include_paper:
+        positions = [pos.to_dict() for pos in ctx.state_manager.positions.values() if pos.is_open and pos.quantity > 0]
+        orders = [ord.to_dict() for ord in ctx.state_manager.orders.values()]
+        trade_history = ctx.state_manager.trade_history
+    else:
+        # Strictly Live Angel One broker orders & trades
+        positions = [
+            pos.to_dict() for pos in ctx.state_manager.positions.values() 
+            if pos.is_open and pos.quantity > 0 and not getattr(pos, 'is_paper', False) and getattr(pos, 'execution_mode', '') == 'LIVE'
+        ]
+        
+        # Exclude paper simulated order prefixes and orders flagged as paper
+        paper_prefixes = ("ORD_NIFTY_", "ORD_BANKNIFTY_", "ORD_SENSEX_", "ORD_EXIT_PARTIAL_", "ORD_SL_", "MANUAL_EXIT_")
+        orders = [
+            ord.to_dict() for ord in ctx.state_manager.orders.values()
+            if not getattr(ord, 'is_paper', False) and not any(ord.order_id.startswith(p) for p in paper_prefixes)
+        ]
+        
+        # Trade history: strictly real broker completed trades
+        trade_history = [t for t in ctx.state_manager.trade_history if not t.get('is_paper')]
+
     return {
         "positions": positions,
         "orders": orders,
-        "trade_history": ctx.state_manager.trade_history,
+        "trade_history": trade_history,
         "realized_pnl": ctx.state_manager.realized_pnl,
         "unrealized_pnl": ctx.state_manager.unrealized_pnl
     }
