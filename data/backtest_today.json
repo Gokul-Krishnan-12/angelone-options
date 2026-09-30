@@ -1,0 +1,35 @@
+{
+  "summary": {
+    "period": "2026-09-28 to 2026-09-28 (1 Trading Sessions)",
+    "starting_capital": 50000.0,
+    "ending_capital": 50000.0,
+    "total_net_pnl": 0,
+    "total_gross_pnl": 0,
+    "total_brokerage_and_taxes": 0,
+    "roi_pct": 0.0,
+    "monthly_avg_roe_pct": 0.0,
+    "win_rate_pct": 0.0,
+    "non_losing_rate_pct": 0.0,
+    "total_trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "breakeven": 0,
+    "profit_factor": 2.5,
+    "max_drawdown_pct": 0.0,
+    "avg_win": 0.0,
+    "avg_loss": 0.0,
+    "risk_reward_ratio": "1 : 2.25",
+    "risk_per_trade": "1.5%",
+    "dynamic_compounding": false,
+    "avg_capital_used": 0.0,
+    "max_capital_used": 0.0
+  },
+  "trades": [],
+  "equity_curve": [
+    {
+      "date": "2026-09-28",
+      "capital": 50000.0,
+      "trades": 0
+    }
+  ]
+}

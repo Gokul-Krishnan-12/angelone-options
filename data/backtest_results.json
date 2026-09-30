@@ -1,13 +1,13 @@
 {
   "summary": {
-    "period": "2025-09-26 to 2026-09-25 (11.3 Months - 248 Sessions)",
+    "period": "2025-09-26 to 2026-09-28 (11.3 Months - 249 Sessions)",
     "starting_capital": 50000.0,
     "ending_capital": 139305.09,
     "total_net_pnl": 89305.09,
     "total_gross_pnl": 103705.92,
     "total_brokerage_and_taxes": 14400.83,
     "roi_pct": 178.61,
-    "monthly_avg_roe_pct": 15.85,
+    "monthly_avg_roe_pct": 15.78,
     "win_rate_pct": 16.3,
     "non_losing_rate_pct": 58.7,
     "total_trades": 196,
@@ -6754,6 +6754,11 @@
       "date": "2026-09-25",
       "capital": 139305.09,
       "trades": 2
+    },
+    {
+      "date": "2026-09-28",
+      "capital": 139305.09,
+      "trades": 0
     }
   ]
 }
