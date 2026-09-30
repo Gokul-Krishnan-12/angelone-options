@@ -70,11 +70,7 @@ class StateManager:
         self.orders: Dict[str, OrderEvent] = {}       # Keyed by order_id
         self.ticks: Dict[str, TickEvent] = {}         # Keyed by token
         self.trade_history: List[Dict[str, Any]] = []
-        self.spot_levels: Dict[str, Dict[str, float]] = {
-            "NIFTY": {"spot": 23140.5, "vwap": 23063.1, "pdh": 23162.7, "pdl": 23020.95, "high": 23162.7, "low": 23020.95},
-            "BANKNIFTY": {"spot": 55580.4, "vwap": 55438.5, "pdh": 55762.6, "pdl": 55373.75, "high": 55762.6, "low": 55373.75},
-            "SENSEX": {"spot": 73895.74, "vwap": 73580.54, "pdh": 73968.05, "pdl": 73477.77, "high": 73968.05, "low": 73477.77},
-        }
+        self.spot_levels: Dict[str, Dict[str, float]] = self._init_dynamic_spot_levels()
 
         # Wire up event subscriptions
         self._register_subscribers()
@@ -82,6 +78,43 @@ class StateManager:
         # Restore persistent state from SQLite storage if configured
         if self.storage:
             self._restore_from_storage()
+
+    def _init_dynamic_spot_levels(self) -> Dict[str, Dict[str, float]]:
+        """Initializes spot telemetry levels with genuine previous day levels from historical files."""
+        import os
+        import json
+        levels = {}
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        default_fallback = {
+            "NIFTY": {"spot": 22700.0, "vwap": 22700.0, "pdh": 22800.0, "pdl": 22500.0, "high": 22800.0, "low": 22500.0},
+            "BANKNIFTY": {"spot": 54200.0, "vwap": 54200.0, "pdh": 54500.0, "pdl": 53800.0, "high": 54500.0, "low": 53800.0},
+            "SENSEX": {"spot": 72500.0, "vwap": 72500.0, "pdh": 72800.0, "pdl": 72000.0, "high": 72800.0, "low": 72000.0},
+        }
+        for idx in ["NIFTY", "BANKNIFTY", "SENSEX"]:
+            path = f"data/historical/{idx.lower()}_3m.json"
+            resolved = False
+            if os.path.exists(path):
+                try:
+                    with open(path, "r") as f:
+                        bars = json.load(f)
+                    dates = sorted(list(set(c[0][:10] for c in bars if c[0][:10] < today_str)))
+                    if dates:
+                        prev_date = dates[-1]
+                        prev_bars = [c for c in bars if c[0].startswith(prev_date)]
+                        if prev_bars:
+                            pdh = max(b[2] for b in prev_bars)
+                            pdl = min(b[3] for b in prev_bars)
+                            close = prev_bars[-1][4]
+                            levels[idx] = {
+                                "spot": close, "vwap": close, "pdh": pdh, "pdl": pdl,
+                                "high": pdh, "low": pdl
+                            }
+                            resolved = True
+                except Exception:
+                    pass
+            if not resolved:
+                levels[idx] = default_fallback[idx]
+        return levels
 
     def _reconcile_unrecorded_trades(self):
         """

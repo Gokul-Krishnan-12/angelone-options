@@ -48,32 +48,90 @@ class SniperILSMEStrategy(BaseStrategy):
         self.option_volume_history: Dict[str, List[int]] = {}
 
     def _init_index_state(self, underlying: str):
-        # Default estimated reference levels
-        default_levels = {
-            "NIFTY": {"pdh": 24950.0, "pdl": 24720.0, "spot": 24850.0},
-            "BANKNIFTY": {"pdh": 52700.0, "pdl": 52100.0, "spot": 52400.0},
-            "SENSEX": {"pdh": 81600.0, "pdl": 80800.0, "spot": 81200.0}
-        }
-        ref = default_levels.get(underlying, {"pdh": 25000.0, "pdl": 24000.0, "spot": 24500.0})
+        # Dynamically load true Previous Day High (PDH) and Low (PDL)
+        pdh, pdl, ref_spot = self._fetch_dynamic_pdh_pdl(underlying)
+        
         self.state[underlying] = {
-            "pdh": ref["pdh"],
-            "pdl": ref["pdl"],
-            "session_high": ref["pdh"] - 50.0,
-            "session_low": ref["pdl"] + 50.0,
-            "vwap": ref["spot"],
-            "last_spot": ref["spot"],
+            "pdh": pdh,
+            "pdl": pdl,
+            "session_high": pdh,
+            "session_low": pdl,
+            "vwap": ref_spot,
+            "last_spot": ref_spot,
             "sweep_status": "NONE",       # "NONE", "BULLISH_SWEEP", "BEARISH_SWEEP"
             "sweep_price": 0.0,
             "sweep_time": None,
             "armed_fvg": None,           # Holds pending FVG zone dict
             "in_trade": False
         }
+        logger.info(f"[STRATEGY] Initialized {underlying} Reference Levels -> PDH: {pdh:.2f} | PDL: {pdl:.2f} | Ref Spot: {ref_spot:.2f}")
+
+    def _fetch_dynamic_pdh_pdl(self, underlying: str) -> tuple[float, float, float]:
+        """Dynamically resolves true Previous Day High / Low from historical datasets or Angel One API."""
+        import os
+        import json
+        
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        idx_key = underlying.lower()
+        
+        # 1. Try local historical 3m / 15m candle store
+        for tf in ["3m", "15m"]:
+            path = f"data/historical/{idx_key}_{tf}.json"
+            if os.path.exists(path):
+                try:
+                    with open(path, "r") as f:
+                        bars = json.load(f)
+                    dates = sorted(list(set(c[0][:10] for c in bars if c[0][:10] < today_str)))
+                    if dates:
+                        prev_date = dates[-1]
+                        prev_bars = [c for c in bars if c[0].startswith(prev_date)]
+                        if prev_bars:
+                            pdh = max(b[2] for b in prev_bars)
+                            pdl = min(b[3] for b in prev_bars)
+                            close = prev_bars[-1][4]
+                            return pdh, pdl, close
+                except Exception as e:
+                    logger.warning(f"[STRATEGY] Error reading {path} for PDH/PDL: {e}")
+
+        # 2. Try Angel One SmartAPI live historical fetch if authenticated
+        if self.auth_mgr and not self.auth_mgr.is_simulated and self.auth_mgr.smart_connect:
+            try:
+                sym_info = self.symbols_cfg.get(underlying, {})
+                tok = sym_info.get("spot_token")
+                exch = sym_info.get("exchange", "NSE")
+                if tok:
+                    from datetime import timedelta
+                    from_d = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
+                    to_d = datetime.now().strftime("%Y-%m-%d")
+                    res = self.auth_mgr.smart_connect.getCandleData({
+                        "exchange": exch,
+                        "symboltoken": str(tok),
+                        "interval": "ONE_DAY",
+                        "fromdate": f"{from_d} 09:15",
+                        "todate": f"{to_d} 15:30"
+                    })
+                    data = res.get("data") or []
+                    valid = [d for d in data if d[0][:10] < today_str]
+                    if valid:
+                        last_day = valid[-1]
+                        return float(last_day[2]), float(last_day[3]), float(last_day[4])
+            except Exception as api_err:
+                logger.warning(f"[STRATEGY] SmartAPI daily candle fetch for {underlying} failed: {api_err}")
+
+        # 3. Fallback to reasonable index defaults
+        default_levels = {
+            "NIFTY": {"pdh": 22800.0, "pdl": 22500.0, "spot": 22700.0},
+            "BANKNIFTY": {"pdh": 54500.0, "pdl": 53800.0, "spot": 54200.0},
+            "SENSEX": {"pdh": 72800.0, "pdl": 72000.0, "spot": 72500.0}
+        }
+        ref = default_levels.get(underlying, {"pdh": 22800.0, "pdl": 22500.0, "spot": 22700.0})
+        return ref["pdh"], ref["pdl"], ref["spot"]
 
     def reset_daily_state(self):
         for idx in self.active_indices:
             self._init_index_state(idx)
         self.state_mgr.set_strategy_status("Scanning for Liquidity Sweep")
-        logger.info("[STRATEGY] Daily state reset completed.")
+        logger.info("[STRATEGY] Daily state reset completed with fresh reference levels.")
 
     def _is_midday_chop(self) -> bool:
         """Checks if current time falls in 11:15 - 13:30 IST midday consolidation."""
