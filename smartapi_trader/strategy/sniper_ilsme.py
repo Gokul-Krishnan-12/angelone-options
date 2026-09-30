@@ -141,9 +141,10 @@ class SniperILSMEStrategy(BaseStrategy):
         return start <= now <= end
 
     def _is_market_hours(self) -> bool:
+        """Trading entry window: 09:15 to 15:00 IST. No new setups or signals after 15:00."""
         now = ist_time()
         start = time(9, 15)
-        end = time(15, 12)
+        end = time(15, 0)
         return start <= now <= end
 
     async def on_tick(self, event: TickEvent):
@@ -200,6 +201,9 @@ class SniperILSMEStrategy(BaseStrategy):
         15-minute Macro Timeframe Logic:
         Evaluates structural sweeps of PDH / PDL or Session Extremes with wick rejection.
         """
+        if not self._is_market_hours() or self._is_midday_chop():
+            return
+
         st = self.state[underlying]
         rng = max(0.01, bar.high - bar.low)
         lower_wick = (min(bar.open, bar.close) - bar.low) / rng
@@ -228,13 +232,11 @@ class SniperILSMEStrategy(BaseStrategy):
         3-minute Micro Timeframe Logic:
         Identifies Market Structure Shift (MSS) through VWAP and Fair Value Gap (FVG).
         """
-        st = self.state[underlying]
-        if st["sweep_status"] == "NONE":
+        if not self._is_market_hours() or self._is_midday_chop():
             return
 
-        # Check midday chop filter
-        if self._is_midday_chop():
-            logger.debug(f"[STRATEGY] Skipping entry for {underlying}: Midday consolidation window (11:15-13:30 IST).")
+        st = self.state[underlying]
+        if st["sweep_status"] == "NONE":
             return
 
         token = bar.token
@@ -297,6 +299,10 @@ class SniperILSMEStrategy(BaseStrategy):
         st = self.state[underlying]
         fvg = st.get("armed_fvg")
         if not fvg:
+            return
+
+        if not self._is_market_hours() or self._is_midday_chop():
+            st["armed_fvg"] = None
             return
 
         # Check if trade already active or daily limit reached

@@ -29,8 +29,9 @@ risk:
   correlation_guard: true
   dynamic_sl_buffer: true
   expiry_0dte_block_until: '13:00'
-  ignore_time_filter_in_paper: true
+  ignore_time_filter_in_paper: false
   initial_sl_percent: 0.1
+  last_entry_time: '15:00'
   mandatory_square_off: '15:12'
   market_close_time: '15:30'
   market_open_time: 09:15

@@ -445,10 +445,16 @@ class StateManager:
                 "m2mrealized": float(rms_data.get("m2mrealized", 0.0) or 0.0),
                 "is_live_synced": True
             }
-            self.available_margin = avail
-            self.equity = net
-            self.starting_equity = net
-            logger.info(f"[STATE] Angel One RMS updated: Net=₹{net:.2f}, Cash=₹{avail:.2f}, Collateral=₹{collateral:.2f}")
+            if self.execution_mode == "LIVE":
+                self.available_margin = avail
+                self.equity = net
+                self.starting_equity = net
+            else:
+                self.available_margin = self.paper_available_margin
+                self.starting_equity = self.paper_starting_capital
+                self.equity = round(self.starting_equity + self.daily_pnl, 2)
+
+            logger.info(f"[STATE] Angel One RMS updated: Net=₹{net:.2f}, Cash=₹{avail:.2f}, Collateral=₹{collateral:.2f} (Mode: {self.execution_mode})")
 
             # Safety Governor: Auto-pause Real Agent if running and live cash is below min_capital
             if self.real_agent_status == "RUNNING" and avail < min_capital:
@@ -539,13 +545,26 @@ class StateManager:
         total_unrealized = sum(p.unrealized_pnl for p in self.positions.values() if p.is_open and p.quantity > 0)
         self.unrealized_pnl = round(total_unrealized, 2)
         self.daily_pnl = round(self.realized_pnl + self.unrealized_pnl, 2)
-        self.equity = round(self.starting_equity + self.daily_pnl, 2)
-        
+
+        is_paper = (self.execution_mode == "PAPER")
+        base_eq = self.paper_starting_capital if is_paper else self.starting_equity
+        if base_eq <= 0:
+            base_eq = self.paper_capital if is_paper else 50000.0
+
+        self.equity = round(base_eq + self.daily_pnl, 2)
+        if is_paper:
+            self.paper_capital = self.equity
+            self.paper_daily_pnl = self.daily_pnl
+            self.paper_unrealized_pnl = self.unrealized_pnl
+
         if self.equity > self.peak_equity:
             self.peak_equity = self.equity
 
-        drawdown = (self.starting_equity - self.equity) / self.starting_equity
-        self.daily_drawdown_pct = max(0.0, round(drawdown * 100, 2))
+        if base_eq > 0:
+            drawdown = (base_eq - self.equity) / base_eq
+            self.daily_drawdown_pct = max(0.0, round(drawdown * 100, 2))
+        else:
+            self.daily_drawdown_pct = 0.0
 
     def record_completed_trade(
         self,

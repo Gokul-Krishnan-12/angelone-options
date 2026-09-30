@@ -92,21 +92,17 @@ class RiskManager:
             self.state_mgr.trigger_panic()
             return
 
-        # 5. Time Constraints
-        is_paper = (self.state_mgr.execution_mode == "PAPER")
-        ignore_time = self.cfg.get("ignore_time_filter_in_paper", False) and is_paper
+        # 5. Time Constraints (Strict 15:00 Entry Cut-off & Midday Chop)
+        now_time = ist_time()
+        # Midday chop filter
+        if time(11, 15) <= now_time <= time(13, 30):
+            self._raise_alert("WARNING", "MiddayChopFilter", "Order rejected: Midday consolidation window (11:15-13:30 IST).")
+            return
 
-        if not ignore_time:
-            now_time = ist_time()
-            # Midday chop filter
-            if time(11, 15) <= now_time <= time(13, 30):
-                self._raise_alert("WARNING", "MiddayChopFilter", "Order rejected: Midday consolidation window (11:15-13:30 IST).")
-                return
-
-            # EOD cut-off
-            if now_time >= time(15, 12):
-                self._raise_alert("WARNING", "EODCutoff", "Order rejected: Past mandatory square-off time (15:12 IST).")
-                return
+        # Strict entry cut-off (15:00 IST) - No new positions entered within 30 min of close
+        if now_time >= time(15, 0):
+            self._raise_alert("WARNING", "EODCutoff", "Order rejected: Past entry cut-off time (15:00 IST). Taking trades after 3:00 PM is restricted due to close risk.")
+            return
 
         # 6. Sizing Formulation
         equity = self.state_mgr.paper_capital if is_paper else self.state_mgr.equity
@@ -252,11 +248,8 @@ class RiskManager:
     async def _on_tick(self, tick: TickEvent):
         """Monitors active positions against stop-loss, breakeven, and partial take-profit triggers."""
         # 1. EOD Square-Off Monitor (15:12 IST)
-        is_paper = (self.state_mgr.execution_mode == "PAPER")
-        ignore_time = self.cfg.get("ignore_time_filter_in_paper", False) and is_paper
-        
         now_time = ist_time()
-        if now_time >= time(15, 12) and not self.state_mgr.is_halted and not ignore_time:
+        if now_time >= time(15, 12) and not self.state_mgr.is_halted:
             open_positions = [p for p in self.state_mgr.positions.values() if p.is_open]
             if open_positions:
                 logger.warning("[RISK] MANDATORY 15:12 IST SQUARE-OFF TRIGGERED! Closing all open positions at market.")
