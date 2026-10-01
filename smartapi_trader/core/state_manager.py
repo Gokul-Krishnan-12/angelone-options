@@ -493,6 +493,8 @@ class StateManager:
             current = self.spot_levels[underlying]
             current["spot"] = spot
             current["vwap"] = vwap
+            if pdh > 0 and pdl > 0 and pdh < pdl:
+                pdh, pdl = pdl, pdh
             if pdh > 0: current["pdh"] = pdh
             if pdl > 0: current["pdl"] = pdl
             if high > 0: current["high"] = max(current["high"], high)

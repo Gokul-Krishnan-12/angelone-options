@@ -199,24 +199,33 @@ class TradingOrchestrator:
             try:
                 live_spots = self.auth_manager.fetch_spot_ltp()
                 for k, v in live_spots.items():
+                    # Preserve correctly resolved PDH/PDL from strategy / historical store
+                    strat_state = getattr(self, "strategy", None)
+                    strat_st = strat_state.state.get(k, {}) if strat_state else {}
+                    true_pdh = strat_st.get("pdh", 0.0) or self.state_mgr.spot_levels.get(k, {}).get("pdh", 0.0)
+                    true_pdl = strat_st.get("pdl", 0.0) or self.state_mgr.spot_levels.get(k, {}).get("pdl", 0.0)
+
+                    # Ensure PDH >= PDL integrity
+                    if true_pdh > 0 and true_pdl > 0 and true_pdh < true_pdl:
+                        true_pdh, true_pdl = true_pdl, true_pdh
+
                     self.state_mgr.update_spot_telemetry(
                         underlying=k,
                         spot=v["spot"],
                         vwap=v.get("vwap", v["spot"]),
-                        pdh=v.get("close", 0.0),
-                        pdl=v.get("low", 0.0),
+                        pdh=true_pdh,
+                        pdl=true_pdl,
                         high=v.get("high", 0.0),
                         low=v.get("low", 0.0)
                     )
-                    if hasattr(self, "strategy") and k in self.strategy.state:
-                        self.strategy.state[k]["last_spot"] = v["spot"]
-                        self.strategy.state[k]["vwap"] = v.get("vwap", v["spot"])
+                    if strat_state and k in strat_state.state:
+                        strat_state.state[k]["last_spot"] = v["spot"]
+                        strat_state.state[k]["vwap"] = v.get("vwap", v["spot"])
                         if v.get("high", 0) > 0:
-                            self.strategy.state[k]["session_high"] = v["high"]
+                            strat_state.state[k]["session_high"] = max(strat_state.state[k].get("session_high", 0.0), v["high"])
                         if v.get("low", 0) > 0:
-                            self.strategy.state[k]["session_low"] = v["low"]
-                        if v.get("close", 0) > 0:
-                            self.strategy.state[k]["pdh"] = v["close"]
+                            cur_low = strat_state.state[k].get("session_low", 0.0)
+                            strat_state.state[k]["session_low"] = min(cur_low, v["low"]) if cur_low > 0 else v["low"]
             except Exception as e:
                 logger.error(f"[ORCHESTRATOR] Error querying spot LTP: {e}")
 
