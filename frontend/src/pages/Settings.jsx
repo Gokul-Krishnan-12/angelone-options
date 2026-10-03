@@ -385,7 +385,7 @@ export default function Settings({ state, onRefreshBalance }) {
                 value={riskPerTrade}
                 onChange={(e) => setRiskPerTrade(e.target.value)}
               />
-              <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>Default: 1.5% fixed fractional sizing</span>
+              <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>Optimal: 2.0% fixed fractional sizing (NIFTY)</span>
             </div>
 
             <div className="form-group">
@@ -397,7 +397,7 @@ export default function Settings({ state, onRefreshBalance }) {
                 value={maxDrawdown}
                 onChange={(e) => setMaxDrawdown(e.target.value)}
               />
-              <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>Default: 3.0% (liquidates and halts engine)</span>
+              <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>Optimal: 4.0% daily circuit breaker (halts engine)</span>
             </div>
 
             <div className="form-group">
@@ -581,7 +581,7 @@ export default function Settings({ state, onRefreshBalance }) {
             </div>
 
             <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginBottom: '0.75rem' }}>
-              Using Angel One Swing keys. Receives real-time trade alerts (entry, TP1 +1.8R, breakeven moved, SL hit) and an automated daily EOD report.
+              Real-time telemetry alerts (entry with signal vs. fill slippage delta, +3.0R target exit, +1.2R breakeven shift, scaling advisories & discard quarantine alerts) plus automated daily EOD reports.
             </div>
 
             <div className="form-group">
