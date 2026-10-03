@@ -10,8 +10,9 @@
 This repository is a production-grade algorithmic options trading system specialized for naked buying of Indian Index Options (**NIFTY 50**, **BANK NIFTY**, and **BSE SENSEX**).
 
 The core principle is **low-frequency, high-impulse liquidity sniper trading**:
-- **Why Options Buying**: Consolidating markets bleed option buyers due to theta decay ($\Theta = \partial V / \partial t$) and bid-ask spreads. This engine avoids churn by executing at most **2 high-conviction trades per day**.
+- **Why Options Buying**: Consolidating markets bleed option buyers due to theta decay ($\Theta = \partial V / \partial t$) and bid-ask spreads. This engine avoids churn by executing at most **2 high-conviction trades per day** and strictly avoiding the midday chop zone (11:15–13:30 IST).
 - **Institutional ICT / ILSME Framework**: Detects institutional liquidity sweeps of key session boundaries (Previous Day High/Low, Session Extremes), waits for a structural shift with a Fair Value Gap (FVG), and enters on the displacement retracement.
+- **Asymmetric Expectancy**: High Reward-to-Risk ratio ($3.0R$ Target vs $1.0R$ Stop with an automatic Breakeven shift at $+1.2R$) that generates consistent net profitability even at conservative ~31% win rates under heavy SEBI/brokerage friction.
 - **Dual Agent Architecture**: A completely isolated **Paper Trading Agent** and a live **Real Trading Agent** operate concurrently with identical strategy mechanics, allowing risk-free verification under realistic simulated microstructure friction before engaging live broker routing.
 
 ---
@@ -22,8 +23,14 @@ The core principle is **low-frequency, high-impulse liquidity sniper trading**:
 options/
 ├── AGENT.md                       # This document (system guide for AI agents)
 ├── README.md                      # Human-facing overview & mathematical formulations
+├── start.sh / stop.sh             # Background daemon process control scripts
 ├── requirements.txt               # Python package dependencies
 ├── main.py                        # Root launcher script
+├── scripts/
+│   ├── recursive_strategy_optimizer.py # Multi-core strategy parameter optimizer (3888+ combos)
+│   ├── run_regression_tests.py    # Automated end-to-end regression & math verification test suite
+│   ├── run_friction_backtest.py   # Historical backtester accounting for statutory friction
+│   └── run_paper_backtest.py      # Simulation runner with realistic fill delays
 ├── data/
 │   ├── instruments.db             # SQLite local cache of Angel One OpenAPIScripMaster
 │   └── historical/                # Historical JSON OHLCV backtest data
@@ -47,12 +54,12 @@ options/
 └── smartapi_trader/               # Core Python Quantitative Engine
     ├── main.py                    # TradingOrchestrator tying data, strategy, risk, execution & web
     ├── config/
-    │   ├── settings.yaml          # Risk parameters, execution mode, broker & telegram config
+    │   ├── settings.yaml          # Active risk parameters, execution mode, broker & telegram config
     │   └── symbols.yaml           # Index tokens, lot sizes, tick sizes, strike intervals
     ├── core/
     │   ├── event_bus.py           # Async pub/sub EventBus
     │   ├── events.py              # Dataclasses (Tick, Bar, Signal, Order, Fill, Position, RiskAlert)
-    │   └── state_manager.py       # In-memory central telemetry state, RMS sync & paper ledger
+    │   └── state_manager.py       # In-memory central telemetry state, RMS sync, paper ledger & scale checks
     ├── data/
     │   ├── candle_builder.py      # Tick-to-OHLCV aggregator (3m & 15m candles with VWAP)
     │   ├── instrument_loader.py   # Scrip master downloader, SQLite cache & strike resolver
@@ -61,7 +68,7 @@ options/
     │   ├── base_strategy.py       # Abstract BaseStrategy interface
     │   └── sniper_ilsme.py        # Institutional Liquidity Sweep & Momentum Expansion strategy
     ├── risk/
-    │   └── risk_manager.py        # Position sizing (1.5%), 3% daily drawdown stop, bracket manager
+    │   └── risk_manager.py        # Position sizing (2.0%), daily drawdown stop (4.0%), native bracket manager
     ├── execution/
     │   ├── base_engine.py         # Abstract ExecutionEngine interface
     │   ├── paper_engine.py        # Simulated fills with Ask + (Spread * 0.20) slippage & 200ms latency
@@ -72,14 +79,14 @@ options/
         ├── auth.py                # TOTP auto-generation & Angel One session initialization
         ├── charges.py             # Official SEBI & Angel One brokerage and statutory tax calculator
         ├── logger.py              # Loguru logger with WebSocket broadcast integration
-        └── telegram_notifier.py   # 2-way Telegram bot controller & automated trade broadcaster
+        └── telegram_notifier.py   # 2-way Telegram bot controller, slippage telemetry & scaling advisor
 ```
 
 ---
 
 ## 3. Quantitative Mechanics: ILSME Sniper Strategy
 
-File: [smartapi_trader/strategy/sniper_ilsme.py](file:///home/gokul/Desktop/options/smartapi_trader/strategy/sniper_ilsme.py)
+File: [smartapi_trader/strategy/sniper_ilsme.py](file:///home/gokul/Desktop/angelone-options/smartapi_trader/strategy/sniper_ilsme.py)
 
 1. **Macro Regime (15-Minute Timeframe)**:
    - Tracks Previous Day High (PDH), Previous Day Low (PDL), and Day High/Low extremes.
@@ -92,38 +99,89 @@ File: [smartapi_trader/strategy/sniper_ilsme.py](file:///home/gokul/Desktop/opti
    - Contract volume must exceed $1.8\times$ its 20-period moving average.
 4. **Contract Selection & Strike Mechanics**:
    - Dynamically targets At-The-Money (ATM) or immediate In-The-Money (ITM) options ($\Delta \approx 0.50 - 0.55$).
-   - **Nifty 50**: Weekly expiries, lot size = 65.
+   - **Nifty 50**: Weekly expiries, lot size = 65 (default primary engine).
    - **Bank Nifty**: Monthly expiries exclusively, lot size = 30.
    - **Sensex**: Weekly expiries, lot size = 20.
    - **Morning 0-DTE Filter**: On expiry day, 0-DTE contracts are blocked before 13:00 IST to avoid morning theta crush, automatically rolling to the next expiry cycle.
 
 ---
 
-## 4. Risk Management & Protective RMS Rules
+## 4. Audited Optimal Parameters & Mathematical Expectancy
 
-File: [smartapi_trader/risk/risk_manager.py](file:///home/gokul/Desktop/options/smartapi_trader/risk/risk_manager.py)
+The parameters currently active in [settings.yaml](file:///home/gokul/Desktop/angelone-options/smartapi_trader/config/settings.yaml) were determined via empirical grid optimization across 3,888 permutations on 251 historical trading sessions (accounting for all SEBI turnover taxes, STT, exchange charges, GST, and ₹40 round-trip brokerage).
 
-- **Position Sizing ($\alpha = 1.5\%$)**:
-  $$R_{\text{trade}} = \text{Capital} \times 0.015$$
-  $$\text{Lots} = \left\lfloor \frac{R_{\text{trade}}}{(P_{\text{entry}} - P_{\text{stop}}) \times \text{LotSize}} \right\rfloor$$
-  If calculated lots $< 1$, the order is rejected.
-- **Bracket Management**:
-  - **Hard Stop Loss**: Placed at displacement invalidation level (~10-15% premium).
-  - **Stage 1 (Breakeven)**: At $+1.0R$ profit, SL moves to entry price ($P_{\text{entry}}$).
-  - **Stage 2 (Partial TP)**: At $+2.0R$ profit, 60% of open lots are exited at market.
-  - **Stage 3 (Trailing Runner)**: Remaining 40% trail closed 3-minute swing levels.
-- **Circuit Breakers**:
-  - **Max Trades Per Day**: Exactly 2 trades per session.
-  - **Max Daily Drawdown**: 3.0% of starting equity triggers immediate liquidation and scanner halt.
-  - **Consecutive Loss Lock**: 2 consecutive losses pause trading for the remainder of the session.
-  - **Midday Chop Filter**: No new entries between 11:15 IST and 13:30 IST.
-  - **Mandatory EOD Liquidation**: Hard square-off at **15:12 IST**.
+### Live Production Configuration
+
+| Parameter | Optimized Value | Quantitative Rationale |
+|---|---|---|
+| **Risk Per Trade ($\alpha$)** | **2.0%** | Optimal fractional Kelly sizing preventing geometric drawdown |
+| **Initial Stop Loss** | **10.0%** | Invalidation level based on displacement bar low |
+| **Breakeven Shift Trigger** | **+1.2R** | Moves SL to exact entry price once $+1.2R$ is tagged |
+| **Target Profit (TP)** | **+3.0R** | Asymmetric reward harvesting (Reward:Risk ratio = 3.11:1) |
+| **Max Daily Drawdown** | **4.0%** | Hard circuit breaker halting engine for the session |
+| **Max Trades Per Day** | **2** | Eliminates overtrading in chop regimes |
+| **Trailing Stop Type** | **Breakeven (+0.0 pts)** | Backtests prove adding friction buffers causes premature stop-outs |
+| **Time Filter** | **09:30–11:15 & 13:30–15:00** | Strict avoidance of midday dead zones |
+
+### Backtest Expectancy & Returns Profile
+- **Initial Capital**: ₹1,00,000
+- **Net Annual Profit**: +₹52,774.71 (+52.8% ROI after all taxes & brokerage)
+- **Total Trades Taken**: 147 (Win Rate: 31.3%, Win/Loss Payoff Ratio: 3.11:1)
+- **Profit Factor**: 1.41
+- **Max Strategy Drawdown**: 12.4% (Max consecutive losses: 6)
 
 ---
 
-## 5. Dual Agent Architecture & Ledger Isolation
+## 5. Risk Management & Native Exchange Execution Safeguards
 
-File: [smartapi_trader/core/state_manager.py](file:///home/gokul/Desktop/options/smartapi_trader/core/state_manager.py)
+Files: [smartapi_trader/risk/risk_manager.py](file:///home/gokul/Desktop/angelone-options/smartapi_trader/risk/risk_manager.py), [smartapi_trader/execution/live_smartapi.py](file:///home/gokul/Desktop/angelone-options/smartapi_trader/execution/live_smartapi.py)
+
+### 1. Position Sizing Formula
+$$R_{\text{trade}} = \text{Capital} \times 0.02$$
+$$\text{Lots} = \left\lfloor \frac{R_{\text{trade}}}{(P_{\text{entry}} - P_{\text{stop}}) \times \text{LotSize}} \right\rfloor$$
+- **1-Lot Pilot Floor**: For live pilot validation, lots can be pinned to 1 lot (65 units for NIFTY) to measure live exchange slippage.
+
+### 2. Native Exchange STOPLOSS_LIMIT Orders
+- **No Client-Side Polling Risk**: Stop loss orders are immediately placed on Angel One's server as native `STOPLOSS_LIMIT` orders.
+- **Trigger-to-Price Buffer**: A 0.8% to 1.0% limit price buffer below the trigger price is enforced to guarantee order fills without suffering market order slippage on sudden index flushes.
+- **Modification Protocol**: When the position hits $+1.2R$, the system calls Angel One's `modifyOrder` endpoint to shift the trigger price directly to $P_{\text{entry}}$.
+
+### 3. Circuit Breakers
+- **Daily Drawdown Limit**: 4.0% of starting equity triggers immediate liquidation and scanner halt.
+- **Consecutive Loss Lock**: 2 consecutive losses pause trading for the remainder of the session.
+- **Mandatory EOD Liquidation**: Hard square-off at **15:12 IST** (prior to broker auto-squareoff charges).
+
+---
+
+## 6. Telegram Telemetry, Slippage Tracking & Automated Governance
+
+File: [smartapi_trader/utils/telegram_notifier.py](file:///home/gokul/Desktop/angelone-options/smartapi_trader/utils/telegram_notifier.py)
+
+### 1. Live Slippage Delta Telemetry
+Every trade entry and exit notification explicitly calculates and reports the difference between the theoretical signal price and the actual broker fill price:
+```
+🎯 TRADE ENTRY: NIFTY26OCT24800CE
+---------------------------------
+• Type: BUY_CE
+• Lots: 1 (65 Qty)
+• Signal Price: ₹142.50
+• Executed Fill: ₹143.20
+• Slippage Delta: +₹0.70 (+0.49%)  ⚠️ Adverse
+• Initial Stop Loss: ₹128.90 (-10.0%)
+• Target (3.0R): ₹184.40 (+29.4%)
+```
+
+### 2. Automated Scaling Milestone Notifications
+When the state manager detects positive performance milestones (e.g. 30 sessions completed with Profit Factor $\ge 1.30$, Win Rate $\ge 28\%$, and average slippage $\le 1.2$ pts), it triggers `notify_scaling_advisory()` recommending capital scale-up.
+
+### 3. Automated Quarantine & Discard Alerts
+If performance breaches risk bounds (e.g. Drawdown $> 15\%$, 7 consecutive losses, or average slippage $> 2.5$ pts), the system triggers `notify_discard_alert()` with a **RED QUARANTINE WARNING**, pausing live trading until parameters are re-optimized.
+
+---
+
+## 7. Dual Agent Architecture & Ledger Isolation
+
+File: [smartapi_trader/core/state_manager.py](file:///home/gokul/Desktop/angelone-options/smartapi_trader/core/state_manager.py)
 
 1. **Enclosed Paper Trading Ledger (`paper_state`)**:
    - Has its own virtual starting capital, available margin, net P&L, and trade quota count.
@@ -137,9 +195,9 @@ File: [smartapi_trader/core/state_manager.py](file:///home/gokul/Desktop/options
 
 ---
 
-## 6. Web Control Plane & REST/WebSocket Endpoints
+## 8. Web Control Plane & REST/WebSocket Endpoints
 
-File: [smartapi_trader/web/app.py](file:///home/gokul/Desktop/options/smartapi_trader/web/app.py)
+File: [smartapi_trader/web/app.py](file:///home/gokul/Desktop/angelone-options/smartapi_trader/web/app.py)
 
 ### Key REST Endpoints
 
@@ -172,23 +230,7 @@ Broadcasts real-time events to connected clients:
 
 ---
 
-## 7. Telegram 2-Way Bot & Notifications
-
-File: [smartapi_trader/utils/telegram_notifier.py](file:///home/gokul/Desktop/options/smartapi_trader/utils/telegram_notifier.py)
-
-- **Automated Broadcasts**: Trade entries (with strike, SL, target), trade exits (with P&L and charges), risk warnings, and 15:30 IST daily EOD reports.
-- **Interactive Commands**:
-  - `/status` — View current mode, active positions, daily P&L, and quota.
-  - `/positions` — Inspect open bracket details and unrealized P&L.
-  - `/orders` — View recent order audit trail.
-  - `/start_paper`, `/pause_paper` — Toggle Paper Trading Agent.
-  - `/start_real`, `/pause_real` — Toggle Live Angel One Agent.
-  - `/squareoff` — Emergency killswitch: cancels orders, closes all positions, halts engine.
-  - `/help` — List available commands.
-
----
-
-## 8. Common Operator & Developer Workflows
+## 9. Common Operator & Developer Workflows
 
 ### How to Start the Engine
 ```bash
@@ -217,34 +259,19 @@ npm run build
 ```
 > **CRITICAL**: Whenever editing files in `frontend/src/`, always run `npm run build` so that `frontend/dist/` is updated and served immediately by FastAPI.
 
+### How to Run Automated Tests
+```bash
+./venv/bin/python scripts/run_regression_tests.py
+```
+
 ### How to Inspect Logs
 ```bash
 tail -f logs/trader_$(date +%F).log
 ```
 
-### How to Test Strategy Execution Manually
-```bash
-# Trigger a synthetic test signal
-curl -X POST http://localhost:5000/api/test_signal \
-     -H "Content-Type: application/json" \
-     -d '{"underlying":"NIFTY","signal_type":"BUY_CE"}'
-
-# Inspect position
-curl -s http://localhost:5000/api/state | jq '.positions'
-
-# Exit position manually
-curl -X POST http://localhost:5000/api/exit_position/NIFTY03NOV2623150CE
-
-# Verify completed trade ledger with strike price
-curl -s http://localhost:5000/api/state | jq '.paper_state.completed_trades'
-
-# Reset paper quota back to 0
-curl -X POST http://localhost:5000/api/paper/reset_trades
-```
-
 ---
 
-## 9. Critical Guidelines for Future AI Agents
+## 10. Critical Guidelines for Future AI Agents
 
 1. **Maintain Paper / Live Ledger Separation**:
    - `paper_state` fields (`paper_capital`, `paper_completed_trades`, `paper_trades_taken`) must **never** write to or overwrite `broker_rms` or live balance.
@@ -252,9 +279,11 @@ curl -X POST http://localhost:5000/api/paper/reset_trades
 2. **Preserve Strike Price & Charges Tracking**:
    - Every completed trade record **must** include `strike_price`, `option_type`, `gross_pnl`, `total_charges`, and `net_pnl`.
    - When closing positions in `app.py`, `risk_manager.py`, or `telegram_notifier.py`, always pass `strike_price=getattr(pos, 'strike_price', 0.0)` and `option_type=getattr(pos, 'option_type', '')`.
-3. **Process Management**:
+3. **Strict Parameter Consistency**:
+   - Keep `smartapi_trader/config/settings.yaml`, `frontend/src/pages/Settings.jsx`, and `frontend/src/pages/SystemWorkflow.jsx` in complete synchronization with the audited values (`risk_pct=2.0`, `stop_loss_pct=10.0`, `breakeven_trigger_r=1.2`, `target_profit_r=3.0`, `max_daily_drawdown_pct=4.0`, `max_trades_per_day=2`).
+4. **Process Management**:
    - The backend runs via `./venv/bin/python main.py`. Check running processes with `ps aux | grep main.py` or port `5000` via `ss -tulpn`.
    - Never spawn duplicate instances of `main.py` simultaneously on port `5000`.
-4. **UI Styling & Aesthetics**:
+5. **UI Styling & Aesthetics**:
    - Preserve Gokul Krishnan's dark obsidian cyberpunk visual design (`#121110`, `#1c1a18`, `#ed4c22`, `#38bdf8`, `#10b981`, `#f43f5e`).
    - Use JetBrains Mono / Space Grotesk typography for numerical displays and financial metrics.
