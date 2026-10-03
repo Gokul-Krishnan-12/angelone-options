@@ -469,7 +469,7 @@ export default function Settings({ state, onRefreshBalance }) {
             </div>
 
             <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginBottom: '0.75rem' }}>
-              Operates across both Paper and Live Real Trade agents with strict 2-trades/day cap and 1.5% equity risk.
+              Operates across both Paper and Live Real Trade agents with strict 2-trades/day cap and 2.0% equity risk.
             </div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
