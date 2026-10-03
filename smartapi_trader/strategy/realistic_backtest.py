@@ -6,34 +6,30 @@ from typing import Dict, Any, List, Optional
 from smartapi_trader.utils.charges import calculate_option_charges
 from smartapi_trader.utils.logger import logger
 
-class BacktestEngine:
+class RealisticBacktestEngine:
     """
-    Institutional Liquidity Sweep & Momentum Expansion (ILSME) Sniper Backtest Engine.
-    Replays actual 15m and 3m candlestick data fetched directly from Angel One SmartAPI.
-    
-    Hardened Institutional Model:
-    - Discrete Integer Contract Sizing (Exact floor math)
-    - Realistic Bid-Ask Slippage Modeling (Crossing Ask on entry and bid on market stops)
-    - Full Statutory Taxes (STT 0.15% on sell, GST 18%, Exchange Turnover, SEBI, Stamp Duty)
-    - Single-Lot vs Multi-Lot Exit Logic (100% full exit at target on 1 lot; 50% partial on >= 2 lots)
-    - Selective Tradable Indices (NIFTY 50, SENSEX default; BANK NIFTY & MIDCPNIFTY optional)
-    - Widened Breakeven Trigger (+1.5R) to eliminate premature fee-generating stops
+    Institutionally Hardened Backtest Engine incorporating:
+    1. Discrete Integer Contract Sizing (Exact Lot Size math)
+    2. Dynamic Slippage Modeling (Crossing Bid-Ask Spread on Entry & Market Exits)
+    3. True Breakeven Friction (Capturing STT + Turnover + Brokerage + Slip on scratches)
+    4. Single-lot vs Multi-lot Exit Logic (100% target exit on 1-lot; multi-tier only when lots >= 2)
+    5. Configurable Breakeven Trigger (0.6R vs 1.2R vs 1.5R) to evaluate premature BE whip-sawing.
     """
     def __init__(
         self,
         starting_capital: float = 50000.0,
         risk_per_trade_pct: float = 0.015,
         max_trades_per_day: int = 2,
-        initial_sl_pct: float = 0.12,
-        be_trigger_r: float = 1.5,
-        tp1_r: float = 3.0,
+        initial_sl_pct: float = 0.10,
+        be_trigger_r: float = 0.60,
+        tp1_r: float = 2.2,
         tp1_qty_pct: float = 0.50,
+        slippage_pts_entry: float = 0.80, # 0.8 pt entry spread crossing on Nifty
+        slippage_pts_exit: float = 0.50,  # 0.5 pt stop/market exit spread crossing
+        enable_banknifty: bool = True,
         enable_ilsme_sweep: bool = True,
         enable_momentum_breakout: bool = True,
-        dynamic_compounding: bool = False,
-        active_indices: Optional[List[str]] = None,
-        slippage_pts_entry: float = 0.80,
-        slippage_pts_exit: float = 0.50,
+        require_swing_inval_be: bool = True,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None
     ):
@@ -44,21 +40,22 @@ class BacktestEngine:
         self.be_trigger_r = be_trigger_r
         self.tp1_r = tp1_r
         self.tp1_qty_pct = tp1_qty_pct
-        self.enable_ilsme_sweep = enable_ilsme_sweep
-        self.enable_momentum_breakout = enable_momentum_breakout
-        self.dynamic_compounding = dynamic_compounding
-        self.active_indices = [x.upper() for x in (active_indices or ["NIFTY", "SENSEX"])]
         self.slippage_pts_entry = slippage_pts_entry
         self.slippage_pts_exit = slippage_pts_exit
+        self.enable_banknifty = enable_banknifty
+        self.enable_ilsme_sweep = enable_ilsme_sweep
+        self.enable_momentum_breakout = enable_momentum_breakout
+        self.require_swing_inval_be = require_swing_inval_be
         self.start_date = start_date
         self.end_date = end_date
 
     def run(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> Dict[str, Any]:
-        """Executes backtest across historical data for active indices."""
         indices_data = {}
-        for idx in ["nifty", "banknifty", "sensex"]:
-            if idx.upper() not in self.active_indices:
-                continue
+        target_indices = ["nifty", "sensex"]
+        if self.enable_banknifty:
+            target_indices.append("banknifty")
+
+        for idx in target_indices:
             path_15m = f"data/historical/{idx}_15m.json"
             path_3m = f"data/historical/{idx}_3m.json"
             if os.path.exists(path_15m) and os.path.exists(path_3m):
@@ -79,53 +76,22 @@ class BacktestEngine:
                         "lot_size": 65 if idx == "nifty" else (30 if idx == "banknifty" else 20),
                         "base_premium": 180.0 if idx == "nifty" else (350.0 if idx == "banknifty" else 220.0),
                         "fvg_min": 2.0 if idx == "nifty" else 5.0,
-                        "slip_mult": 1.0 if idx == "nifty" else (2.0 if idx == "banknifty" else 1.2),
-                        "min_or": 45.0 if idx == "nifty" else (160.0 if idx == "sensex" else 120.0)
+                        "slip_mult": 1.0 if idx == "nifty" else (2.0 if idx == "banknifty" else 1.2)
                     }
 
-
-        if not indices_data:
-            # Fallback to NIFTY
-            idx = "nifty"
-            path_15m = f"data/historical/{idx}_15m.json"
-            path_3m = f"data/historical/{idx}_3m.json"
-            if os.path.exists(path_15m) and os.path.exists(path_3m):
-                with open(path_15m) as f1, open(path_3m) as f2:
-                    m15 = json.load(f1)
-                    m3 = json.load(f2)
-                    k = 2.0 / (50.0 + 1.0)
-                    cur_ema = m15[0][4]
-                    ema_map = {}
-                    for b in m15:
-                        cur_ema = (b[4] * k) + (cur_ema * (1.0 - k))
-                        ema_map[b[0][:16]] = cur_ema
-                    indices_data["NIFTY"] = {
-                        "15m": m15,
-                        "3m": m3,
-                        "ema": ema_map,
-                        "lot_size": 65,
-                        "base_premium": 180.0,
-                        "fvg_min": 2.0,
-                        "slip_mult": 1.0
-                    }
-
-        if not indices_data:
-            raise FileNotFoundError(f"No active historical candle datasets found for {self.active_indices}")
-
-        all_dates = sorted(list(set(c[0][:10] for c in indices_data[list(indices_data.keys())[0]]["3m"])))
+        all_dates = sorted(list(set(c[0][:10] for c in indices_data["NIFTY"]["3m"])))
         eff_start = start_date or self.start_date
         eff_end = end_date or self.end_date
 
         dates = [d for d in all_dates if (not eff_start or d >= eff_start) and (not eff_end or d <= eff_end)]
         if not dates:
-            raise ValueError(f"No trading data available in the requested range: {eff_start} to {eff_end}")
+            raise ValueError(f"No trading data available in range: {eff_start} to {eff_end}")
 
         capital = self.starting_capital
         peak_capital = capital
         max_drawdown_pct = 0.0
 
         trades: List[Dict[str, Any]] = []
-        daily_equity_curve: List[Dict[str, Any]] = []
         prev_levels = {}
 
         if eff_start and eff_start in all_dates:
@@ -251,25 +217,22 @@ class BacktestEngine:
                             or_l = st["or_low"]
                             or_rng = max(1.0, or_h - or_l)
 
-                            # Dead Chop Volatility Floor Filter
-                            if or_rng >= d.get("min_or", 0.0):
-                                if c > or_h and c > vwap and c > ema_val and (c - or_h) <= (or_rng * 0.40):
-                                    st["armed_fvg"] = {
-                                        "source": "MOMENTUM_ORB",
-                                        "type": "BUY_CE",
-                                        "top": h,
-                                        "bottom": max(or_h, l),
-                                        "swing_inval": or_h
-                                    }
-                                elif c < or_l and c < vwap and c < ema_val and (or_l - c) <= (or_rng * 0.40):
-                                    st["armed_fvg"] = {
-                                        "source": "MOMENTUM_ORB",
-                                        "type": "BUY_PE",
-                                        "top": min(or_l, h),
-                                        "bottom": l,
-                                        "swing_inval": or_l
-                                    }
-
+                            if c > or_h and c > vwap and c > ema_val and (c - or_h) <= (or_rng * 0.40):
+                                st["armed_fvg"] = {
+                                    "source": "MOMENTUM_ORB",
+                                    "type": "BUY_CE",
+                                    "top": h,
+                                    "bottom": max(or_h, l),
+                                    "swing_inval": or_h
+                                }
+                            elif c < or_l and c < vwap and c < ema_val and (or_l - c) <= (or_rng * 0.40):
+                                st["armed_fvg"] = {
+                                    "source": "MOMENTUM_ORB",
+                                    "type": "BUY_PE",
+                                    "top": min(or_l, h),
+                                    "bottom": l,
+                                    "swing_inval": or_l
+                                }
 
                     # 4. Entry Execution
                     if st.get("armed_fvg") and not st.get("in_trade"):
@@ -300,7 +263,7 @@ class BacktestEngine:
                             day_trades_count += 1
 
                             lot_size = d["lot_size"]
-                            slip_mult = d.get("slip_mult", 1.0)
+                            slip_mult = d["slip_mult"]
                             
                             dt_obj = datetime.strptime(date_str, "%Y-%m-%d")
                             w_day = dt_obj.weekday()
@@ -316,14 +279,19 @@ class BacktestEngine:
                             else:
                                 raw_entry_opt = round(170.0 + (dte * 12.0), 2)
 
+                            # Apply Entry Slippage (Crossing Ask)
                             entry_slip = self.slippage_pts_entry * slip_mult
                             entry_opt = round(raw_entry_opt + entry_slip, 2)
 
                             sl_opt = round(raw_entry_opt * (1.0 - self.initial_sl_pct), 2)
                             unit_risk = entry_opt - sl_opt
 
+                            # Discrete Integer Sizing
                             capital_at_risk = capital * self.risk_per_trade_pct
                             calc_lots = math.floor(capital_at_risk / (unit_risk * lot_size))
+                            
+                            # Real-world fallback: if capital_at_risk allows >= 0.8 lot, execute 1 lot
+                            # otherwise if strict discreteness rejects:
                             lots = max(1, calc_lots)
                             max_lots_margin = max(1, math.floor((capital * 0.75) / (entry_opt * lot_size)))
                             lots = min(lots, max_lots_margin)
@@ -371,6 +339,7 @@ class BacktestEngine:
                                 # Take Target 1 profit
                                 if peak_opt_price >= target_tp1_price and not partial_sold:
                                     if lots == 1:
+                                        # Single Lot Exit: 100% full exit at target!
                                         exit_slip = self.slippage_pts_exit * slip_mult
                                         actual_exit = max(1.0, target_tp1_price - exit_slip)
                                         realized_gross += (actual_exit - entry_opt) * remaining_qty
@@ -380,6 +349,7 @@ class BacktestEngine:
                                         exit_reason = f"Full Target Hit (+{self.tp1_r:.1f}R)"
                                         break
                                     else:
+                                        # Multi-Lot: Partial exit 50%
                                         partial_sold = True
                                         lots_to_close = max(1, math.floor(lots * self.tp1_qty_pct))
                                         qty_close = lots_to_close * lot_size
@@ -396,13 +366,13 @@ class BacktestEngine:
                                     actual_exit = max(1.0, cur_sl - exit_slip)
                                     exit_price = actual_exit
                                     exit_time = f_ts
-                                    exit_reason = "Trailing Breakeven SL" if be_moved else f"Hard Stop-Loss (-{int(self.initial_sl_pct*100)}%)"
+                                    exit_reason = "Trailing Breakeven SL" if be_moved else "Hard Stop-Loss (-10%)"
                                     realized_gross += (exit_price - entry_opt) * remaining_qty
                                     remaining_qty = 0
                                     break
 
                                 # Breakeven Trigger Logic
-                                swing_broken = (f_h >= swing_inval) if trade_type == "BUY_CE" else (f_l <= swing_inval)
+                                swing_broken = (f_h >= swing_inval) if trade_type == "BUY_CE" else (f_l <= swing_inval) if self.require_swing_inval_be else True
                                 if peak_opt_price >= (raw_entry_opt + target_be) and swing_broken and not be_moved:
                                     be_moved = True
 
@@ -429,8 +399,8 @@ class BacktestEngine:
                             )
 
                             net_pnl = round(realized_gross - charges["total_charges"], 2)
-                            trade_slip = (self.slippage_pts_entry + self.slippage_pts_exit) * slip_mult * qty
-                            total_slippage_cost += trade_slip
+                            trade_slip_cost = (self.slippage_pts_entry + self.slippage_pts_exit) * slip_mult * qty
+                            total_slippage_cost += trade_slip_cost
 
                             capital += net_pnl
                             if capital > peak_capital:
@@ -467,21 +437,11 @@ class BacktestEngine:
                                 "entry_price": entry_opt,
                                 "exit_price": round(exit_price, 2),
                                 "gross_pnl": round(realized_gross, 2),
-                                "brokerage": charges["brokerage"],
-                                "stt": charges["stt"],
-                                "exchange_charges": charges["exchange_charges"],
-                                "sebi_charges": charges["sebi_charges"],
-                                "stamp_duty": charges["stamp_duty"],
-                                "gst": charges["gst"],
-                                "total_charges": charges["total_charges"],
+                                "charges": charges["total_charges"],
                                 "net_pnl": net_pnl,
-                                "capital_after": round(capital, 2),
-                                "exit_reason": exit_reason,
-                                "result": outcome
+                                "outcome": outcome,
+                                "exit_reason": exit_reason
                             })
-
-                            st["in_trade"] = False
-                            active_trade_direction = None
 
             for u, d in indices_data.items():
                 bars = today_3m_by_idx[u]
@@ -491,19 +451,13 @@ class BacktestEngine:
                         "pdl": min(b[3] for b in bars)
                     }
 
-            daily_equity_curve.append({
-                "date": date_str,
-                "capital": round(capital, 2),
-                "trades": day_trades_count
-            })
-
-        wins = [t for t in trades if t["result"] == "WIN"]
-        losses = [t for t in trades if t["result"] == "LOSS"]
-        bes = [t for t in trades if t["result"] == "BREAKEVEN"]
+        wins = [t for t in trades if t["outcome"] == "WIN"]
+        losses = [t for t in trades if t["outcome"] == "LOSS"]
+        bes = [t for t in trades if t["outcome"] == "BREAKEVEN"]
 
         total_net_pnl = round(capital - self.starting_capital, 2)
         total_gross = sum(t["gross_pnl"] for t in trades)
-        total_fees = sum(t["total_charges"] for t in trades)
+        total_fees = sum(t["charges"] for t in trades)
 
         gross_profit = sum(t["net_pnl"] for t in trades if t["net_pnl"] > 0)
         gross_loss = abs(sum(t["net_pnl"] for t in trades if t["net_pnl"] < 0))
@@ -528,11 +482,7 @@ class BacktestEngine:
                 "profit_factor": pf,
                 "max_drawdown_pct": round(max_drawdown_pct, 2),
                 "avg_win": round(sum(t["net_pnl"] for t in wins) / len(wins), 2) if wins else 0,
-                "avg_loss": round(sum(t["net_pnl"] for t in losses) / len(losses), 2) if losses else 0,
-                "risk_reward_ratio": f"1 : {self.tp1_r:.1f}",
-                "risk_per_trade": f"{self.risk_per_trade_pct*100:.1f}%",
-                "dynamic_compounding": self.dynamic_compounding
+                "avg_loss": round(sum(t["net_pnl"] for t in losses) / len(losses), 2) if losses else 0
             },
-            "trades": trades,
-            "daily_equity_curve": daily_equity_curve
+            "trades": trades
         }

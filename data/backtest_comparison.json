@@ -1,0 +1,71 @@
+{
+  "baseline": {
+    "period": "2025-09-26 to 2026-09-30 (251 Sessions)",
+    "starting_capital": 50000.0,
+    "ending_capital": 69086.55,
+    "total_net_pnl": 19086.55,
+    "total_gross_pnl": 32554.56,
+    "total_brokerage_and_taxes": 13468.01,
+    "roi_pct": 38.17,
+    "win_rate_pct": 23.7,
+    "non_losing_rate_pct": 61.6,
+    "total_trades": 198,
+    "wins": 47,
+    "losses": 76,
+    "breakeven": 75,
+    "profit_factor": 1.52,
+    "max_drawdown_pct": 24.72,
+    "avg_win": 1957.56,
+    "avg_loss": -891.81,
+    "trades_by_engine": {
+      "ILSME_REVERSAL": 198,
+      "MOMENTUM_ORB": 0
+    }
+  },
+  "dual_engine": {
+    "period": "2025-09-26 to 2026-09-30 (251 Sessions)",
+    "starting_capital": 50000.0,
+    "ending_capital": 135388.09,
+    "total_net_pnl": 85388.09,
+    "total_gross_pnl": 115670.61,
+    "total_brokerage_and_taxes": 30282.52,
+    "roi_pct": 170.78,
+    "win_rate_pct": 26.0,
+    "non_losing_rate_pct": 61.7,
+    "total_trades": 420,
+    "wins": 109,
+    "losses": 161,
+    "breakeven": 150,
+    "profit_factor": 1.67,
+    "max_drawdown_pct": 17.35,
+    "avg_win": 2569.76,
+    "avg_loss": -1142.63,
+    "trades_by_engine": {
+      "ILSME_REVERSAL": 99,
+      "MOMENTUM_ORB": 321
+    }
+  },
+  "optimized_dual_engine": {
+    "period": "2025-09-26 to 2026-09-30 (251 Sessions)",
+    "starting_capital": 50000.0,
+    "ending_capital": -217461.01,
+    "total_net_pnl": -267461.01,
+    "total_gross_pnl": -239043.48,
+    "total_brokerage_and_taxes": 28417.53,
+    "roi_pct": -534.92,
+    "win_rate_pct": 39.8,
+    "non_losing_rate_pct": 58.1,
+    "total_trades": 420,
+    "wins": 167,
+    "losses": 176,
+    "breakeven": 77,
+    "profit_factor": 0.72,
+    "max_drawdown_pct": 722.27,
+    "avg_win": 3593.2,
+    "avg_loss": -4898.85,
+    "trades_by_engine": {
+      "ILSME_REVERSAL": 99,
+      "MOMENTUM_ORB": 321
+    }
+  }
+}

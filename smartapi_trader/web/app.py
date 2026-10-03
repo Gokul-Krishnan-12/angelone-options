@@ -710,6 +710,8 @@ class SettingsUpdateRequest(BaseModel):
     telegram_eod_time: Optional[str] = None
     enable_ilsme_sweep: Optional[bool] = None
     enable_momentum_breakout: Optional[bool] = None
+    active_indices: Optional[List[str]] = None
+
 
 @app.get("/api/settings")
 async def get_settings():
@@ -802,6 +804,15 @@ async def update_settings(req: SettingsUpdateRequest):
             cfg.setdefault("strategy", {})["enable_momentum_breakout"] = req.enable_momentum_breakout
             if ctx.strategy and hasattr(ctx.strategy, "cfg"):
                 ctx.strategy.cfg["enable_momentum_breakout"] = req.enable_momentum_breakout
+
+        if req.active_indices is not None:
+            cleaned_indices = [idx.strip().upper() for idx in req.active_indices if idx.strip()]
+            cfg.setdefault("strategy", {})["active_indices"] = cleaned_indices
+            if ctx.strategy and hasattr(ctx.strategy, "active_indices"):
+                ctx.strategy.active_indices = cleaned_indices
+                for idx in cleaned_indices:
+                    if idx not in ctx.strategy.state:
+                        ctx.strategy._init_index_state(idx)
 
         with open(config_path, "w") as f:
             yaml.safe_dump(cfg, f, default_flow_style=False)

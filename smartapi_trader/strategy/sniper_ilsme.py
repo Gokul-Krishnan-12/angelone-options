@@ -321,6 +321,13 @@ class SniperILSMEStrategy(BaseStrategy):
                 or_l = st["or_low"]
                 or_rng = max(1.0, or_h - or_l)
 
+                # Minimum Volatility Expansion Filter: Block breakouts on compressed/dead chop days
+                min_or_thresh = 45.0 if underlying == "NIFTY" else (160.0 if underlying == "SENSEX" else (120.0 if underlying == "BANKNIFTY" else 40.0))
+                min_or_cfg = self.cfg.get(f"min_orb_range_{underlying.lower()}", min_or_thresh)
+                if or_rng < min_or_cfg:
+                    # Opening range is too narrow / low-volatility chop regime
+                    return
+
                 # Bullish Breakout: 3m Close > OR High + Close > VWAP
                 if bar.close > or_h and bar.close > vwap and (bar.close - or_h) <= (or_rng * 0.40):
                     st["armed_fvg"] = {
@@ -463,13 +470,14 @@ class SniperILSMEStrategy(BaseStrategy):
         else:
             logger.warning(f"[STRATEGY] Real exchange LTP unavailable for {option_contract['tradingsymbol']}; using dynamic model premium: ₹{entry_price} (Intrinsic: ₹{intrinsic:.2f}, Extrinsic: ₹{atm_extrinsic * decay_factor:.2f})")
         
-        # Hard stop-loss ~10% (from risk settings)
-        sl_pct = self.risk_cfg.get("initial_sl_percent", 0.10)
+        # Hard stop-loss ~12% (from risk settings)
+        sl_pct = self.risk_cfg.get("initial_sl_percent", 0.12)
         stop_loss = round(entry_price * (1.0 - sl_pct), 2)
         unit_risk = entry_price - stop_loss
         
-        # Target 1: +2.0R (Partial exit 60%)
-        target_1 = round(entry_price + (unit_risk * self.risk_cfg.get("partial_exit_r", 2.0)), 2)
+        # Target 1: +3.0R (Full exit on 1 lot, 50% partial exit on >=2 lots)
+        target_r = self.risk_cfg.get("partial_exit_r", 3.0)
+        target_1 = round(entry_price + (unit_risk * target_r), 2)
 
         # Structural Invalidation Level (3m swing high for CE, swing low for PE)
         swing_inval = fvg.get("displacement_high" if signal_type == "BUY_CE" else "displacement_low", 0.0)

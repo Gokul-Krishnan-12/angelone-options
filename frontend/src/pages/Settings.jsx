@@ -32,13 +32,14 @@ export default function Settings({ state, onRefreshBalance }) {
   const [isEodTesting, setIsEodTesting] = useState(false);
 
   // Risk parameters
-  const [riskPerTrade, setRiskPerTrade] = useState(1.5);
-  const [maxDrawdown, setMaxDrawdown] = useState(3.0);
+  const [riskPerTrade, setRiskPerTrade] = useState(2.0);
+  const [maxDrawdown, setMaxDrawdown] = useState(4.0);
   const [maxTrades, setMaxTrades] = useState(2);
 
-  // Strategy Dual Engines
+  // Strategy Dual Engines & Active Instruments
   const [enableIlsmeSweep, setEnableIlsmeSweep] = useState(true);
   const [enableMomentumBreakout, setEnableMomentumBreakout] = useState(true);
+  const [activeIndices, setActiveIndices] = useState(['NIFTY']);
 
   // Status
   const [isSaving, setIsSaving] = useState(false);
@@ -76,6 +77,7 @@ export default function Settings({ state, onRefreshBalance }) {
         const strat = data.strategy || {};
         if (strat.enable_ilsme_sweep !== undefined) setEnableIlsmeSweep(strat.enable_ilsme_sweep);
         if (strat.enable_momentum_breakout !== undefined) setEnableMomentumBreakout(strat.enable_momentum_breakout);
+        if (Array.isArray(strat.active_indices)) setActiveIndices(strat.active_indices);
       } else {
         setServerOffline(true);
       }
@@ -148,6 +150,7 @@ export default function Settings({ state, onRefreshBalance }) {
       telegram_eod_time: telegramEodTime,
       enable_ilsme_sweep: enableIlsmeSweep,
       enable_momentum_breakout: enableMomentumBreakout,
+      active_indices: activeIndices,
     };
 
     if (apiKey) payload.api_key = apiKey;
@@ -482,7 +485,7 @@ export default function Settings({ state, onRefreshBalance }) {
                     Institutional Liquidity Sweep (ILSME Reversal)
                   </div>
                   <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>
-                    Detects structural liquidity sweeps of PDH / PDL with rejection wicks $\ge 30\%$ and 3m FVG retracement.
+                    Detects structural liquidity sweeps of PDH / PDL with rejection wicks &ge; 30% and 3m FVG retracement.
                   </div>
                 </div>
               </label>
@@ -504,7 +507,65 @@ export default function Settings({ state, onRefreshBalance }) {
                 </div>
               </label>
             </div>
+
+            {/* Tradable Indices Checkboxes */}
+            <div style={{ marginTop: '1.25rem', paddingTop: '1rem', borderTop: '1px solid var(--border-light)' }}>
+              <div style={{ fontSize: '0.82rem', fontWeight: 700, color: '#fff', marginBottom: '0.25rem' }}>
+                Active Tradable Indices
+              </div>
+              <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginBottom: '0.75rem' }}>
+                Select indices to scan. NIFTY 50 and SENSEX are optimal for ₹50k capital. Enable BANK NIFTY & MIDCPNIFTY as capital scales.
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '0.5rem' }}>
+                {[
+                  { id: 'NIFTY', label: 'NIFTY 50', desc: 'Lot: 65 | Weekly' },
+                  { id: 'SENSEX', label: 'SENSEX', desc: 'Lot: 20 | Weekly' },
+                  { id: 'BANKNIFTY', label: 'BANK NIFTY', desc: 'Lot: 30 | Monthly' },
+                  { id: 'MIDCPNIFTY', label: 'MIDCPNIFTY', desc: 'Lot: 120 | Monthly' }
+                ].map((item) => {
+                  const isChecked = activeIndices.includes(item.id);
+                  return (
+                    <label
+                      key={item.id}
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '0.2rem',
+                        padding: '0.5rem 0.75rem',
+                        borderRadius: '6px',
+                        background: isChecked ? 'rgba(237, 76, 34, 0.12)' : 'rgba(255,255,255,0.02)',
+                        border: isChecked ? '1px solid var(--accent-orange)' : '1px solid var(--border-subtle)',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setActiveIndices([...activeIndices, item.id]);
+                            } else {
+                              if (activeIndices.length > 1) {
+                                setActiveIndices(activeIndices.filter((x) => x !== item.id));
+                              }
+                            }
+                          }}
+                          style={{ accentColor: 'var(--accent-orange)' }}
+                        />
+                        <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#fff' }}>{item.label}</span>
+                      </div>
+                      <span style={{ fontSize: '0.68rem', color: 'var(--text-dim)', paddingLeft: '1.4rem' }}>
+                        {item.desc}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
           </div>
+
 
           {/* Card 5: Telegram Real-Time Alerts & Remote 2-Way Bot */}
           <div className="hud-card">

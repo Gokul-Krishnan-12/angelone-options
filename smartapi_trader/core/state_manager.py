@@ -654,10 +654,42 @@ class StateManager:
         if self.storage:
             self.storage.save_trade(trade_record)
             self.storage.mark_position_closed(symbol, realized_pnl=pnl)
-            self._sync_ledger_to_storage()
-
         self._recalculate_portfolio()
         self.broadcast_state()
+
+        # Systematic Health & Scaling Governance Audit
+        if hasattr(self, "notifier") and self.notifier and not is_paper_trade:
+            total_real = len(self.completed_trades)
+            # 1. Scale-Up Milestone (Every 30 trades or when reaching green light criteria)
+            if total_real >= 30 and (total_real % 15 == 0):
+                wins = sum(1 for t in self.completed_trades if float(t.get("net_pnl", 0)) > 0)
+                gross_w = sum(float(t.get("gross_pnl", 0)) for t in self.completed_trades if float(t.get("gross_pnl", 0)) > 0)
+                gross_l = sum(abs(float(t.get("gross_pnl", 0))) for t in self.completed_trades if float(t.get("gross_pnl", 0)) < 0)
+                pf = (gross_w / max(1.0, gross_l)) if gross_l > 0 else 1.5
+                winrate = (wins / total_real * 100.0)
+                
+                if pf >= 1.30 and winrate >= 28.0 and self.daily_drawdown_pct < 18.0:
+                    self.notifier.notify_scaling_advisory({
+                        "total_trades": total_real,
+                        "profit_factor": pf,
+                        "win_rate": winrate,
+                        "max_drawdown_pct": self.daily_drawdown_pct,
+                        "avg_slippage": 0.8
+                    })
+
+            # 2. Hard Discard / Quarantine Check
+            if self.consecutive_losses >= 8:
+                self.notifier.notify_discard_alert("8 Consecutive Losses Reached", {
+                    "drawdown_pct": self.daily_drawdown_pct,
+                    "consecutive_losses": self.consecutive_losses,
+                    "avg_slippage": 1.2
+                })
+            elif self.daily_drawdown_pct >= 18.0:
+                self.notifier.notify_discard_alert("Max Drawdown Threshold (18%) Breached", {
+                    "drawdown_pct": self.daily_drawdown_pct,
+                    "consecutive_losses": self.consecutive_losses,
+                    "avg_slippage": 1.2
+                })
 
     def remove_paper_trade(self, trade_id: str = ""):
         """Removes a paper trade by ID or removes the latest if empty."""

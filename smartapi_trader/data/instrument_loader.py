@@ -102,7 +102,7 @@ class InstrumentLoader:
 
     def _index_records(self, records: List[Dict[str, Any]]):
         """Filters and inserts index spot and derivative records into SQLite."""
-        target_names = {"NIFTY", "BANKNIFTY", "SENSEX"}
+        target_names = {"NIFTY", "BANKNIFTY", "SENSEX", "MIDCPNIFTY"}
         target_segments = {"NSE", "BSE", "NFO", "BFO"}
         today_str = datetime.now().strftime("%Y-%m-%d")
 

@@ -281,6 +281,20 @@ class RiskManager:
                 await self._exit_position(pos, ltp, "Stop-Loss Hit")
                 continue
 
+            # Stagnation / Time-Decay Exit (Mandatory 15-min check):
+            # If open position fails to displace to at least +0.5R within 15 mins (5x 3m candles), trigger market exit
+            entry_ts = getattr(pos, "created_at_ts", None)
+            if entry_ts is None:
+                pos.created_at_ts = datetime.now().timestamp()
+                entry_ts = pos.created_at_ts
+            
+            elapsed_mins = (datetime.now().timestamp() - entry_ts) / 60.0
+            stagnation_limit_mins = float(self.cfg.get("stagnation_timeout_mins", 15))
+            if elapsed_mins >= stagnation_limit_mins and profit_points < (unit_risk * 0.5):
+                logger.warning(f"[RISK] ⏳ STAGNATION EXIT TRIGGERED for {symbol}: Position held {elapsed_mins:.1f}m without reaching +0.5R displacement. Liquidating to eliminate theta decay.")
+                await self._exit_position(pos, ltp, f"Stagnation / Time-Decay Exit ({stagnation_limit_mins:.0f}m)")
+                continue
+
             # Stage 1: Refined Breakeven Shift (Structural Invalidation Confirmation)
             is_structural_mode = (self.cfg.get("breakeven_mode") == "STRUCTURAL_SWING_BREAK")
             structural_confirmed = True
