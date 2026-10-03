@@ -154,6 +154,8 @@ class SniperILSMEStrategy(BaseStrategy):
         # Check if tick belongs to underlying index spot
         for sym_name, sym_info in self.symbols_cfg.items():
             if str(event.token) == str(sym_info.get("spot_token")):
+                if sym_name not in self.state:
+                    self._init_index_state(sym_name)
                 st = self.state[sym_name]
                 st["last_spot"] = event.ltp
                 cur_high = max(event.high if event.high > 0 else event.ltp, event.ltp)
