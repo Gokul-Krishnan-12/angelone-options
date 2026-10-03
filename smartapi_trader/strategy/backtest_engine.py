@@ -21,13 +21,15 @@ class BacktestEngine:
     def __init__(
         self,
         starting_capital: float = 50000.0,
-        risk_per_trade_pct: float = 0.03,
+        risk_per_trade_pct: float = 0.015,
         max_trades_per_day: int = 2,
         initial_sl_pct: float = 0.10,
-        be_trigger_r: float = 0.6,
+        be_trigger_r: float = 0.60,
         tp1_r: float = 2.2,
         tp1_qty_pct: float = 0.50,
-        dynamic_compounding: bool = True,
+        enable_ilsme_sweep: bool = True,
+        enable_momentum_breakout: bool = True,
+        dynamic_compounding: bool = False,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None
     ):
@@ -38,6 +40,8 @@ class BacktestEngine:
         self.be_trigger_r = be_trigger_r
         self.tp1_r = tp1_r
         self.tp1_qty_pct = tp1_qty_pct
+        self.enable_ilsme_sweep = enable_ilsme_sweep
+        self.enable_momentum_breakout = enable_momentum_breakout
         self.dynamic_compounding = dynamic_compounding
         self.start_date = start_date
         self.end_date = end_date
@@ -118,6 +122,9 @@ class BacktestEngine:
                     "cum_vol": 0.0,
                     "high": -1.0,
                     "low": 999999.0,
+                    "or_high": -1.0,
+                    "or_low": 999999.0,
+                    "or_settled": False,
                     "sweep_status": "NONE",
                     "sweep_price": 0.0,
                     "armed_fvg": None,
@@ -148,6 +155,13 @@ class BacktestEngine:
                     st["high"] = max(st["high"], h)
                     st["low"] = min(st["low"], l)
 
+                    # Track 15m Opening Range (09:15 to 09:30)
+                    if bar_i < 5:
+                        st["or_high"] = max(st["or_high"], h)
+                        st["or_low"] = min(st["or_low"], l)
+                    elif bar_i == 5:
+                        st["or_settled"] = True
+
                     # Intraday VWAP
                     typical_price = (h + l + c) / 3.0
                     vol_weight = v if v > 0 else 1000.0
@@ -156,8 +170,10 @@ class BacktestEngine:
                     vwap = st["cum_pv"] / st["cum_vol"]
                     time_part = ts[11:16]
 
+                    ema_val = d["ema"].get(ts[:16], c)
+
                     # 1. 15m Macro Sweep (every 5 bars = 15m)
-                    if bar_i >= 4 and bar_i % 5 == 0:
+                    if self.enable_ilsme_sweep and bar_i >= 4 and bar_i % 5 == 0:
                         sub = bars[bar_i-4 : bar_i+1]
                         o15, h15, l15, c15 = sub[0][1], max(b[2] for b in sub), min(b[3] for b in sub), sub[-1][4]
                         rng = max(0.01, h15 - l15)
@@ -166,7 +182,6 @@ class BacktestEngine:
 
                         pdl = prev_levels[underlying]["pdl"]
                         pdh = prev_levels[underlying]["pdh"]
-                        ema_val = d["ema"].get(ts[:16], c15)
 
                         if l15 < pdl and c15 > pdl:
                             if (c15 >= ema_val and lower_wick >= 0.28) or (lower_wick >= 0.35):
@@ -178,51 +193,79 @@ class BacktestEngine:
                                 st["sweep_status"] = "BEARISH_SWEEP"
                                 st["sweep_price"] = h15
 
-                    # 2. 3m Micro Displacement & Quality FVG
+                    # 2. 3m Micro Displacement & Quality FVG (ILSME Reversal)
                     min_gap = d["fvg_min"]
-                    if st["sweep_status"] != "NONE" and bar_i >= 2 and not st.get("armed_fvg"):
-                        if "11:15" <= time_part <= "13:30" or time_part >= "14:50":
-                            continue
+                    if self.enable_ilsme_sweep and st["sweep_status"] != "NONE" and bar_i >= 2 and not st.get("armed_fvg"):
+                        if not ("11:15" <= time_part <= "13:30" or time_part >= "14:50"):
+                            c1 = bars[bar_i - 2]
+                            c2 = bars[bar_i - 1]
+                            c3 = bars[bar_i]
 
-                        c1 = bars[bar_i - 2]
-                        c2 = bars[bar_i - 1]
-                        c3 = bars[bar_i]
+                            if st["sweep_status"] == "BULLISH_SWEEP":
+                                if c2[4] > c1[2] and c2[4] > vwap and (c3[3] - c1[2]) >= min_gap:
+                                    st["armed_fvg"] = {
+                                        "source": "ILSME_REVERSAL",
+                                        "type": "BUY_CE",
+                                        "top": c3[3],
+                                        "bottom": c1[2],
+                                        "swing_inval": c2[2] # 3m displacement swing high
+                                    }
 
-                        if st["sweep_status"] == "BULLISH_SWEEP":
-                            if c2[4] > c1[2] and c2[4] > vwap and (c3[3] - c1[2]) >= min_gap:
+                            elif st["sweep_status"] == "BEARISH_SWEEP":
+                                if c2[4] < c1[3] and c2[4] < vwap and (c1[3] - c3[2]) >= min_gap:
+                                    st["armed_fvg"] = {
+                                        "source": "ILSME_REVERSAL",
+                                        "type": "BUY_PE",
+                                        "top": c1[3],
+                                        "bottom": c3[2],
+                                        "swing_inval": c2[3] # 3m displacement swing low
+                                    }
+
+                    # 3. Momentum Trend / Opening Range Breakout (ORB) Engine
+                    if self.enable_momentum_breakout and st.get("or_settled") and not st.get("armed_fvg") and not st.get("in_trade"):
+                        if ("09:30" <= time_part <= "11:15" or "13:30" <= time_part <= "14:30") and bar_i >= 5:
+                            or_h = st["or_high"]
+                            or_l = st["or_low"]
+                            or_rng = max(1.0, or_h - or_l)
+
+                            if c > or_h and c > vwap and c > ema_val and (c - or_h) <= (or_rng * 0.40):
                                 st["armed_fvg"] = {
+                                    "source": "MOMENTUM_ORB",
                                     "type": "BUY_CE",
-                                    "top": c3[3],
-                                    "bottom": c1[2],
-                                    "swing_inval": c2[2] # 3m displacement swing high
+                                    "top": h,
+                                    "bottom": max(or_h, l),
+                                    "swing_inval": or_h
                                 }
-
-                        elif st["sweep_status"] == "BEARISH_SWEEP":
-                            if c2[4] < c1[3] and c2[4] < vwap and (c1[3] - c3[2]) >= min_gap:
+                            elif c < or_l and c < vwap and c < ema_val and (or_l - c) <= (or_rng * 0.40):
                                 st["armed_fvg"] = {
+                                    "source": "MOMENTUM_ORB",
                                     "type": "BUY_PE",
-                                    "top": c1[3],
-                                    "bottom": c3[2],
-                                    "swing_inval": c2[3] # 3m displacement swing low
+                                    "top": min(or_l, h),
+                                    "bottom": l,
+                                    "swing_inval": or_l
                                 }
 
-                    # 3. Retracement Entry
+                    # 4. Entry Execution
                     if st.get("armed_fvg") and not st.get("in_trade"):
                         if day_trades_count >= self.max_trades_per_day or day_consecutive_losses >= 2:
                             st["armed_fvg"] = None
                             continue
 
-                        if "11:15" <= time_part <= "13:30" or time_part >= "15:05":
+                        if "11:15" <= time_part <= "13:30" and st["armed_fvg"].get("source") == "ILSME_REVERSAL":
+                            st["armed_fvg"] = None
+                            continue
+
+                        if time_part >= "15:05":
                             st["armed_fvg"] = None
                             continue
 
                         fvg = st["armed_fvg"]
-                        # Correlation filter: do not stack simultaneous duplicate trades in same direction
+                        # Correlation filter
                         if active_trade_direction == fvg["type"]:
                             continue
 
-                        is_fill = (fvg["type"] == "BUY_CE" and l <= fvg["top"] and h >= fvg["bottom"]) or \
-                                  (fvg["type"] == "BUY_PE" and h >= fvg["bottom"] and l <= fvg["top"])
+                        is_fill = (fvg["type"] == "BUY_CE" and l <= fvg["top"]) or \
+                                  (fvg["type"] == "BUY_PE" and h >= fvg["bottom"])
 
                         if is_fill:
                             st["armed_fvg"] = None

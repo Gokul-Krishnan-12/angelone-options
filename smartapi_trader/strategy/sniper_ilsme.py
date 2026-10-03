@@ -58,10 +58,13 @@ class SniperILSMEStrategy(BaseStrategy):
             "session_low": pdl,
             "vwap": ref_spot,
             "last_spot": ref_spot,
+            "or_high": -1.0,
+            "or_low": 999999.0,
+            "or_settled": False,
             "sweep_status": "NONE",       # "NONE", "BULLISH_SWEEP", "BEARISH_SWEEP"
             "sweep_price": 0.0,
             "sweep_time": None,
-            "armed_fvg": None,           # Holds pending FVG zone dict
+            "armed_fvg": None,           # Holds pending FVG or Breakout zone dict
             "in_trade": False
         }
         logger.info(f"[STRATEGY] Initialized {underlying} Reference Levels -> PDH: {pdh:.2f} | PDL: {pdl:.2f} | Ref Spot: {ref_spot:.2f}")
@@ -130,7 +133,7 @@ class SniperILSMEStrategy(BaseStrategy):
     def reset_daily_state(self):
         for idx in self.active_indices:
             self._init_index_state(idx)
-        self.state_mgr.set_strategy_status("Scanning for Liquidity Sweep")
+        self.state_mgr.set_strategy_status("Scanning for Liquidity Sweep & Momentum Breakouts")
         logger.info("[STRATEGY] Daily state reset completed with fresh reference levels.")
 
     def _is_midday_chop(self) -> bool:
@@ -157,11 +160,21 @@ class SniperILSMEStrategy(BaseStrategy):
                 cur_low = min(event.low if event.low > 0 else event.ltp, event.ltp)
                 st["session_high"] = max(st["session_high"], cur_high)
                 st["session_low"] = min(st["session_low"], cur_low) if st["session_low"] > 0 else cur_low
+                
+                # Opening Range Tracker (09:15 to 09:30)
+                now_t = ist_time()
+                if time(9, 15) <= now_t <= time(9, 30):
+                    st["or_high"] = max(st["or_high"], cur_high)
+                    st["or_low"] = min(st["or_low"], cur_low) if st["or_low"] > 0 else cur_low
+                elif now_t > time(9, 30) and not st["or_settled"]:
+                    st["or_settled"] = True
+                    logger.info(f"[STRATEGY] {sym_name} 15m Opening Range SETTLED -> High: {st['or_high']:.2f} | Low: {st['or_low']:.2f}")
+
                 self.state_mgr.update_spot_telemetry(
                     sym_name, event.ltp, st["vwap"], st["pdh"], st["pdl"], st["session_high"], st["session_low"]
                 )
                 
-                # Check for limit retracement fill if FVG is armed
+                # Check for limit retracement fill if FVG/Breakout is armed
                 if st.get("armed_fvg"):
                     await self._evaluate_fvg_retest(sym_name, event.ltp)
 
@@ -204,6 +217,9 @@ class SniperILSMEStrategy(BaseStrategy):
         if not self._is_market_hours() or self._is_midday_chop():
             return
 
+        if not self.cfg.get("enable_ilsme_sweep", True):
+            return
+
         st = self.state[underlying]
         rng = max(0.01, bar.high - bar.low)
         lower_wick = (min(bar.open, bar.close) - bar.low) / rng
@@ -230,15 +246,14 @@ class SniperILSMEStrategy(BaseStrategy):
     async def _evaluate_3m_micro_displacement(self, underlying: str, bar: BarEvent):
         """
         3-minute Micro Timeframe Logic:
-        Identifies Market Structure Shift (MSS) through VWAP and Fair Value Gap (FVG).
+        1. ILSME Reversal Model: Market Structure Shift (MSS) through VWAP and Fair Value Gap (FVG).
+        2. Momentum Trend Model: Opening Range Breakout (ORB) with VWAP and EMA confirmation.
         """
-        if not self._is_market_hours() or self._is_midday_chop():
+        if not self._is_market_hours():
             return
 
         st = self.state[underlying]
-        if st["sweep_status"] == "NONE":
-            return
-
+        vwap = bar.vwap or st["vwap"]
         token = bar.token
         closed_3m = self.bars.get(token, {}).get("3m", [])
         if len(closed_3m) < 3:
@@ -248,51 +263,99 @@ class SniperILSMEStrategy(BaseStrategy):
         c2 = closed_3m[-2] # Displacement bar
         c3 = closed_3m[-1]
 
-        vwap = bar.vwap or st["vwap"]
+        # =====================================================================
+        # MODEL 1: ILSME REVERSAL SWEEP ENGINE
+        # =====================================================================
+        if self.cfg.get("enable_ilsme_sweep", True) and st["sweep_status"] != "NONE" and not self._is_midday_chop():
+            # 1. Bullish Setup (Call buying)
+            if st["sweep_status"] == "BULLISH_SWEEP":
+                has_displacement = c2.close > c1.high and c2.close > vwap
+                has_fvg = (c3.low - c1.high) >= self.cfg.get("fvg_min_points", 2.0)
 
-        # 1. Bullish Setup (Call buying)
-        if st["sweep_status"] == "BULLISH_SWEEP":
-            # MSS: C2 displaced strongly upward, closing above prior swing high and above VWAP
-            has_displacement = c2.close > c1.high and c2.close > vwap
-            # Bullish FVG: Candle 3 Low > Candle 1 High
-            has_fvg = (c3.low - c1.high) >= self.cfg.get("fvg_min_points", 2.0)
+                if has_displacement and has_fvg:
+                    fvg_top = c3.low
+                    fvg_bottom = c1.high
+                    st["armed_fvg"] = {
+                        "source": "ILSME_REVERSAL",
+                        "type": "BUY_CE",
+                        "top": fvg_top,
+                        "bottom": fvg_bottom,
+                        "displacement_low": c2.low,
+                        "displacement_high": c2.high,
+                        "underlying": underlying
+                    }
+                    status_msg = f"FVG Formed ({underlying} Call): Armed for retracement retest [{fvg_bottom:.1f}-{fvg_top:.1f}]"
+                    self.state_mgr.set_strategy_status(status_msg)
+                    logger.info(f"[STRATEGY] {status_msg}")
+                    return
 
-            if has_displacement and has_fvg:
-                fvg_top = c3.low
-                fvg_bottom = c1.high
-                st["armed_fvg"] = {
-                    "type": "BUY_CE",
-                    "top": fvg_top,
-                    "bottom": fvg_bottom,
-                    "displacement_low": c2.low,
-                    "displacement_high": c2.high,
-                    "underlying": underlying
-                }
-                status_msg = f"FVG Formed ({underlying} Call): Armed for retracement retest [{fvg_bottom:.1f}-{fvg_top:.1f}]"
-                self.state_mgr.set_strategy_status(status_msg)
-                logger.info(f"[STRATEGY] {status_msg}")
+            # 2. Bearish Setup (Put buying)
+            elif st["sweep_status"] == "BEARISH_SWEEP":
+                has_displacement = c2.close < c1.low and c2.close < vwap
+                has_fvg = (c1.low - c3.high) >= self.cfg.get("fvg_min_points", 2.0)
 
-        # 2. Bearish Setup (Put buying)
-        elif st["sweep_status"] == "BEARISH_SWEEP":
-            # MSS: C2 displaced strongly downward, closing below prior swing low and below VWAP
-            has_displacement = c2.close < c1.low and c2.close < vwap
-            # Bearish FVG: Candle 3 High < Candle 1 Low
-            has_fvg = (c1.low - c3.high) >= self.cfg.get("fvg_min_points", 2.0)
+                if has_displacement and has_fvg:
+                    fvg_top = c1.low
+                    fvg_bottom = c3.high
+                    st["armed_fvg"] = {
+                        "source": "ILSME_REVERSAL",
+                        "type": "BUY_PE",
+                        "top": fvg_top,
+                        "bottom": fvg_bottom,
+                        "displacement_high": c2.high,
+                        "displacement_low": c2.low,
+                        "underlying": underlying
+                    }
+                    status_msg = f"FVG Formed ({underlying} Put): Armed for retracement retest [{fvg_bottom:.1f}-{fvg_top:.1f}]"
+                    self.state_mgr.set_strategy_status(status_msg)
+                    logger.info(f"[STRATEGY] {status_msg}")
+                    return
 
-            if has_displacement and has_fvg:
-                fvg_top = c1.low
-                fvg_bottom = c3.high
-                st["armed_fvg"] = {
-                    "type": "BUY_PE",
-                    "top": fvg_top,
-                    "bottom": fvg_bottom,
-                    "displacement_high": c2.high,
-                    "displacement_low": c2.low,
-                    "underlying": underlying
-                }
-                status_msg = f"FVG Formed ({underlying} Put): Armed for retracement retest [{fvg_bottom:.1f}-{fvg_top:.1f}]"
-                self.state_mgr.set_strategy_status(status_msg)
-                logger.info(f"[STRATEGY] {status_msg}")
+        # =====================================================================
+        # MODEL 2: MOMENTUM TREND / OPENING RANGE BREAKOUT (ORB) ENGINE
+        # =====================================================================
+        if self.cfg.get("enable_momentum_breakout", True) and st.get("or_settled") and not st.get("armed_fvg") and not st.get("in_trade"):
+            now_t = ist_time()
+            if (time(9, 30) <= now_t <= time(11, 15) or time(13, 30) <= now_t <= time(14, 30)):
+                or_h = st["or_high"]
+                or_l = st["or_low"]
+                or_rng = max(1.0, or_h - or_l)
+
+                # Bullish Breakout: 3m Close > OR High + Close > VWAP
+                if bar.close > or_h and bar.close > vwap and (bar.close - or_h) <= (or_rng * 0.40):
+                    st["armed_fvg"] = {
+                        "source": "MOMENTUM_ORB",
+                        "type": "BUY_CE",
+                        "top": bar.high,
+                        "bottom": max(or_h, bar.low),
+                        "displacement_low": or_h,
+                        "displacement_high": bar.high,
+                        "underlying": underlying
+                    }
+                    status_msg = f"🚀 Momentum ORB Formed ({underlying} Call): Breakout above OR High ₹{or_h:.2f}"
+                    self.state_mgr.set_strategy_status(status_msg)
+                    logger.info(f"[STRATEGY] {status_msg}")
+                    # Direct execution on momentum bar
+                    await self._generate_sniper_signal(underlying, "BUY_CE", bar.close, st["armed_fvg"])
+                    st["armed_fvg"] = None
+
+                # Bearish Breakout: 3m Close < OR Low + Close < VWAP
+                elif bar.close < or_l and bar.close < vwap and (or_l - bar.close) <= (or_rng * 0.40):
+                    st["armed_fvg"] = {
+                        "source": "MOMENTUM_ORB",
+                        "type": "BUY_PE",
+                        "top": min(or_l, bar.high),
+                        "bottom": bar.low,
+                        "displacement_high": or_l,
+                        "displacement_low": bar.low,
+                        "underlying": underlying
+                    }
+                    status_msg = f"🚀 Momentum ORB Formed ({underlying} Put): Breakdown below OR Low ₹{or_l:.2f}"
+                    self.state_mgr.set_strategy_status(status_msg)
+                    logger.info(f"[STRATEGY] {status_msg}")
+                    # Direct execution on momentum bar
+                    await self._generate_sniper_signal(underlying, "BUY_PE", bar.close, st["armed_fvg"])
+                    st["armed_fvg"] = None
 
     async def _evaluate_fvg_retest(self, underlying: str, current_price: float):
         """Triggers sniper limit order when spot retraces into the Fair Value Gap zone."""

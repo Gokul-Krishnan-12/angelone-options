@@ -708,6 +708,8 @@ class SettingsUpdateRequest(BaseModel):
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
     telegram_eod_time: Optional[str] = None
+    enable_ilsme_sweep: Optional[bool] = None
+    enable_momentum_breakout: Optional[bool] = None
 
 @app.get("/api/settings")
 async def get_settings():
@@ -790,6 +792,16 @@ async def update_settings(req: SettingsUpdateRequest):
         if req.telegram_bot_token: cfg.setdefault("telegram", {})["bot_token"] = req.telegram_bot_token.strip()
         if req.telegram_chat_id: cfg.setdefault("telegram", {})["chat_id"] = req.telegram_chat_id.strip()
         if req.telegram_eod_time: cfg.setdefault("telegram", {})["eod_report_time"] = req.telegram_eod_time.strip()
+
+        if req.enable_ilsme_sweep is not None:
+            cfg.setdefault("strategy", {})["enable_ilsme_sweep"] = req.enable_ilsme_sweep
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["enable_ilsme_sweep"] = req.enable_ilsme_sweep
+
+        if req.enable_momentum_breakout is not None:
+            cfg.setdefault("strategy", {})["enable_momentum_breakout"] = req.enable_momentum_breakout
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["enable_momentum_breakout"] = req.enable_momentum_breakout
 
         with open(config_path, "w") as f:
             yaml.safe_dump(cfg, f, default_flow_style=False)

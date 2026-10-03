@@ -36,6 +36,10 @@ export default function Settings({ state, onRefreshBalance }) {
   const [maxDrawdown, setMaxDrawdown] = useState(3.0);
   const [maxTrades, setMaxTrades] = useState(2);
 
+  // Strategy Dual Engines
+  const [enableIlsmeSweep, setEnableIlsmeSweep] = useState(true);
+  const [enableMomentumBreakout, setEnableMomentumBreakout] = useState(true);
+
   // Status
   const [isSaving, setIsSaving] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
@@ -68,6 +72,10 @@ export default function Settings({ state, onRefreshBalance }) {
         if (r.risk_per_trade_pct) setRiskPerTrade(r.risk_per_trade_pct * 100);
         if (r.max_daily_drawdown_pct) setMaxDrawdown(r.max_daily_drawdown_pct * 100);
         if (r.max_trades_per_day) setMaxTrades(r.max_trades_per_day);
+
+        const strat = data.strategy || {};
+        if (strat.enable_ilsme_sweep !== undefined) setEnableIlsmeSweep(strat.enable_ilsme_sweep);
+        if (strat.enable_momentum_breakout !== undefined) setEnableMomentumBreakout(strat.enable_momentum_breakout);
       } else {
         setServerOffline(true);
       }
@@ -138,6 +146,8 @@ export default function Settings({ state, onRefreshBalance }) {
       telegram_bot_token: telegramBotToken,
       telegram_chat_id: telegramChatId,
       telegram_eod_time: telegramEodTime,
+      enable_ilsme_sweep: enableIlsmeSweep,
+      enable_momentum_breakout: enableMomentumBreakout,
     };
 
     if (apiKey) payload.api_key = apiKey;
@@ -443,7 +453,60 @@ export default function Settings({ state, onRefreshBalance }) {
             </div>
           </div>
 
-          {/* Card 4: Telegram Real-Time Alerts & Remote 2-Way Bot */}
+          {/* Card 4: Strategy Engines (Dual-Mode: Sweep + Momentum Breakout) */}
+          <div className="hud-card">
+            <div className="card-header-line">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <Target size={14} color="var(--accent-orange)" />
+                <span style={{ fontWeight: 700 }}>Dual Quantitative Strategy Engines</span>
+              </div>
+              <span className="badge badge-cyan" style={{ fontSize: '0.68rem' }}>
+                Active Multi-Model
+              </span>
+            </div>
+
+            <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginBottom: '0.75rem' }}>
+              Operates across both Paper and Live Real Trade agents with strict 2-trades/day cap and 1.5% equity risk.
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.6rem', cursor: 'pointer', background: 'rgba(255,255,255,0.02)', padding: '0.6rem 0.8rem', borderRadius: '6px', border: '1px solid var(--border-subtle)' }}>
+                <input
+                  type="checkbox"
+                  checked={enableIlsmeSweep}
+                  onChange={(e) => setEnableIlsmeSweep(e.target.checked)}
+                  style={{ marginTop: '0.2rem', accentColor: 'var(--accent-orange)' }}
+                />
+                <div>
+                  <div style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-main)' }}>
+                    Institutional Liquidity Sweep (ILSME Reversal)
+                  </div>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>
+                    Detects structural liquidity sweeps of PDH / PDL with rejection wicks $\ge 30\%$ and 3m FVG retracement.
+                  </div>
+                </div>
+              </label>
+
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.6rem', cursor: 'pointer', background: 'rgba(255,255,255,0.02)', padding: '0.6rem 0.8rem', borderRadius: '6px', border: '1px solid var(--border-subtle)' }}>
+                <input
+                  type="checkbox"
+                  checked={enableMomentumBreakout}
+                  onChange={(e) => setEnableMomentumBreakout(e.target.checked)}
+                  style={{ marginTop: '0.2rem', accentColor: 'var(--accent-orange)' }}
+                />
+                <div>
+                  <div style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-main)' }}>
+                    Momentum Trend & Opening Range Breakout (ORB)
+                  </div>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>
+                    Captures strong 1-directional trend days (15m OR Breakout + VWAP & 50-EMA trend alignment).
+                  </div>
+                </div>
+              </label>
+            </div>
+          </div>
+
+          {/* Card 5: Telegram Real-Time Alerts & Remote 2-Way Bot */}
           <div className="hud-card">
             <div className="card-header-line">
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
