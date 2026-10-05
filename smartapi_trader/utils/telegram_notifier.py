@@ -10,8 +10,7 @@ import urllib.error
 import concurrent.futures
 from typing import Any, Dict, List, Optional, Tuple
 from smartapi_trader.utils.tz import now_ist
-
-logger = logging.getLogger(__name__)
+from smartapi_trader.utils.logger import logger
 
 class TelegramNotifier:
     """
