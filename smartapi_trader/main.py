@@ -143,6 +143,71 @@ class TradingOrchestrator:
             self.stream_client.subscribe(token=token_str, symbol=symbol_str, exchange=exch, mode=2)
             logger.info(f"[ORCHESTRATOR] 🎯 Live tick subscription active for open position: {symbol_str} (Token: {token_str}, Exch: {exch})")
 
+    async def _market_health_watchdog_loop(self):
+        """
+        Actively monitors stream connectivity, agent status, and server health during market hours (09:15 - 15:30 IST).
+        Runs every 2 minutes to minimize CPU load and sends high-priority Telegram alerts if issues are detected.
+        """
+        last_alert_time = 0.0
+        while True:
+            try:
+                await asyncio.sleep(120)  # Every 2 minutes
+                from smartapi_trader.utils.tz import now_ist
+                now = now_ist()
+                
+                # Check if market is active (Mon-Fri 09:15 - 15:30 IST)
+                is_weekday = (now.weekday() < 5)
+                now_t = now.time()
+                is_mkt_hours = is_weekday and (datetime.time(9, 15) <= now_t <= datetime.time(15, 30))
+                
+                if is_mkt_hours:
+                    issues = []
+                    
+                    # 1. Check WebSocket connection
+                    is_ws_conn = getattr(self.stream_client, "is_connected", False)
+                    last_tick = getattr(self.stream_client, "last_tick_time", 0.0)
+                    time_since_tick = time.time() - last_tick if last_tick > 0 else 9999
+                    
+                    if not self.stream_client.is_simulated:
+                        if not is_ws_conn:
+                            issues.append("🔴 SmartWebSocket is DISCONNECTED from Angel One feed.")
+                        elif time_since_tick > 120:
+                            issues.append(f"⚠️ Live market ticks stalled (No ticks received for {int(time_since_tick)}s).")
+                    
+                    # 2. Check Agent Status
+                    paper_st = getattr(self.state_mgr, "paper_agent_status", "PAUSED")
+                    real_st = getattr(self.state_mgr, "real_agent_status", "PAUSED")
+                    is_panic = getattr(self.state_mgr, "is_panic_active", False)
+                    
+                    if is_panic:
+                        issues.append("🚨 System is in EMERGENCY PANIC / HALT state!")
+                    elif self.mode == "LIVE" and real_st != "RUNNING":
+                        issues.append(f"⚠️ Mode is LIVE but Real Agent is {real_st} (not RUNNING).")
+                    elif self.mode == "PAPER" and paper_st != "RUNNING":
+                        issues.append(f"⚠️ Mode is PAPER but Paper Agent is {paper_st} (not RUNNING).")
+                    
+                    # If issues detected, alert via Telegram (throttled to once every 5 minutes)
+                    if issues and (time.time() - last_alert_time > 300):
+                        last_alert_time = time.time()
+                        alert_body = "\n".join([f"• {iss}" for iss in issues])
+                        alert_msg = (
+                            f"🚨 <b>MARKET HOURS HEALTH WARNING</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"⏰ <b>Time:</b> {now.strftime('%H:%M:%S')} IST\n"
+                            f"⚠️ <b>Detected Issues:</b>\n{alert_body}\n\n"
+                            f"<i>Use /status to diagnose or /start to resume execution.</i>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━"
+                        )
+                        if self.notifier:
+                            self.notifier.send_message_async(alert_msg)
+                            logger.warning(f"[WATCHDOG] Market hours alert dispatched to Telegram: {issues}")
+                            
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[WATCHDOG] Error in watchdog loop: {e}")
+                await asyncio.sleep(60)
+
     async def _eod_monitor_loop(self):
         """Monitors clock and dispatches daily EOD report to Telegram at 15:15 IST."""
         last_sent_date = None
@@ -241,12 +306,13 @@ class TradingOrchestrator:
         # Start WebSocket or synthetic stream
         await self.stream_client.start()
 
-        # Start 2-way Telegram Bot & Automated EOD Report Scheduler
+        # Start 2-way Telegram Bot, Automated EOD Report Scheduler, and Market Health Watchdog
         if self.settings.get("telegram", {}).get("enabled", True):
             if self.settings.get("telegram", {}).get("enable_bot_commands", True):
                 self.telegram_bot.start()
             self._eod_task = asyncio.create_task(self._eod_monitor_loop())
-            logger.info("[ORCHESTRATOR] Telegram 2-way bot & EOD scheduler active.")
+            self._watchdog_task = asyncio.create_task(self._market_health_watchdog_loop())
+            logger.info("[ORCHESTRATOR] Telegram 2-way bot, EOD scheduler & market health watchdog active.")
 
         logger.info(f"[ORCHESTRATOR] System ready! Active Execution Mode: {self.mode}")
 
@@ -255,6 +321,8 @@ class TradingOrchestrator:
         logger.warning("[ORCHESTRATOR] Initiating graceful shutdown...")
         if self._eod_task:
             self._eod_task.cancel()
+        if hasattr(self, "_watchdog_task") and self._watchdog_task:
+            self._watchdog_task.cancel()
         if hasattr(self, "telegram_bot") and self.telegram_bot:
             self.telegram_bot.stop()
         await self.stream_client.stop()

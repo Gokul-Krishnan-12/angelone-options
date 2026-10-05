@@ -31,6 +31,8 @@ class SmartStreamClient:
         self.subscribed_tokens: Dict[str, Dict[str, Any]] = {} # token -> info
         self.is_connected = False
         self.running = False
+        self.last_tick_time: float = 0.0
+        self.total_ticks_received: int = 0
         self._ws_task: Optional[asyncio.Task] = None
         self._sim_task: Optional[asyncio.Task] = None
         self._ws_client = None
@@ -196,6 +198,8 @@ class SmartStreamClient:
                 spread=round(max(0.05, ask - bid), 2),
                 tick_time=str(message.get("exchange_timestamp", time.time()))
             )
+            self.last_tick_time = time.time()
+            self.total_ticks_received += 1
             self.bus.publish_nowait(tick)
 
     @staticmethod

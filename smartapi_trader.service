@@ -4,13 +4,13 @@ After=network.target
 
 [Service]
 Type=simple
-User=trader
-WorkingDirectory=/opt/smartapi_trader
-ExecStart=/opt/smartapi_trader/venv/bin/python main.py
+User=ubuntu
+WorkingDirectory=/home/ubuntu/angelone-options
+ExecStart=/home/ubuntu/angelone-options/venv/bin/python main.py
 Restart=always
 RestartSec=5
-StandardOutput=append:/var/log/smartapi_trader/output.log
-StandardError=append:/var/log/smartapi_trader/error.log
+StandardOutput=append:/home/ubuntu/angelone-options/logs/systemd_output.log
+StandardError=append:/home/ubuntu/angelone-options/logs/systemd_error.log
 
 [Install]
 WantedBy=multi-user.target

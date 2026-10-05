@@ -596,6 +596,8 @@ class TelegramBotController:
     def dispatch_command(self, cmd: str, args: List[str]) -> str:
         if cmd in ("/status", "status"):
             return self._cmd_status()
+        elif cmd in ("/health", "health", "/ping", "ping"):
+            return self._cmd_health()
         elif cmd in ("/positions", "positions"):
             return self._cmd_positions()
         elif cmd in ("/trades", "trades"):
@@ -619,6 +621,56 @@ class TelegramBotController:
                 f"❓ Unknown command: <code>{cmd}</code>\n\n"
                 "Use /help to see all available remote commands."
             )
+
+    def _cmd_health(self) -> str:
+        """Detailed server and stream diagnostic health check."""
+        from smartapi_trader.utils.tz import now_ist
+        now = now_ist()
+        now_t = now.time()
+        is_weekday = (now.weekday() < 5)
+        is_mkt_hours = is_weekday and (datetime.time(9, 15) <= now_t <= datetime.time(15, 30))
+        
+        stream_client = getattr(self.orchestrator, "stream_client", None)
+        is_ws_conn = getattr(stream_client, "is_connected", False) if stream_client else False
+        total_ticks = getattr(stream_client, "total_ticks_received", 0) if stream_client else 0
+        last_tick_t = getattr(stream_client, "last_tick_time", 0.0) if stream_client else 0.0
+        sec_since_tick = int(time.time() - last_tick_t) if last_tick_t > 0 else -1
+
+        paper_status = getattr(self.state_mgr, "paper_agent_status", "PAUSED")
+        real_status = getattr(self.state_mgr, "real_agent_status", "PAUSED")
+        panic = getattr(self.state_mgr, "is_panic_active", False)
+
+        feed_badge = "🟢 CONNECTED" if is_ws_conn else "🔴 DISCONNECTED"
+        if sec_since_tick >= 0 and sec_since_tick < 60:
+            tick_badge = f"🟢 Flowing ({sec_since_tick}s ago | {total_ticks:,} total)"
+        elif sec_since_tick >= 60:
+            tick_badge = f"⚠️ Idle ({sec_since_tick}s ago | {total_ticks:,} total)"
+        else:
+            tick_badge = "⚪ No ticks recorded"
+
+        mkt_badge = "🟢 ACTIVE (09:15 - 15:30 IST)" if is_mkt_hours else "⚪ CLOSED (Pre/Post Market or Weekend)"
+
+        health_ok = True
+        if is_mkt_hours:
+            if not is_ws_conn or panic:
+                health_ok = False
+
+        overall_badge = "✅ ALL SYSTEMS HEALTHY & RUNNING AS EXPECTED" if health_ok else "⚠️ ABNORMALITY DETECTED"
+
+        return (
+            f"🩺 <b>SERVER HEALTH & DIAGNOSTIC REPORT</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🕒 <b>Server Time:</b> {now.strftime('%Y-%m-%d %H:%M:%S')} IST\n"
+            f"🏛 <b>Market Session:</b> {mkt_badge}\n"
+            f"🚦 <b>Overall Status:</b> <b>{overall_badge}</b>\n\n"
+            f"📡 <b>SmartAPI Stream:</b> {feed_badge}\n"
+            f"📊 <b>Tick Ingestion:</b> {tick_badge}\n"
+            f"📝 <b>Paper Agent:</b> <code>{paper_status}</code>\n"
+            f"⚡ <b>Real Live Agent:</b> <code>{real_status}</code>\n"
+            f"🚨 <b>Panic State:</b> {'🚨 ACTIVE' if panic else '✅ NORMAL'}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>Send /status for capital & PnL, or /positions for active trades.</i>"
+        )
 
     def _cmd_status(self) -> str:
         mode = self.state_mgr.execution_mode
@@ -677,7 +729,7 @@ class TelegramBotController:
             f"💰 <b>Today's Net P&L:</b> <code>{pnl_display}</code>\n"
             f"📊 <b>Active Positions:</b> {pos_count}\n"
             f"🔢 <b>Trades Taken:</b> {trades_count}\n\n"
-            f"Send /positions for live trades or /eod for session report."
+            f"Send /health for diagnostics, /positions for trades, or /help for menu."
         )
 
     def _cmd_positions(self) -> str:
@@ -817,6 +869,7 @@ class TelegramBotController:
             "🤖 <b>OPTIONS SNIPER TELEGRAM COMMANDS</b>\n\n"
             "📊 <b>Market & Session:</b>\n"
             "• <code>/status</code> — System state, daily P&L, balance, agent status\n"
+            "• <code>/health</code> — Server diagnostics, stream latency, market checks\n"
             "• <code>/positions</code> — Live active open contracts & unrealized P&L\n"
             "• <code>/trades</code> — Today's completed trades with charges\n"
             "• <code>/eod</code> — Generate and send End of Day performance report\n\n"

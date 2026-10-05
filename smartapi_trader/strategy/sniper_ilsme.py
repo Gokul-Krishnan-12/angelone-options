@@ -51,23 +51,83 @@ class SniperILSMEStrategy(BaseStrategy):
         # Dynamically load true Previous Day High (PDH) and Low (PDL)
         pdh, pdl, ref_spot = self._fetch_dynamic_pdh_pdl(underlying)
         
+        # Check if booting after 09:30 IST today; if so, attempt to backfill genuine 09:15-09:30 Opening Range
+        or_h, or_l, or_settled = self._backfill_opening_range(underlying, ref_spot)
+
         self.state[underlying] = {
             "pdh": pdh,
             "pdl": pdl,
-            "session_high": pdh,
-            "session_low": pdl,
+            "session_high": max(pdh, or_h) if or_h > 0 else pdh,
+            "session_low": min(pdl, or_l) if or_l < 999999.0 else pdl,
             "vwap": ref_spot,
             "last_spot": ref_spot,
-            "or_high": -1.0,
-            "or_low": 999999.0,
-            "or_settled": False,
+            "or_high": or_h,
+            "or_low": or_l,
+            "or_settled": or_settled,
             "sweep_status": "NONE",       # "NONE", "BULLISH_SWEEP", "BEARISH_SWEEP"
             "sweep_price": 0.0,
             "sweep_time": None,
             "armed_fvg": None,           # Holds pending FVG or Breakout zone dict
             "in_trade": False
         }
-        logger.info(f"[STRATEGY] Initialized {underlying} Reference Levels -> PDH: {pdh:.2f} | PDL: {pdl:.2f} | Ref Spot: {ref_spot:.2f}")
+        logger.info(
+            f"[STRATEGY] Initialized {underlying} Reference Levels -> PDH: {pdh:.2f} | PDL: {pdl:.2f} | "
+            f"OR High: {or_h:.2f} | OR Low: {or_l:.2f} (Settled: {or_settled})"
+        )
+
+    def _backfill_opening_range(self, underlying: str, ref_spot: float) -> tuple[float, float, bool]:
+        """
+        Recovers the genuine 09:15-09:30 Opening Range high/low if the engine is booted or restarted after 09:30 IST.
+        """
+        now_t = ist_time()
+        if now_t < time(9, 30):
+            return -1.0, 999999.0, False
+
+        today_str = datetime.now().strftime("%Y-%m-%d")
+
+        # 1. Try SmartAPI getCandleData for today's 09:15 15m bar
+        if self.auth_mgr and not self.auth_mgr.is_simulated and self.auth_mgr.smart_connect:
+            try:
+                sym_info = self.symbols_cfg.get(underlying, {})
+                tok = sym_info.get("spot_token")
+                exch = sym_info.get("exchange", "NSE")
+                if tok:
+                    res = self.auth_mgr.smart_connect.getCandleData({
+                        "exchange": exch,
+                        "symboltoken": str(tok),
+                        "interval": "FIFTEEN_MINUTE",
+                        "fromdate": f"{today_str} 09:15",
+                        "todate": f"{today_str} 09:30"
+                    })
+                    data = res.get("data") or []
+                    today_bars = [b for b in data if b[0].startswith(today_str)]
+                    if today_bars:
+                        or_bar = today_bars[0]
+                        or_high = float(or_bar[2])
+                        or_low = float(or_bar[3])
+                        logger.info(f"[STRATEGY] 🔄 Successfully backfilled {underlying} 09:15-09:30 Opening Range: High ₹{or_high:.2f}, Low ₹{or_low:.2f}")
+                        return or_high, or_low, True
+            except Exception as e:
+                logger.warning(f"[STRATEGY] Could not fetch live 15m candle for OR backfill: {e}")
+
+        # 2. Try local historical 15m store if present
+        import os
+        import json
+        path = f"data/historical/{underlying.lower()}_15m.json"
+        if os.path.exists(path):
+            try:
+                with open(path, "r") as f:
+                    bars = json.load(f)
+                today_bars = [b for b in bars if b[0].startswith(today_str)]
+                if today_bars:
+                    or_high = float(today_bars[0][2])
+                    or_low = float(today_bars[0][3])
+                    logger.info(f"[STRATEGY] 🔄 Backfilled {underlying} Opening Range from local dataset: High ₹{or_high:.2f}, Low ₹{or_low:.2f}")
+                    return or_high, or_low, True
+            except Exception:
+                pass
+
+        return -1.0, 999999.0, False
 
     def _fetch_dynamic_pdh_pdl(self, underlying: str) -> tuple[float, float, float]:
         """Dynamically resolves true Previous Day High / Low from historical datasets or Angel One API."""
@@ -137,10 +197,18 @@ class SniperILSMEStrategy(BaseStrategy):
         logger.info("[STRATEGY] Daily state reset completed with fresh reference levels.")
 
     def _is_midday_chop(self) -> bool:
-        """Checks if current time falls in 11:15 - 13:30 IST midday consolidation."""
+        """Checks if current time falls in midday consolidation based on risk settings (e.g. 11:45 - 13:00 or 11:15 - 13:30)."""
         now = ist_time()
-        start = time(11, 15)
-        end = time(13, 30)
+        start_str = str(self.risk_cfg.get("midday_chop_filter_start", "11:15"))
+        end_str = str(self.risk_cfg.get("midday_chop_filter_end", "13:30"))
+        try:
+            sh, sm = map(int, start_str.split(":"))
+            eh, em = map(int, end_str.split(":"))
+            start = time(sh, sm)
+            end = time(eh, em)
+        except Exception:
+            start = time(11, 15)
+            end = time(13, 30)
         return start <= now <= end
 
     def _is_market_hours(self) -> bool:
@@ -318,7 +386,7 @@ class SniperILSMEStrategy(BaseStrategy):
         # =====================================================================
         if self.cfg.get("enable_momentum_breakout", True) and st.get("or_settled") and not st.get("armed_fvg") and not st.get("in_trade"):
             now_t = ist_time()
-            if (time(9, 30) <= now_t <= time(11, 15) or time(13, 30) <= now_t <= time(14, 30)):
+            if (time(9, 30) <= now_t <= time(14, 30)) and not self._is_midday_chop():
                 or_h = st["or_high"]
                 or_l = st["or_low"]
                 or_rng = max(1.0, or_h - or_l)
