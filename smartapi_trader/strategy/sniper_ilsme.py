@@ -86,13 +86,14 @@ class SniperILSMEStrategy(BaseStrategy):
         today_str = datetime.now().strftime("%Y-%m-%d")
 
         # 1. Try SmartAPI getCandleData for today's 09:15 15m bar
-        if self.auth_mgr and not self.auth_mgr.is_simulated and self.auth_mgr.smart_connect:
+        smart_api = getattr(self.auth_mgr, "smart_api", None)
+        if self.auth_mgr and not self.auth_mgr.is_simulated and smart_api:
             try:
                 sym_info = self.symbols_cfg.get(underlying, {})
                 tok = sym_info.get("spot_token")
                 exch = sym_info.get("exchange", "NSE")
                 if tok:
-                    res = self.auth_mgr.smart_connect.getCandleData({
+                    res = smart_api.getCandleData({
                         "exchange": exch,
                         "symboltoken": str(tok),
                         "interval": "FIFTEEN_MINUTE",
@@ -157,7 +158,8 @@ class SniperILSMEStrategy(BaseStrategy):
                     logger.warning(f"[STRATEGY] Error reading {path} for PDH/PDL: {e}")
 
         # 2. Try Angel One SmartAPI live historical fetch if authenticated
-        if self.auth_mgr and not self.auth_mgr.is_simulated and self.auth_mgr.smart_connect:
+        smart_api = getattr(self.auth_mgr, "smart_api", None)
+        if self.auth_mgr and not self.auth_mgr.is_simulated and smart_api:
             try:
                 sym_info = self.symbols_cfg.get(underlying, {})
                 tok = sym_info.get("spot_token")
@@ -166,7 +168,7 @@ class SniperILSMEStrategy(BaseStrategy):
                     from datetime import timedelta
                     from_d = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
                     to_d = datetime.now().strftime("%Y-%m-%d")
-                    res = self.auth_mgr.smart_connect.getCandleData({
+                    res = smart_api.getCandleData({
                         "exchange": exch,
                         "symboltoken": str(tok),
                         "interval": "ONE_DAY",
