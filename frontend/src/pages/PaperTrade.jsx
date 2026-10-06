@@ -411,7 +411,7 @@ export default function PaperTrade({
             <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', background: 'rgba(255,255,255,0.02)', padding: '0.6rem 0.75rem', borderRadius: '6px', margin: '0.5rem 0', border: '1px solid var(--border-light)', fontSize: '0.76rem' }}>
               <div>
                 <span className="text-muted">Total Trades: </span>
-                <span className="mono font-bold text-main">{(paperState.completed_trades || []).length} / 2 Quota</span>
+                <span className="mono font-bold text-main">{tradesTaken} / {maxTradesAllowed} Quota</span>
               </div>
               <div>
                 <span className="text-muted">Strikes Traded: </span>
