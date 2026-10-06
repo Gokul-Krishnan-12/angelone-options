@@ -44,6 +44,7 @@ class RiskManager:
         self.consecutive_loss_limit = self.cfg.get("consecutive_loss_limit", 2)
         self.be_trigger_r = self.cfg.get("breakeven_trigger_r", 1.0)
         self.tp1_r = self.cfg.get("partial_exit_r", 2.0)
+        self.tp2_r = self.cfg.get("target_2_r", 3.0)                    # Target 2 (Full exit for runner at +3.0R)
         self.tp1_qty_pct = self.cfg.get("partial_exit_qty_pct", 0.60)
         self.max_slippage_pct = config.get("execution", {}).get("max_slippage_pct", 2.0)
 
@@ -403,6 +404,43 @@ class RiskManager:
                         "pnl": partial_pnl,
                         "mode": self.state_mgr.execution_mode
                     })
+
+            # Stage 3: Target 2 (T2) Full Profit Booking for Runner Position (e.g. +3.0R)
+            if profit_points >= (unit_risk * self.tp2_r) and pos.is_open and pos.quantity > 0:
+                logger.info(f"[RISK] 🎯 Target 2 (+{self.tp2_r:.1f}R) HIT for runner in {symbol}! Fully booking remaining {pos.quantity} units @ ₹{ltp:.2f}")
+                await self._exit_position(pos, ltp, f"Target 2 (+{self.tp2_r:.1f}R) Hit")
+                continue
+
+            # Stage 4: Dynamic Trailing Stop for Runner after Partial Booking
+            # If position has already taken partial profit and price extends beyond +2.2R,
+            # lock in profits by ratcheting the Stop-Loss up behind the move (trail to +1.0R, +1.5R, etc.)
+            if pos.partial_taken and pos.is_open and profit_points >= (unit_risk * 2.2):
+                trail_sl_r = (profit_points / unit_risk) - 1.0  # Keep a 1.0R trailing buffer
+                trail_sl_price = self._round_to_tick(pos.entry_price + (unit_risk * trail_sl_r))
+                if trail_sl_price > pos.stop_loss:
+                    old_sl = pos.stop_loss
+                    pos.stop_loss = trail_sl_price
+                    new_trigger = trail_sl_price
+                    buffer = self._get_sl_limit_buffer(new_trigger)
+                    new_limit = self._round_to_tick(max(0.05, new_trigger - buffer))
+                    pos.sl_trigger_price = new_trigger
+                    pos.sl_limit_price = new_limit
+
+                    if getattr(pos, "sl_order_id", "") and (engine := self._get_active_engine()):
+                        try:
+                            await engine.modify_order(pos.sl_order_id, {
+                                "variety": "STOPLOSS",
+                                "order_type": "STOPLOSS_LIMIT",
+                                "price": new_limit,
+                                "trigger_price": new_trigger,
+                                "quantity": pos.quantity
+                            })
+                            logger.info(f"[RISK] 🛡️ Trailed Exchange Stop-Loss up for runner {symbol}: SL={old_sl} -> {trail_sl_price} (LTP: ₹{ltp:.2f})")
+                        except Exception as e:
+                            logger.error(f"[RISK] Error modifying exchange trailing SL: {e}")
+
+                    self.state_mgr.persist_position(pos)
+                    self.state_mgr.broadcast_state()
 
     async def _execute_partial_exit(self, pos: PositionEvent, qty: int, price: float):
         """Sends order to book partial profits."""

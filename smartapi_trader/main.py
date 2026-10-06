@@ -3,6 +3,8 @@ import sys
 import yaml
 import asyncio
 import signal
+import time
+from datetime import datetime, time as dtime
 import uvicorn
 from typing import Dict, Any
 
@@ -158,7 +160,7 @@ class TradingOrchestrator:
                 # Check if market is active (Mon-Fri 09:15 - 15:30 IST)
                 is_weekday = (now.weekday() < 5)
                 now_t = now.time()
-                is_mkt_hours = is_weekday and (datetime.time(9, 15) <= now_t <= datetime.time(15, 30))
+                is_mkt_hours = is_weekday and (dtime(9, 15) <= now_t <= dtime(15, 30))
                 
                 if is_mkt_hours:
                     issues = []
