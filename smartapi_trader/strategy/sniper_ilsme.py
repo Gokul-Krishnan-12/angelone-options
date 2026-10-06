@@ -86,30 +86,35 @@ class SniperILSMEStrategy(BaseStrategy):
         today_str = datetime.now().strftime("%Y-%m-%d")
 
         # 1. Try SmartAPI getCandleData for today's 09:15 15m bar
+        import time as _pytime
         smart_api = getattr(self.auth_mgr, "smart_api", None)
         if self.auth_mgr and not self.auth_mgr.is_simulated and smart_api:
-            try:
-                sym_info = self.symbols_cfg.get(underlying, {})
-                tok = sym_info.get("spot_token")
-                exch = sym_info.get("exchange", "NSE")
-                if tok:
-                    res = smart_api.getCandleData({
-                        "exchange": exch,
-                        "symboltoken": str(tok),
-                        "interval": "FIFTEEN_MINUTE",
-                        "fromdate": f"{today_str} 09:15",
-                        "todate": f"{today_str} 09:30"
-                    })
-                    data = res.get("data") or []
-                    today_bars = [b for b in data if b[0].startswith(today_str)]
-                    if today_bars:
-                        or_bar = today_bars[0]
-                        or_high = float(or_bar[2])
-                        or_low = float(or_bar[3])
-                        logger.info(f"[STRATEGY] 🔄 Successfully backfilled {underlying} 09:15-09:30 Opening Range: High ₹{or_high:.2f}, Low ₹{or_low:.2f}")
-                        return or_high, or_low, True
-            except Exception as e:
-                logger.warning(f"[STRATEGY] Could not fetch live 15m candle for OR backfill: {e}")
+            sym_info = self.symbols_cfg.get(underlying, {})
+            tok = sym_info.get("spot_token")
+            exch = sym_info.get("exchange", "NSE")
+            if tok:
+                for attempt in range(3):
+                    try:
+                        _pytime.sleep(0.4 * (attempt + 1))  # Prevent Angel One SmartAPI 3 req/sec rate limit
+                        res = smart_api.getCandleData({
+                            "exchange": exch,
+                            "symboltoken": str(tok),
+                            "interval": "FIFTEEN_MINUTE",
+                            "fromdate": f"{today_str} 09:15",
+                            "todate": f"{today_str} 09:30"
+                        })
+                        if isinstance(res, dict) and res.get("status"):
+                            data = res.get("data") or []
+                            today_bars = [b for b in data if b[0].startswith(today_str)]
+                            if today_bars:
+                                or_bar = today_bars[0]
+                                or_high = float(or_bar[2])
+                                or_low = float(or_bar[3])
+                                logger.info(f"[STRATEGY] 🔄 Successfully backfilled {underlying} 09:15-09:30 Opening Range: High ₹{or_high:.2f}, Low ₹{or_low:.2f}")
+                                return or_high, or_low, True
+                    except Exception as e:
+                        if attempt == 2:
+                            logger.warning(f"[STRATEGY] Could not fetch live 15m candle for {underlying} OR backfill: {e}")
 
         # 2. Try local historical 15m store if present
         import os
@@ -127,6 +132,11 @@ class SniperILSMEStrategy(BaseStrategy):
                     return or_high, or_low, True
             except Exception:
                 pass
+
+        # 3. Fallback: If after 09:30 and no historical candle, initialize from current spot levels
+        if ref_spot > 0:
+            logger.info(f"[STRATEGY] ℹ️ Using current spot reference (₹{ref_spot:.2f}) to seed Opening Range for {underlying}")
+            return ref_spot, ref_spot, False
 
         return -1.0, 999999.0, False
 
