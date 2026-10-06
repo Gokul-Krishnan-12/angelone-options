@@ -310,7 +310,7 @@ class StateManager:
                 self.total_brokerage = round(sum(float(t.get("total_charges", 0.0)) for t in self.completed_trades), 2)
                 self.net_pnl = round(sum(float(t.get("net_pnl", 0.0)) for t in self.completed_trades), 2)
                 self.daily_pnl = self.net_pnl
-                self.trades_taken_today = len(self.completed_trades)
+                self.trades_taken_today = sum(1 for t in self.completed_trades if not (t.get("is_partial") or "Partial" in str(t.get("exit_reason", ""))))
                 self._sync_ledger_to_storage()
 
             self._recalculate_portfolio()
@@ -628,7 +628,8 @@ class StateManager:
             "total_charges": total_fee,
             "net_pnl": net,
             "is_paper": 1 if is_paper_trade else 0,
-            "exit_reason": exit_reason
+            "exit_reason": exit_reason,
+            "is_partial": 1 if is_partial else 0
         }
 
         if is_paper_trade:
@@ -752,7 +753,7 @@ class StateManager:
         self.paper_daily_pnl = round(net, 2)
         self.paper_capital = round(self.paper_starting_capital + net, 2)
         self.paper_available_margin = self.paper_capital
-        self.paper_trades_taken = len(self.paper_completed_trades)
+        self.paper_trades_taken = sum(1 for t in self.paper_completed_trades if not (t.get("is_partial") or "Partial" in str(t.get("exit_reason", ""))))
 
 
     def get_snapshot(self) -> Dict[str, Any]:
