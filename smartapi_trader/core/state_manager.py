@@ -579,9 +579,10 @@ class StateManager:
         is_paper: bool = False,
         strike_price: float = 0.0,
         option_type: str = "",
-        exit_reason: str = ""
+        exit_reason: str = "",
+        is_partial: bool = False
     ):
-        """Called when a position is closed. Computes brokerage and updates net ledger."""
+        """Called when a position or partial lot is closed. Computes brokerage and updates net ledger."""
         charges = {"brokerage": 40.0, "total_charges": 65.0}
         if entry_price > 0 and exit_price > 0 and quantity > 0:
             charges = calculate_option_charges(entry_price, exit_price, quantity, exchange)
@@ -589,7 +590,6 @@ class StateManager:
         total_fee = charges.get("total_charges", 65.0)
         net = round(pnl - total_fee, 2)
 
-        # Resolve strike price and option type
         # Resolve strike price and option type
         resolved_strike = float(strike_price or 0.0)
         resolved_opt = option_type or ""
@@ -636,18 +636,21 @@ class StateManager:
             self.paper_total_brokerage += total_fee
             self.paper_net_pnl += net
             self.paper_capital += net
-            self.paper_trades_taken += 1
+            if not is_partial:
+                self.paper_trades_taken += 1
             self.paper_completed_trades.append(trade_record)
         else:
             self.realized_pnl += round(pnl, 2)
             self.total_brokerage += total_fee
             self.net_pnl += net
-            self.trades_taken_today += 1
+            if not is_partial:
+                self.trades_taken_today += 1
             self.completed_trades.append(trade_record)
-            if pnl < 0:
-                self.consecutive_losses += 1
-            else:
-                self.consecutive_losses = 0
+            if not is_partial:
+                if pnl < 0:
+                    self.consecutive_losses += 1
+                else:
+                    self.consecutive_losses = 0
 
         self.trade_history.insert(0, trade_record)
 

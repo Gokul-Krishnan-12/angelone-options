@@ -392,7 +392,8 @@ class RiskManager:
                     is_paper=(self.state_mgr.execution_mode == "PAPER"),
                     strike_price=getattr(pos, 'strike_price', 0.0),
                     option_type=getattr(pos, 'option_type', ''),
-                    exit_reason="Target 1 (+2.0R) Partial (60%)"
+                    exit_reason="Target 1 (+2.0R) Partial (60%)",
+                    is_partial=True
                 )
 
                 if self.notifier:
