@@ -490,14 +490,21 @@ class SniperILSMEStrategy(BaseStrategy):
         now_time = cur_ist.time()
         expiry_idx = 0
         if now_time < time(13, 0):
-            today_weekday = cur_ist.weekday()
-            is_expiry_day = (
-                (underlying in ["NIFTY", "BANKNIFTY"] and today_weekday == 1) or
-                (underlying == "SENSEX" and today_weekday == 3)
+            # Check if nearest contract expires today (handles holidays & shifted expiries dynamically)
+            nearest_opt = self.loader.get_atm_option(
+                underlying=underlying,
+                spot_price=spot,
+                option_type=opt_type,
+                expiry_index=0
             )
-            if is_expiry_day:
-                expiry_idx = 1
-                logger.info(f"[STRATEGY] Expiry Day Protection ({underlying}): morning 0-DTE blocked, rolling to next cycle {expiry_idx}")
+            if nearest_opt and nearest_opt.get("expiry"):
+                try:
+                    exp_dt = datetime.strptime(nearest_opt["expiry"].strip(), "%d%b%Y").date()
+                    if exp_dt == cur_ist.date():
+                        expiry_idx = 1
+                        logger.info(f"[STRATEGY] Expiry Day Protection ({underlying} - {nearest_opt['expiry']}): morning 0-DTE blocked, rolling to next cycle (index {expiry_idx})")
+                except Exception:
+                    pass
 
         option_contract = self.loader.get_atm_option(
             underlying=underlying,

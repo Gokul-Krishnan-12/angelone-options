@@ -157,8 +157,10 @@ class InstrumentLoader:
         """
         today = datetime.now()
         # SEBI standardized: Nifty weekly on Tuesday (weekday 1), Sensex weekly on Thursday (weekday 3)
-        nifty_expiry = (today + timedelta(days=(1 - today.weekday() + 7) % 7 or 7)).strftime("%d%b%Y").upper()
-        sensex_expiry = (today + timedelta(days=(3 - today.weekday() + 7) % 7 or 7)).strftime("%d%b%Y").upper()
+        nifty_days = (1 - today.weekday()) % 7
+        sensex_days = (3 - today.weekday()) % 7
+        nifty_expiry = (today + timedelta(days=nifty_days)).strftime("%d%b%Y").upper()
+        sensex_expiry = (today + timedelta(days=sensex_days)).strftime("%d%b%Y").upper()
         # Monthly Bank Nifty expiry on last Tuesday
         banknifty_monthly = (today + timedelta(days=(1 - today.weekday() + 28) % 7 + 21)).strftime("%d%b%Y").upper()
         today_str = today.strftime("%Y-%m-%d")
