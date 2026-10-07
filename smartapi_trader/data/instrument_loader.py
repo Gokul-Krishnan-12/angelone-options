@@ -218,22 +218,38 @@ class InstrumentLoader:
         cursor.execute("""
             SELECT DISTINCT expiry FROM instruments 
             WHERE name = ? AND exch_seg = ? AND instrumenttype = 'OPTIDX' AND expiry != ''
-            ORDER BY expiry ASC
         """, (underlying, exch_seg))
         
-        expiries = [row["expiry"] for row in cursor.fetchall()]
-        if not expiries:
+        raw_expiries = [row["expiry"] for row in cursor.fetchall()]
+        if not raw_expiries:
             # Try without exch_seg restriction
             cursor.execute("""
                 SELECT DISTINCT expiry FROM instruments 
                 WHERE name = ? AND expiry != ''
-                ORDER BY expiry ASC
             """, (underlying,))
-            expiries = [row["expiry"] for row in cursor.fetchall()]
+            raw_expiries = [row["expiry"] for row in cursor.fetchall()]
 
-        if not expiries:
+        if not raw_expiries:
             logger.error(f"[INSTRUMENTS] No active expiries found for {underlying}")
             return None
+
+        # Parse expiry dates and sort chronologically, ignoring past dates
+        today_date = datetime.now().date()
+        valid_expiries = []
+        for exp in raw_expiries:
+            try:
+                exp_dt = datetime.strptime(exp.strip(), "%d%b%Y").date()
+                if exp_dt >= today_date:
+                    valid_expiries.append((exp_dt, exp.strip()))
+            except Exception:
+                continue
+
+        if not valid_expiries:
+            # Fallback in case date formatting fails or testing with older dates
+            valid_expiries = [(datetime.min.date(), exp.strip()) for exp in raw_expiries]
+
+        valid_expiries.sort(key=lambda x: x[0])
+        expiries = [exp_str for _, exp_str in valid_expiries]
 
         target_expiry = expiries[min(expiry_index, len(expiries) - 1)]
 
