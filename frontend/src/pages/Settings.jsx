@@ -36,9 +36,10 @@ export default function Settings({ state, onRefreshBalance }) {
   const [maxDrawdown, setMaxDrawdown] = useState(4.0);
   const [maxTrades, setMaxTrades] = useState(2);
 
-  // Strategy Dual Engines & Active Instruments
+  // Strategy Engines & Active Instruments
   const [enableIlsmeSweep, setEnableIlsmeSweep] = useState(true);
   const [enableMomentumBreakout, setEnableMomentumBreakout] = useState(true);
+  const [enableTrendPullback, setEnableTrendPullback] = useState(true);
   const [activeIndices, setActiveIndices] = useState(['NIFTY']);
 
   // Status
@@ -77,6 +78,7 @@ export default function Settings({ state, onRefreshBalance }) {
         const strat = data.strategy || {};
         if (strat.enable_ilsme_sweep !== undefined) setEnableIlsmeSweep(strat.enable_ilsme_sweep);
         if (strat.enable_momentum_breakout !== undefined) setEnableMomentumBreakout(strat.enable_momentum_breakout);
+        if (strat.enable_trend_pullback !== undefined) setEnableTrendPullback(strat.enable_trend_pullback);
         if (Array.isArray(strat.active_indices)) setActiveIndices(strat.active_indices);
       } else {
         setServerOffline(true);
@@ -150,6 +152,7 @@ export default function Settings({ state, onRefreshBalance }) {
       telegram_eod_time: telegramEodTime,
       enable_ilsme_sweep: enableIlsmeSweep,
       enable_momentum_breakout: enableMomentumBreakout,
+      enable_trend_pullback: enableTrendPullback,
       active_indices: activeIndices,
     };
 
@@ -503,6 +506,23 @@ export default function Settings({ state, onRefreshBalance }) {
                   </div>
                   <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>
                     Captures strong 1-directional trend days (15m OR Breakout + VWAP & 50-EMA trend alignment).
+                  </div>
+                </div>
+              </label>
+
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.6rem', cursor: 'pointer', background: 'rgba(255,255,255,0.02)', padding: '0.6rem 0.8rem', borderRadius: '6px', border: '1px solid var(--border-subtle)' }}>
+                <input
+                  type="checkbox"
+                  checked={enableTrendPullback}
+                  onChange={(e) => setEnableTrendPullback(e.target.checked)}
+                  style={{ marginTop: '0.2rem', accentColor: 'var(--accent-orange)' }}
+                />
+                <div>
+                  <div style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-main)' }}>
+                    Trend Continuation & 9/21 EMA Pullback
+                  </div>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>
+                    Captures high-volume intraday trend extensions on pullbacks to the 9/21 EMA aligned with VWAP.
                   </div>
                 </div>
               </label>

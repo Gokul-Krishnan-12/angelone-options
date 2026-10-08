@@ -446,6 +446,73 @@ class SniperILSMEStrategy(BaseStrategy):
                     await self._generate_sniper_signal(underlying, "BUY_PE", bar.close, st["armed_fvg"])
                     st["armed_fvg"] = None
 
+        # =====================================================================
+        # MODEL 3: 15-MINUTE DONCHIAN TREND BREAKOUT & MOMENTUM EXPANSION
+        # =====================================================================
+        if self.cfg.get("enable_trend_pullback", True) and not st.get("armed_fvg") and not st.get("in_trade"):
+            now_t = ist_time()
+            if (time(9, 30) <= now_t <= time(14, 45)) and not self._is_midday_chop():
+                if len(closed_3m) >= 6:
+                    ema_fast_len = int(self.cfg.get("ema_fast_period", 9))
+                    ema_slow_len = int(self.cfg.get("ema_slow_period", 21))
+                    k_fast = 2.0 / (ema_fast_len + 1.0)
+                    k_slow = 2.0 / (ema_slow_len + 1.0)
+
+                    ema_fast = closed_3m[0].close
+                    ema_slow = closed_3m[0].close
+                    for b in closed_3m:
+                        ema_fast = (b.close * k_fast) + (ema_fast * (1.0 - k_fast))
+                        ema_slow = (b.close * k_slow) + (ema_slow * (1.0 - k_slow))
+
+                    # 15m Rolling Range (last 5 closed 3m bars)
+                    prior_5_bars = closed_3m[-6:-1]
+                    d_high = max(b.high for b in prior_5_bars)
+                    d_low = min(b.low for b in prior_5_bars)
+                    curr_bar = closed_3m[-1]
+
+                    min_vd = 12.0 if underlying == "NIFTY" else (36.0 if underlying == "SENSEX" else 25.0)
+                    min_b = 5.0 if underlying == "NIFTY" else (15.0 if underlying == "SENSEX" else 10.0)
+
+                    # Bearish Momentum Expansion: 3m Close breaks 15m low below VWAP with EMA 9 < 21 & displacement
+                    if curr_bar.close < d_low and curr_bar.close < vwap and ema_fast < ema_slow and (vwap - curr_bar.close) >= min_vd:
+                        if (curr_bar.open - curr_bar.close) >= min_b:
+                            swing_pts = max(18.0 if underlying == "NIFTY" else 55.0, d_high - curr_bar.close)
+                            st["armed_fvg"] = {
+                                "source": "TREND_PULLBACK",
+                                "type": "BUY_PE",
+                                "top": curr_bar.high,
+                                "bottom": curr_bar.low,
+                                "displacement_high": d_high,
+                                "displacement_low": curr_bar.low,
+                                "swing_pts": swing_pts,
+                                "underlying": underlying
+                            }
+                            status_msg = f"📉 15m Donchian Trend Breakdown ({underlying} PE): Broke 15m Low ₹{d_low:.1f} (Risk: {swing_pts:.1f} pts)"
+                            self.state_mgr.set_strategy_status(status_msg)
+                            logger.info(f"[STRATEGY] {status_msg}")
+                            await self._generate_sniper_signal(underlying, "BUY_PE", curr_bar.close, st["armed_fvg"])
+                            st["armed_fvg"] = None
+
+                    # Bullish Momentum Expansion: 3m Close breaks 15m high above VWAP with EMA 9 > 21 & displacement
+                    elif curr_bar.close > d_high and curr_bar.close > vwap and ema_fast > ema_slow and (curr_bar.close - vwap) >= min_vd:
+                        if (curr_bar.close - curr_bar.open) >= min_b:
+                            swing_pts = max(18.0 if underlying == "NIFTY" else 55.0, curr_bar.close - d_low)
+                            st["armed_fvg"] = {
+                                "source": "TREND_PULLBACK",
+                                "type": "BUY_CE",
+                                "top": curr_bar.high,
+                                "bottom": curr_bar.low,
+                                "displacement_low": d_low,
+                                "displacement_high": curr_bar.high,
+                                "swing_pts": swing_pts,
+                                "underlying": underlying
+                            }
+                            status_msg = f"📈 15m Donchian Trend Breakout ({underlying} CE): Broke 15m High ₹{d_high:.1f} (Risk: {swing_pts:.1f} pts)"
+                            self.state_mgr.set_strategy_status(status_msg)
+                            logger.info(f"[STRATEGY] {status_msg}")
+                            await self._generate_sniper_signal(underlying, "BUY_CE", curr_bar.close, st["armed_fvg"])
+                            st["armed_fvg"] = None
+
     async def _evaluate_fvg_retest(self, underlying: str, current_price: float):
         """Triggers sniper limit order when spot retraces into the Fair Value Gap zone."""
         st = self.state[underlying]
@@ -484,6 +551,7 @@ class SniperILSMEStrategy(BaseStrategy):
         """Resolves target option strike and emits SignalEvent."""
         st = self.state[underlying]
         opt_type = "CE" if "CE" in signal_type else "PE"
+        strat_source = fvg.get("source", "ILSME_REVERSAL")
         
         # Check expiry day theta protection rule:
         cur_ist = now_ist()
@@ -559,17 +627,33 @@ class SniperILSMEStrategy(BaseStrategy):
         else:
             logger.warning(f"[STRATEGY] Real exchange LTP unavailable for {option_contract['tradingsymbol']}; using dynamic model premium: ₹{entry_price} (Intrinsic: ₹{intrinsic:.2f}, Extrinsic: ₹{atm_extrinsic * decay_factor:.2f})")
         
-        # Hard stop-loss ~12% (from risk settings)
-        sl_pct = self.risk_cfg.get("initial_sl_percent", 0.12)
-        stop_loss = round(entry_price * (1.0 - sl_pct), 2)
-        unit_risk = entry_price - stop_loss
+        # Stop-loss calculation: If setup provides swing_pts, use structural delta-based SL
+        swing_pts = fvg.get("swing_pts")
+        if swing_pts and swing_pts > 0:
+            unit_risk = round(swing_pts * 0.55, 2)
+            stop_loss = round(max(1.0, entry_price - unit_risk), 2)
+        else:
+            sl_pct = self.risk_cfg.get("initial_sl_percent", 0.12)
+            stop_loss = round(entry_price * (1.0 - sl_pct), 2)
+            unit_risk = entry_price - stop_loss
         
-        # Target 1: +3.0R (Full exit on 1 lot, 50% partial exit on >=2 lots)
-        target_r = self.risk_cfg.get("partial_exit_r", 3.0)
+        # Target 1: +2.0R to +3.0R (Full exit on 1 lot, 50% partial exit on >=2 lots)
+        target_r = self.risk_cfg.get("partial_exit_r", 2.0)
         target_1 = round(entry_price + (unit_risk * target_r), 2)
 
         # Structural Invalidation Level (3m swing high for CE, swing low for PE)
         swing_inval = fvg.get("displacement_high" if signal_type == "BUY_CE" else "displacement_low", 0.0)
+
+        # Human readable reason & strat name
+        if strat_source == "TREND_PULLBACK":
+            strat_label = "Trend Breakdown"
+            reason_text = f"Trend Expansion: {underlying} Breakdown below VWAP & EMA9/21"
+        elif strat_source == "MOMENTUM_ORB":
+            strat_label = "Momentum Breakout"
+            reason_text = f"Momentum ORB Breakout on {underlying}"
+        else:
+            strat_label = "ILSME Reversal"
+            reason_text = f"Institutional Liquidity Sweep [{fvg.get('bottom', 0):.1f}-{fvg.get('top', 0):.1f}] with 3m MSS across VWAP"
 
         signal = SignalEvent(
             signal_id=f"SIG_{underlying}_{int(datetime.now().timestamp())}",
@@ -585,16 +669,17 @@ class SniperILSMEStrategy(BaseStrategy):
             entry_price=entry_price,
             stop_loss=stop_loss,
             target_1=target_1,
-            fvg_top=fvg["top"],
-            fvg_bottom=fvg["bottom"],
-            sweep_level=st["sweep_price"],
+            fvg_top=fvg.get("top", 0.0),
+            fvg_bottom=fvg.get("bottom", 0.0),
+            sweep_level=st.get("sweep_price", 0.0),
             swing_invalidation_level=swing_inval,
-            reason=f"Institutional Liquidity Sweep [{fvg['bottom']:.1f}-{fvg['top']:.1f}] with 3m MSS across VWAP"
+            strategy_name=strat_label,
+            reason=reason_text
         )
 
         self.state[underlying]["in_trade"] = True
-        self.state_mgr.set_strategy_status(f"In Trade: {option_contract['tradingsymbol']}")
-        logger.info(f"[STRATEGY] ===> DISPATCHING SNIPER SIGNAL: {signal.signal_type} {signal.tradingsymbol} Entry={entry_price} SL={stop_loss} T1={target_1} (Structural Swing Level: {swing_inval})")
+        self.state_mgr.set_strategy_status(f"In Trade ({strat_label}): {option_contract['tradingsymbol']}")
+        logger.info(f"[STRATEGY] ===> DISPATCHING SNIPER SIGNAL [{strat_label}]: {signal.signal_type} {signal.tradingsymbol} Entry={entry_price} SL={stop_loss} T1={target_1} (Structural Swing Level: {swing_inval})")
         
         await self.bus.publish(signal)
 
@@ -602,5 +687,5 @@ class SniperILSMEStrategy(BaseStrategy):
         """Manual test trigger for dashboard interactive testing."""
         st = self.state[underlying]
         spot = st["last_spot"] or 24850.0
-        mock_fvg = {"top": spot + 5, "bottom": spot - 5, "type": signal_type}
+        mock_fvg = {"top": spot + 5, "bottom": spot - 5, "type": signal_type, "source": "MANUAL_TEST"}
         await self._generate_sniper_signal(underlying, signal_type, spot, mock_fvg)

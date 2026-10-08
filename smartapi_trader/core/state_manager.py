@@ -580,7 +580,8 @@ class StateManager:
         strike_price: float = 0.0,
         option_type: str = "",
         exit_reason: str = "",
-        is_partial: bool = False
+        is_partial: bool = False,
+        strategy_name: str = ""
     ):
         """Called when a position or partial lot is closed. Computes brokerage and updates net ledger."""
         charges = {"brokerage": 40.0, "total_charges": 65.0}
@@ -610,6 +611,10 @@ class StateManager:
         if resolved_strike > 100000:
             resolved_strike = resolved_strike % 100000
 
+        # Retrieve strategy name from position if not provided
+        pos = self.positions.get(symbol)
+        resolved_strat = strategy_name or (getattr(pos, "strategy_name", "ILSME_Sniper") if pos else "ILSME_Sniper")
+
         trade_num = len(self.completed_trades) + len(self.paper_completed_trades) + 1
         is_paper_trade = bool(is_paper or self.execution_mode == "PAPER")
         today_date_str = datetime.now().strftime("%Y-%m-%d")
@@ -629,7 +634,8 @@ class StateManager:
             "net_pnl": net,
             "is_paper": 1 if is_paper_trade else 0,
             "exit_reason": exit_reason,
-            "is_partial": 1 if is_partial else 0
+            "is_partial": 1 if is_partial else 0,
+            "strategy_name": resolved_strat
         }
 
         if is_paper_trade:

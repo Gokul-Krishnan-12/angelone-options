@@ -435,6 +435,7 @@ export default function PaperTrade({
                 <thead>
                   <tr>
                     <th>TIME</th>
+                    <th>STRATEGY</th>
                     <th>CONTRACT</th>
                     <th>STRIKE PRICE</th>
                     <th>TYPE</th>
@@ -450,9 +451,23 @@ export default function PaperTrade({
                 <tbody>
                   {paperState.completed_trades.map((tr) => {
                     const strikeInfo = getStrikeDisplay(tr);
+                    const strat = tr.strategy_name || 'ILSME_Sniper';
                     return (
                       <tr key={tr.id}>
                         <td className="mono text-muted" style={{ fontSize: '0.72rem' }}>{tr.timestamp}</td>
+                        <td>
+                          <span
+                            className="pill-badge"
+                            style={{
+                              background: strat.includes('Pullback') ? 'rgba(168, 85, 247, 0.15)' : (strat.includes('Momentum') ? 'rgba(234, 179, 8, 0.15)' : 'rgba(56, 189, 248, 0.15)'),
+                              color: strat.includes('Pullback') ? '#c084fc' : (strat.includes('Momentum') ? '#facc15' : '#38bdf8'),
+                              fontSize: '0.70rem',
+                              padding: '0.15rem 0.45rem',
+                            }}
+                          >
+                            {strat}
+                          </span>
+                        </td>
                         <td className="mono font-semibold">{tr.symbol}</td>
                         <td className="mono font-bold" style={{ color: 'var(--accent-blue)' }}>
                           {strikeInfo.strike ? `₹${strikeInfo.strike.toLocaleString('en-IN')}` : '--'}

@@ -42,6 +42,7 @@ def fetch_and_update_historical(date_str: str):
         ("15m", "FIFTEEN_MINUTE")
     ]
 
+    import time as _pytime
     for idx, (exch, tok) in tokens.items():
         for tf_key, angel_int in intervals:
             file_path = f"data/historical/{idx}_{tf_key}.json"
@@ -52,15 +53,27 @@ def fetch_and_update_historical(date_str: str):
 
             existing_ts = set(c[0] for c in existing)
 
-            res = smart_api.getCandleData({
-                "exchange": exch,
-                "symboltoken": tok,
-                "interval": angel_int,
-                "fromdate": f"{date_str} 09:15",
-                "todate": f"{date_str} 15:30"
-            })
+            candles = []
+            for attempt in range(4):
+                _pytime.sleep(0.5 * (attempt + 1))
+                try:
+                    res = smart_api.getCandleData({
+                        "exchange": exch,
+                        "symboltoken": tok,
+                        "interval": angel_int,
+                        "fromdate": f"{date_str} 09:15",
+                        "todate": f"{date_str} 15:30"
+                    })
+                    if isinstance(res, dict) and res.get("status"):
+                        candles = res.get("data") or []
+                        break
+                    elif isinstance(res, dict) and "data" in res:
+                        candles = res.get("data") or []
+                        break
+                except Exception as ex:
+                    if attempt == 3:
+                        logger.warning(f"[SYNC] Error fetching {idx} {tf_key} for {date_str}: {ex}")
 
-            candles = res.get("data") or []
             added = 0
             for c in candles:
                 if c[0] not in existing_ts:

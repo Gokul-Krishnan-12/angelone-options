@@ -153,6 +153,7 @@ class RiskManager:
         logger.info(f"[RISK] Order APPROVED: {signal.tradingsymbol} Lots={lots} (Qty={total_quantity}) Risk=₹{capital_at_risk:.2f} Margin=₹{margin_required:.2f}")
 
         # Construct and submit validated order
+        strat_name = getattr(signal, "strategy_name", "ILSME_Sniper")
         order_event = OrderEvent(
             order_id=f"ORD_{signal.underlying}_{int(datetime.now().timestamp() * 1000)}",
             symbol=signal.tradingsymbol,
@@ -165,7 +166,8 @@ class RiskManager:
             price=signal.entry_price,
             trigger_price=0.0,
             status="PENDING",
-            variety="NORMAL"
+            variety="NORMAL",
+            strategy_name=strat_name
         )
         
         # Save position expectation metadata for multi-stage bracket tracking
@@ -186,7 +188,8 @@ class RiskManager:
             swing_invalidation_level=getattr(signal, "swing_invalidation_level", 0.0),
             is_open=True,
             is_paper=(self.state_mgr.execution_mode == "PAPER"),
-            execution_mode=self.state_mgr.execution_mode
+            execution_mode=self.state_mgr.execution_mode,
+            strategy_name=strat_name
         )
         await self.bus.publish(pos_event)
         await self.bus.publish(order_event)
@@ -205,7 +208,8 @@ class RiskManager:
                 "target_1": signal.target_1,
                 "quantity": total_quantity,
                 "lots": lots,
-                "mode": self.state_mgr.execution_mode
+                "mode": self.state_mgr.execution_mode,
+                "strategy_name": strat_name
             })
 
     def _get_sl_limit_buffer(self, trigger_price: float) -> float:

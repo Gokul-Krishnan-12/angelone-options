@@ -65,7 +65,8 @@ class TradeStorage:
                 ("exchange", "TEXT DEFAULT 'NFO'"),
                 ("sl_order_id", "TEXT DEFAULT ''"),
                 ("sl_trigger_price", "REAL DEFAULT 0.0"),
-                ("sl_limit_price", "REAL DEFAULT 0.0")
+                ("sl_limit_price", "REAL DEFAULT 0.0"),
+                ("strategy_name", "TEXT DEFAULT 'ILSME_Sniper'")
             ]:
                 try:
                     conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {col_def};")
@@ -91,10 +92,15 @@ class TradeStorage:
                     average_price REAL,
                     rejection_reason TEXT,
                     is_paper INTEGER DEFAULT 0,
+                    strategy_name TEXT DEFAULT 'ILSME_Sniper',
                     created_at TEXT,
                     updated_at TEXT
                 );
             """)
+            try:
+                conn.execute("ALTER TABLE orders ADD COLUMN strategy_name TEXT DEFAULT 'ILSME_Sniper';")
+            except sqlite3.OperationalError:
+                pass
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS trades (
@@ -112,9 +118,14 @@ class TradeStorage:
                     total_charges REAL,
                     net_pnl REAL,
                     is_paper INTEGER DEFAULT 0,
-                    exit_reason TEXT
+                    exit_reason TEXT,
+                    strategy_name TEXT DEFAULT 'ILSME_Sniper'
                 );
             """)
+            try:
+                conn.execute("ALTER TABLE trades ADD COLUMN strategy_name TEXT DEFAULT 'ILSME_Sniper';")
+            except sqlite3.OperationalError:
+                pass
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS daily_ledger (
@@ -320,13 +331,14 @@ class TradeStorage:
                     INSERT INTO trades (
                         id, timestamp, date, symbol, strike_price, option_type,
                         quantity, entry_price, exit_price, gross_pnl, brokerage,
-                        total_charges, net_pnl, is_paper, exit_reason
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        total_charges, net_pnl, is_paper, exit_reason, strategy_name
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         exit_price=excluded.exit_price,
                         gross_pnl=excluded.gross_pnl,
                         net_pnl=excluded.net_pnl,
-                        exit_reason=excluded.exit_reason;
+                        exit_reason=excluded.exit_reason,
+                        strategy_name=excluded.strategy_name;
                 """, (
                     trade.get("id"),
                     ts,
@@ -342,7 +354,8 @@ class TradeStorage:
                     float(trade.get("total_charges") or 65.0),
                     float(trade.get("net_pnl") or 0.0),
                     1 if trade.get("is_paper") else 0,
-                    trade.get("exit_reason", "")
+                    trade.get("exit_reason", ""),
+                    trade.get("strategy_name") or "ILSME_Sniper"
                 ))
                 conn.commit()
                 logger.info(f"[STORAGE] Persisted trade {trade.get('id')} to SQLite.")

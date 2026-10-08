@@ -710,6 +710,9 @@ class SettingsUpdateRequest(BaseModel):
     telegram_eod_time: Optional[str] = None
     enable_ilsme_sweep: Optional[bool] = None
     enable_momentum_breakout: Optional[bool] = None
+    enable_trend_pullback: Optional[bool] = None
+    ema_fast_period: Optional[int] = None
+    ema_slow_period: Optional[int] = None
     active_indices: Optional[List[str]] = None
 
 
@@ -804,6 +807,21 @@ async def update_settings(req: SettingsUpdateRequest):
             cfg.setdefault("strategy", {})["enable_momentum_breakout"] = req.enable_momentum_breakout
             if ctx.strategy and hasattr(ctx.strategy, "cfg"):
                 ctx.strategy.cfg["enable_momentum_breakout"] = req.enable_momentum_breakout
+
+        if req.enable_trend_pullback is not None:
+            cfg.setdefault("strategy", {})["enable_trend_pullback"] = req.enable_trend_pullback
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["enable_trend_pullback"] = req.enable_trend_pullback
+
+        if req.ema_fast_period is not None:
+            cfg.setdefault("strategy", {})["ema_fast_period"] = int(req.ema_fast_period)
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["ema_fast_period"] = int(req.ema_fast_period)
+
+        if req.ema_slow_period is not None:
+            cfg.setdefault("strategy", {})["ema_slow_period"] = int(req.ema_slow_period)
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["ema_slow_period"] = int(req.ema_slow_period)
 
         if req.active_indices is not None:
             cleaned_indices = [idx.strip().upper() for idx in req.active_indices if idx.strip()]

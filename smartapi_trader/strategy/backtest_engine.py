@@ -270,8 +270,44 @@ class BacktestEngine:
                                         "swing_inval": or_l
                                     }
 
+                    # 4. 15-Minute Donchian Trend Breakout Engine
+                    if not st.get("armed_fvg") and not st.get("in_trade") and bar_i >= 5:
+                        if ("09:30" <= time_part <= "11:45" or "12:45" <= time_part <= "14:45"):
+                            prior_5 = bars[bar_i-5:bar_i]
+                            d_high = max(b[2] for b in prior_5)
+                            d_low = min(b[3] for b in prior_5)
 
-                    # 4. Entry Execution
+                            recent_bars = bars[max(0, bar_i - 20):bar_i + 1]
+                            ema9 = recent_bars[0][4]
+                            ema21 = recent_bars[0][4]
+                            k9 = 2.0 / 10.0
+                            k21 = 2.0 / 22.0
+                            for rb in recent_bars:
+                                ema9 = (rb[4] * k9) + (ema9 * (1.0 - k9))
+                                ema21 = (rb[4] * k21) + (ema21 * (1.0 - k21))
+
+                            if c < d_low and c < vwap and ema9 < ema21:
+                                swing_pts = max(18.0 if underlying == "NIFTY" else 55.0, d_high - c)
+                                st["armed_fvg"] = {
+                                    "source": "TREND_PULLBACK",
+                                    "type": "BUY_PE",
+                                    "top": h,
+                                    "bottom": l,
+                                    "swing_inval": d_high,
+                                    "swing_pts": swing_pts
+                                }
+                            elif c > d_high and c > vwap and ema9 > ema21:
+                                swing_pts = max(18.0 if underlying == "NIFTY" else 55.0, c - d_low)
+                                st["armed_fvg"] = {
+                                    "source": "TREND_PULLBACK",
+                                    "type": "BUY_CE",
+                                    "top": h,
+                                    "bottom": l,
+                                    "swing_inval": d_low,
+                                    "swing_pts": swing_pts
+                                }
+
+                    # 5. Entry Execution
                     if st.get("armed_fvg") and not st.get("in_trade"):
                         if day_trades_count >= self.max_trades_per_day or day_consecutive_losses >= 2:
                             st["armed_fvg"] = None
@@ -310,17 +346,22 @@ class BacktestEngine:
                                 dte = 7
                             
                             if underlying == "NIFTY":
-                                raw_entry_opt = round(120.0 + (dte * 8.0), 2)
+                                raw_entry_opt = round(95.0 + (dte * 4.2), 2)
                             elif underlying == "BANKNIFTY":
-                                raw_entry_opt = round(260.0 + (dte * 16.0), 2)
+                                raw_entry_opt = round(190.0 + (dte * 10.0), 2)
                             else:
-                                raw_entry_opt = round(170.0 + (dte * 12.0), 2)
+                                raw_entry_opt = round(120.0 + (dte * 6.5), 2)
 
                             entry_slip = self.slippage_pts_entry * slip_mult
                             entry_opt = round(raw_entry_opt + entry_slip, 2)
 
-                            sl_opt = round(raw_entry_opt * (1.0 - self.initial_sl_pct), 2)
-                            unit_risk = entry_opt - sl_opt
+                            swing_pts = fvg.get("swing_pts")
+                            if swing_pts and swing_pts > 0:
+                                unit_risk = round(swing_pts * 0.55, 2)
+                                sl_opt = round(max(1.0, raw_entry_opt - unit_risk), 2)
+                            else:
+                                sl_opt = round(raw_entry_opt * (1.0 - self.initial_sl_pct), 2)
+                                unit_risk = entry_opt - sl_opt
 
                             capital_at_risk = capital * self.risk_per_trade_pct
                             calc_lots = math.floor(capital_at_risk / (unit_risk * lot_size))
@@ -451,6 +492,8 @@ class BacktestEngine:
                             else:
                                 day_consecutive_losses = 0
 
+                            strat_label = "Trend Pullback" if fvg.get("source") == "TREND_PULLBACK" else ("Momentum Breakout" if fvg.get("source") == "MOMENTUM_ORB" else "ILSME Reversal")
+
                             trades.append({
                                 "id": f"BT_{len(trades)+1:03d}",
                                 "date": date_str,
@@ -460,6 +503,7 @@ class BacktestEngine:
                                 "tradingsymbol": tradingsymbol,
                                 "strike_price": strike_price,
                                 "type": trade_type,
+                                "strategy_name": strat_label,
                                 "lots": lots,
                                 "quantity": qty,
                                 "capital_before": cap_before,

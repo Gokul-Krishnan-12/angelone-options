@@ -118,6 +118,7 @@ class TelegramNotifier:
 
         dir_icon = "🟢" if "CE" in opt_type else "🔴"
         mode_tag = "📝 PAPER SIMULATED" if mode == "PAPER" else "⚡ ANGEL ONE LIVE"
+        strategy_label = trade.get("strategy_name") or trade.get("strategy") or "ILSME_Sniper"
 
         slip_icon = "🟢" if slippage <= 0.5 else ("🟡" if slippage <= 1.5 else "🔴")
         slip_txt = f"{slip_icon} <b>Slippage Delta:</b> <code>{slippage:+,.2f} pts</code> (Signal: ₹{signal_price:.2f} → Fill: ₹{entry_price:.2f})"
@@ -125,6 +126,7 @@ class TelegramNotifier:
         message = (
             f"⚡ <b>NEW POSITION ENTERED</b>\n\n"
             f"{dir_icon} <b>Instrument:</b> <b>{symbol}</b>\n"
+            f"🧠 <b>Strategy Engine:</b> <code>{strategy_label}</code>\n"
             f"🏷 <b>Execution Venue:</b> <code>{mode_tag}</code>\n"
             f"📦 <b>Lots:</b> {lots} ({quantity} qty)\n"
             f"💵 <b>Fill Price:</b> ₹{entry_price:.2f}\n"
@@ -146,11 +148,13 @@ class TelegramNotifier:
         gain_pts = float(trade.get("gain_pts", 0.0) or 0.0)
         pnl = float(trade.get("pnl", 0.0) or 0.0)
         mode = trade.get("mode", "PAPER")
+        strategy_label = trade.get("strategy_name") or "ILSME_Sniper"
         now_str = now_ist().strftime("%H:%M:%S")
 
         message = (
             f"🎯 <b>TARGET HIT (+3.0R) — GAINS BOOKED</b>\n\n"
             f"📈 <b>Instrument:</b> <b>{symbol}</b>\n"
+            f"🧠 <b>Strategy:</b> <code>{strategy_label}</code>\n"
             f"📦 <b>Booked Quantity:</b> {booked_qty} units @ ₹{price:.2f}\n"
             f"💰 <b>Realized P&L:</b> <code>+₹{pnl:,.2f}</code> (+{gain_pts:.2f} pts)\n"
             f"🛡 <b>Action:</b> Stop-Loss shifted to BREAKEVEN on remainder!\n"
@@ -193,6 +197,7 @@ class TelegramNotifier:
         net_pnl = float(trade.get("net_pnl", gross_pnl - total_charges))
         reason = str(trade.get("reason", "Target / Stop-Loss"))
         mode = trade.get("mode", "PAPER")
+        strategy_label = trade.get("strategy_name") or trade.get("strategy") or "ILSME_Sniper"
         now_str = now_ist().strftime("%H:%M:%S")
 
         is_profit = net_pnl >= 0
@@ -220,6 +225,7 @@ class TelegramNotifier:
         message = (
             f"{header}\n\n"
             f"{trend_icon} <b>Contract:</b> <b>{symbol}</b>\n"
+            f"🧠 <b>Strategy Engine:</b> <code>{strategy_label}</code>\n"
             f"🏷 <b>Session:</b> <code>{mode_tag}</code>\n"
             f"💵 <b>Entry:</b> ₹{entry_price:.2f} | <b>Exit:</b> ₹{exit_price:.2f}\n"
             f"📦 <b>Quantity:</b> {quantity}\n"

@@ -78,6 +78,7 @@ class SignalEvent(BaseEvent):
     fvg_bottom: float = 0.0
     sweep_level: float = 0.0
     swing_invalidation_level: float = 0.0  # 3m swing break level for structural breakeven confirmation
+    strategy_name: str = "ILSME_Sniper"     # "ILSME_REVERSAL", "MOMENTUM_ORB", "TREND_PULLBACK"
     reason: str = ""
 
 @dataclass
@@ -100,6 +101,7 @@ class OrderEvent(BaseEvent):
     average_price: float = 0.0
     rejection_reason: str = ""
     is_paper: bool = True
+    strategy_name: str = "ILSME_Sniper"
 
 @dataclass
 class FillEvent(BaseEvent):
@@ -113,6 +115,7 @@ class FillEvent(BaseEvent):
     price: float = 0.0
     slippage: float = 0.0
     execution_venue: str = "PAPER"  # "PAPER" or "SMARTAPI"
+    strategy_name: str = "ILSME_Sniper"
 
 @dataclass
 class PositionEvent(BaseEvent):
@@ -143,6 +146,7 @@ class PositionEvent(BaseEvent):
     is_open: bool = True
     is_paper: bool = True
     execution_mode: str = "PAPER"
+    strategy_name: str = "ILSME_Sniper"
 
 @dataclass
 class RiskAlertEvent(BaseEvent):

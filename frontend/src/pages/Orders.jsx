@@ -269,6 +269,7 @@ export default function Orders({ state, onExitPosition, onRefresh }) {
               <thead>
                 <tr>
                   <th>Trade #</th>
+                  <th>Strategy</th>
                   <th>Contract</th>
                   <th>Strike Price</th>
                   <th>Entry</th>
@@ -281,7 +282,7 @@ export default function Orders({ state, onExitPosition, onRefresh }) {
               <tbody>
                 {history.length === 0 ? (
                   <tr>
-                    <td colSpan={8} style={{ textAlign: 'center', padding: '2.5rem', color: 'var(--text-muted)' }}>
+                    <td colSpan={9} style={{ textAlign: 'center', padding: '2.5rem', color: 'var(--text-muted)' }}>
                       No completed live broker trades today. (Paper trading performance is tracked in Paper Agent).
                     </td>
                   </tr>
@@ -301,9 +302,23 @@ export default function Orders({ state, onExitPosition, onRefresh }) {
                       return s > 0 ? `₹${s.toLocaleString('en-IN')}` : '--';
                     })();
                     const pnl = h.net_pnl !== undefined ? h.net_pnl : (h.pnl !== undefined ? h.pnl : (h.gross_pnl || 0));
+                    const strat = h.strategy_name || 'ILSME_Sniper';
                     return (
                       <tr key={h.id || i}>
                         <td className="mono">#{i + 1}</td>
+                        <td>
+                          <span
+                            className="pill-badge"
+                            style={{
+                              background: strat.includes('Pullback') ? 'rgba(168, 85, 247, 0.15)' : (strat.includes('Momentum') ? 'rgba(234, 179, 8, 0.15)' : 'rgba(56, 189, 248, 0.15)'),
+                              color: strat.includes('Pullback') ? '#c084fc' : (strat.includes('Momentum') ? '#facc15' : '#38bdf8'),
+                              fontSize: '0.70rem',
+                              padding: '0.15rem 0.45rem',
+                            }}
+                          >
+                            {strat}
+                          </span>
+                        </td>
                         <td className="mono font-bold">{h.symbol}</td>
                         <td className="mono font-bold" style={{ color: 'var(--accent-blue)' }}>
                           {typeof strike === 'number' ? `₹${strike.toLocaleString('en-IN')}` : strike}
