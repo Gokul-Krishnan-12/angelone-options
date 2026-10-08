@@ -95,9 +95,20 @@ class RiskManager:
 
         # 5. Time Constraints (Strict 15:00 Entry Cut-off & Midday Chop)
         now_time = ist_time()
-        # Midday chop filter
-        if time(11, 15) <= now_time <= time(13, 30):
-            self._raise_alert("WARNING", "MiddayChopFilter", "Order rejected: Midday consolidation window (11:15-13:30 IST).")
+        # Dynamic Midday chop filter
+        start_str = str(self.cfg.get("midday_chop_filter_start", "11:45"))
+        end_str = str(self.cfg.get("midday_chop_filter_end", "12:00"))
+        try:
+            sh, sm = map(int, start_str.split(":"))
+            eh, em = map(int, end_str.split(":"))
+            chop_start = time(sh, sm)
+            chop_end = time(eh, em)
+        except Exception:
+            chop_start = time(11, 45)
+            chop_end = time(12, 0)
+
+        if chop_start <= now_time <= chop_end:
+            self._raise_alert("WARNING", "MiddayChopFilter", f"Order rejected: Midday consolidation window ({start_str}-{end_str} IST).")
             return
 
         # Strict entry cut-off (15:00 IST) - No new positions entered within 30 min of close
