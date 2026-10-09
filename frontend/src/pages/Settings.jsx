@@ -32,9 +32,12 @@ export default function Settings({ state, onRefreshBalance }) {
   const [isEodTesting, setIsEodTesting] = useState(false);
 
   // Risk parameters
-  const [riskPerTrade, setRiskPerTrade] = useState(2.0);
-  const [maxDrawdown, setMaxDrawdown] = useState(4.0);
+  const [riskPerTrade, setRiskPerTrade] = useState(1.8);
+  const [maxDrawdown, setMaxDrawdown] = useState(3.0);
   const [maxTrades, setMaxTrades] = useState(2);
+  const [target1R, setTarget1R] = useState(2.2);
+  const [target2R, setTarget2R] = useState(3.0);
+  const [breakevenTriggerR, setBreakevenTriggerR] = useState(0.8);
 
   // Strategy Engines & Active Instruments
   const [enableIlsmeSweep, setEnableIlsmeSweep] = useState(true);
@@ -74,6 +77,9 @@ export default function Settings({ state, onRefreshBalance }) {
         if (r.risk_per_trade_pct) setRiskPerTrade(r.risk_per_trade_pct * 100);
         if (r.max_daily_drawdown_pct) setMaxDrawdown(r.max_daily_drawdown_pct * 100);
         if (r.max_trades_per_day) setMaxTrades(r.max_trades_per_day);
+        if (r.partial_exit_r) setTarget1R(r.partial_exit_r);
+        if (r.target_2_r) setTarget2R(r.target_2_r);
+        if (r.breakeven_trigger_r) setBreakevenTriggerR(r.breakeven_trigger_r);
 
         const strat = data.strategy || {};
         if (strat.enable_ilsme_sweep !== undefined) setEnableIlsmeSweep(strat.enable_ilsme_sweep);
@@ -146,6 +152,9 @@ export default function Settings({ state, onRefreshBalance }) {
       risk_per_trade_pct: parseFloat(riskPerTrade) / 100,
       max_daily_drawdown_pct: parseFloat(maxDrawdown) / 100,
       max_trades_per_day: parseInt(maxTrades),
+      partial_exit_r: parseFloat(target1R),
+      target_2_r: parseFloat(target2R),
+      breakeven_trigger_r: parseFloat(breakevenTriggerR),
       telegram_enabled: telegramEnabled,
       telegram_bot_token: telegramBotToken,
       telegram_chat_id: telegramChatId,
@@ -372,10 +381,10 @@ export default function Settings({ state, onRefreshBalance }) {
             </div>
           </div>
 
-          {/* Card 2: Risk Limits */}
+          {/* Card 2: Risk Limits & Targets */}
           <div className="hud-card">
             <div className="card-header-line">
-              <span>Capital Preservation & Risk Limits</span>
+              <span>Capital Preservation & Targets</span>
               <Shield size={14} color="var(--accent-emerald)" />
             </div>
 
@@ -388,7 +397,7 @@ export default function Settings({ state, onRefreshBalance }) {
                 value={riskPerTrade}
                 onChange={(e) => setRiskPerTrade(e.target.value)}
               />
-              <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>Optimal: 2.0% fixed fractional sizing (NIFTY)</span>
+              <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>Optimal: 1.8% to 2.0% fixed fractional sizing</span>
             </div>
 
             <div className="form-group">
@@ -400,7 +409,7 @@ export default function Settings({ state, onRefreshBalance }) {
                 value={maxDrawdown}
                 onChange={(e) => setMaxDrawdown(e.target.value)}
               />
-              <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>Optimal: 4.0% daily circuit breaker (halts engine)</span>
+              <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>Optimal: 3.0% daily circuit breaker (halts engine)</span>
             </div>
 
             <div className="form-group">
@@ -412,6 +421,44 @@ export default function Settings({ state, onRefreshBalance }) {
                 onChange={(e) => setMaxTrades(e.target.value)}
               />
               <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>Default: 2 completed setups</span>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginTop: '0.5rem', paddingTop: '0.5rem', borderTop: '1px solid var(--border-subtle)' }}>
+              <div className="form-group" style={{ margin: 0 }}>
+                <label className="form-label">Target 1 (R-Multiple)</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  className="form-input mono"
+                  value={target1R}
+                  onChange={(e) => setTarget1R(e.target.value)}
+                />
+                <span style={{ fontSize: '0.68rem', color: 'var(--text-dim)' }}>Default: 2.2R (50% partial / single-lot full exit)</span>
+              </div>
+
+              <div className="form-group" style={{ margin: 0 }}>
+                <label className="form-label">Target 2 (R-Multiple)</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  className="form-input mono"
+                  value={target2R}
+                  onChange={(e) => setTarget2R(e.target.value)}
+                />
+                <span style={{ fontSize: '0.68rem', color: 'var(--text-dim)' }}>Default: 3.0R (Runner full exit)</span>
+              </div>
+            </div>
+
+            <div className="form-group" style={{ marginTop: '0.75rem' }}>
+              <label className="form-label">Breakeven Shift Trigger (R-Multiple)</label>
+              <input
+                type="number"
+                step="0.1"
+                className="form-input mono"
+                value={breakevenTriggerR}
+                onChange={(e) => setBreakevenTriggerR(e.target.value)}
+              />
+              <span style={{ fontSize: '0.68rem', color: 'var(--text-dim)' }}>Moves Stop-Loss to Entry after +0.8R expansion</span>
             </div>
           </div>
 

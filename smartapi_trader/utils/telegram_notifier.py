@@ -95,14 +95,12 @@ class TelegramNotifier:
         )
 
     def notify_trade_entry(self, trade: Dict[str, Any]):
-        """Notifies when a new options contract position is entered, including signal price vs fill price slippage."""
+        """Notifies when a new options contract position is entered."""
         if not self.enabled or not self.config.get("notify_on_trade_entry", True):
             return
 
         symbol = trade.get("symbol", "N/A")
-        underlying = trade.get("underlying", "INDEX")
         opt_type = trade.get("option_type", "CE")
-        strike = trade.get("strike", 0)
         entry_price = float(trade.get("entry_price", 0.0) or 0.0)
         signal_price = float(trade.get("signal_price", entry_price) or entry_price)
         slippage = float(trade.get("slippage", round(entry_price - signal_price, 2)) or 0.0)
@@ -117,28 +115,25 @@ class TelegramNotifier:
         now_str = now_ist().strftime("%H:%M:%S")
 
         dir_icon = "🟢" if "CE" in opt_type else "🔴"
-        mode_tag = "📝 PAPER SIMULATED" if mode == "PAPER" else "⚡ ANGEL ONE LIVE"
+        mode_tag = "📝 PAPER" if mode == "PAPER" else "⚡ LIVE"
         strategy_label = trade.get("strategy_name") or trade.get("strategy") or "ILSME_Sniper"
 
-        slip_icon = "🟢" if slippage <= 0.5 else ("🟡" if slippage <= 1.5 else "🔴")
-        slip_txt = f"{slip_icon} <b>Slippage Delta:</b> <code>{slippage:+,.2f} pts</code> (Signal: ₹{signal_price:.2f} → Fill: ₹{entry_price:.2f})"
+        t1_label = f"₹{target_1:.2f}" if target_1 > 0 else "Dynamic"
+        slip_txt = f" | Slip: {slippage:+.2f}" if abs(slippage) > 0.01 else ""
 
         message = (
             f"⚡ <b>NEW POSITION ENTERED</b>\n\n"
             f"{dir_icon} <b>Instrument:</b> <b>{symbol}</b>\n"
-            f"🧠 <b>Strategy Engine:</b> <code>{strategy_label}</code>\n"
-            f"🏷 <b>Execution Venue:</b> <code>{mode_tag}</code>\n"
-            f"📦 <b>Lots:</b> {lots} ({quantity} qty)\n"
-            f"💵 <b>Fill Price:</b> ₹{entry_price:.2f}\n"
-            f"{slip_txt}\n"
-            f"🛑 <b>Native Exchange SL:</b> ₹{stop_loss:.2f} (-{risk_pct:.1f}%)\n"
-            f"🎯 <b>Target (+3.0R):</b> ₹{target_1:.2f}\n"
-            f"⏱ <b>Time:</b> {now_str} IST"
+            f"🧠 <b>Strategy:</b> <code>{strategy_label}</code>\n"
+            f"📦 <b>Size:</b> {lots} Lot{'s' if lots > 1 else ''} ({quantity} Qty) @ ₹{entry_price:.2f}{slip_txt}\n"
+            f"🛑 <b>Stop-Loss:</b> ₹{stop_loss:.2f} (-{risk_pct:.1f}%)\n"
+            f"🎯 <b>Target 1:</b> {t1_label}\n"
+            f"🏷 <b>Mode:</b> {mode_tag} | ⏱ <b>Time:</b> {now_str} IST"
         )
         self.send_message_async(message)
 
     def notify_partial_tp1(self, trade: Dict[str, Any]):
-        """Notifies when Target 1 (+3.0R) is reached and partial gain is locked."""
+        """Notifies when Target 1 is reached and partial gain is locked."""
         if not self.enabled or not self.config.get("notify_on_tp1", True):
             return
 
@@ -152,14 +147,12 @@ class TelegramNotifier:
         now_str = now_ist().strftime("%H:%M:%S")
 
         message = (
-            f"🎯 <b>TARGET HIT (+3.0R) — GAINS BOOKED</b>\n\n"
+            f"🎯 <b>TARGET 1 HIT — PARTIAL GAINS BOOKED</b>\n\n"
             f"📈 <b>Instrument:</b> <b>{symbol}</b>\n"
-            f"🧠 <b>Strategy:</b> <code>{strategy_label}</code>\n"
-            f"📦 <b>Booked Quantity:</b> {booked_qty} units @ ₹{price:.2f}\n"
-            f"💰 <b>Realized P&L:</b> <code>+₹{pnl:,.2f}</code> (+{gain_pts:.2f} pts)\n"
-            f"🛡 <b>Action:</b> Stop-Loss shifted to BREAKEVEN on remainder!\n"
-            f"🏷 <b>Mode:</b> {mode}\n"
-            f"⏱ <b>Time:</b> {now_str} IST"
+            f"📦 <b>Booked:</b> {booked_qty} units @ ₹{price:.2f}\n"
+            f"💰 <b>Realized Gain:</b> <code>+₹{pnl:,.2f}</code> (+{gain_pts:.2f} pts)\n"
+            f"🛡 <b>Action:</b> Stop-Loss on remaining lot moved to BREAKEVEN\n"
+            f"🏷 <b>Mode:</b> {mode} | ⏱ {now_str} IST"
         )
         self.send_message_async(message)
 
@@ -174,17 +167,17 @@ class TelegramNotifier:
         now_str = now_ist().strftime("%H:%M:%S")
 
         message = (
-            f"🛡 <b>RISK FREE: STOP-LOSS MOVED TO BREAKEVEN</b>\n\n"
+            f"🛡 <b>RISK FREE: SL MOVED TO BREAKEVEN</b>\n\n"
             f"📊 <b>Instrument:</b> <b>{symbol}</b>\n"
             f"🛑 <b>New Exchange SL:</b> ₹{be_price:.2f} (Entry Price)\n"
             f"⚡ <b>Current LTP:</b> ₹{current_ltp:.2f}\n"
-            f"🔒 <b>Capital Risk:</b> 0.0% (Risk-free trade)\n"
+            f"🔒 <b>Downside Risk:</b> 0.0% (Risk Eliminated)\n"
             f"⏱ <b>Time:</b> {now_str} IST"
         )
         self.send_message_async(message)
 
     def notify_trade_exit(self, trade: Dict[str, Any]):
-        """Notifies when a trade position is fully closed with granular friction telemetry."""
+        """Notifies when a trade position is fully closed."""
         if not self.enabled or not self.config.get("notify_on_trade_exit", True):
             return
 
@@ -201,40 +194,25 @@ class TelegramNotifier:
         now_str = now_ist().strftime("%H:%M:%S")
 
         is_profit = net_pnl >= 0
-        if is_profit:
-            header = "🎯 <b>TARGET REACHED — PROFIT BOOKED</b>"
-            trend_icon = "🟢"
-            pnl_str = f"+₹{net_pnl:,.2f}"
-            diagnostic_txt = (
-                "💡 <b>Post-Trade Analysis:</b>\n"
-                "  🎯 <b>What Worked:</b> Clean momentum displacement & volume confirmation.\n"
-                "  🛡 <b>Execution:</b> Defined risk & +1.2R BE ratchet locked in gains smoothly."
-            )
-        else:
-            header = "🛑 <b>STOP-LOSS HIT — LOSS BOOKED</b>"
-            trend_icon = "🔴"
-            pnl_str = f"-₹{abs(net_pnl):,.2f}"
-            diagnostic_txt = (
-                "💡 <b>Post-Trade Analysis:</b>\n"
-                "  ⚠️ <b>What Didn't Work:</b> Market structure pullback or false breakout.\n"
-                "  🛡 <b>Risk Control:</b> Strict 10% stop-loss preserved capital cushion."
-            )
+        header = "🎯 <b>TRADE CLOSED — PROFIT BOOKED</b>" if is_profit else "🛑 <b>TRADE CLOSED — STOP-LOSS HIT</b>"
+        trend_icon = "🟢" if is_profit else "🔴"
+        pnl_str = f"+₹{net_pnl:,.2f}" if is_profit else f"-₹{abs(net_pnl):,.2f}"
+        gross_str = f"+₹{gross_pnl:,.2f}" if gross_pnl >= 0 else f"-₹{abs(gross_pnl):,.2f}"
+        pct_gain = ((exit_price - entry_price) / entry_price * 100.0) if entry_price > 0 else 0.0
 
-        mode_tag = "📝 PAPER SIMULATED" if mode == "PAPER" else "⚡ ANGEL ONE LIVE"
+        mode_tag = "📝 PAPER" if mode == "PAPER" else "⚡ LIVE"
 
         message = (
             f"{header}\n\n"
             f"{trend_icon} <b>Contract:</b> <b>{symbol}</b>\n"
-            f"🧠 <b>Strategy Engine:</b> <code>{strategy_label}</code>\n"
-            f"🏷 <b>Session:</b> <code>{mode_tag}</code>\n"
-            f"💵 <b>Entry:</b> ₹{entry_price:.2f} | <b>Exit:</b> ₹{exit_price:.2f}\n"
+            f"🧠 <b>Strategy:</b> <code>{strategy_label}</code>\n"
+            f"💵 <b>Entry:</b> ₹{entry_price:.2f} ➜ <b>Exit:</b> ₹{exit_price:.2f} ({pct_gain:+.1f}%)\n"
             f"📦 <b>Quantity:</b> {quantity}\n"
-            f"💰 <b>Gross P&L:</b> ₹{gross_pnl:+,.2f}\n"
-            f"💸 <b>Brokerage & Taxes:</b> -₹{total_charges:.2f}\n"
+            f"💰 <b>Gross P&L:</b> {gross_str}\n"
+            f"💸 <b>Charges & Tax:</b> -₹{total_charges:.2f}\n"
             f"{trend_icon} <b>Net Realized P&L:</b> <code>{pnl_str}</code>\n"
-            f"📋 <b>Exit Trigger:</b> {reason}\n"
-            f"⏱ <b>Time:</b> {now_str} IST\n\n"
-            f"{diagnostic_txt}"
+            f"📋 <b>Exit Reason:</b> {reason}\n"
+            f"🏷 <b>Mode:</b> {mode_tag} | ⏱ <b>Time:</b> {now_str} IST"
         )
         self.send_message_async(message)
 
@@ -251,13 +229,13 @@ class TelegramNotifier:
             f"🚀 <b>SYSTEM SCALING ADVISORY (GREEN LIGHT)</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"✅ <b>Milestone Achieved:</b> Statistical criteria met for Capital Scale-Up!\n\n"
-            f"📊 <b>Empirical Track Record:</b>\n"
-            f"  • Completed Trades: <code>{trades}</code> (Target ≥ 30)\n"
-            f"  • Profit Factor: <code>{pf:.2f}</code> (Benchmark ≥ 1.30)\n"
+            f"📊 <b>Track Record:</b>\n"
+            f"  • Completed Trades: <code>{trades}</code>\n"
+            f"  • Profit Factor: <code>{pf:.2f}</code>\n"
             f"  • Win Rate: <code>{winrate:.1f}%</code>\n"
-            f"  • Max Drawdown: <code>{max_dd:.1f}%</code> (Safe threshold < 18%)\n"
-            f"  • Average Slippage: <code>{avg_slip:.2f} pts</code> (Threshold ≤ 1.5 pts)\n\n"
-            f"💡 <b>Recommendation:</b> You are cleared to increase allocation by <b>+25% capital</b> (e.g. ₹1.0L → ₹1.25L).\n"
+            f"  • Max Drawdown: <code>{max_dd:.1f}%</code>\n"
+            f"  • Average Slippage: <code>{avg_slip:.2f} pts</code>\n\n"
+            f"💡 <b>Recommendation:</b> Allocation can be safely increased by <b>+25% capital</b>.\n"
             f"⏱ <b>Timestamp:</b> {now_str} IST"
         )
         self.send_message_async(message)
@@ -267,17 +245,15 @@ class TelegramNotifier:
         now_str = now_ist().strftime("%H:%M:%S")
         curr_dd = stats.get("drawdown_pct", 0.0)
         consec_losses = stats.get("consecutive_losses", 0)
-        avg_slip = stats.get("avg_slippage", 0.0)
 
         message = (
             f"🛑 <b>SYSTEM HEALTH ALERT: QUARANTINE TRIGGERED</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"⚠️ <b>Critical Violation:</b> <b>{reason}</b>\n\n"
             f"📉 <b>Breach Metrics:</b>\n"
-            f"  • Current Drawdown: <code>{curr_dd:.1f}%</code> (Hard Ceiling: 20.0%)\n"
-            f"  • Consecutive Losses: <code>{consec_losses}</code> (Hard Ceiling: 9)\n"
-            f"  • Avg Live Slippage: <code>{avg_slip:.2f} pts</code> (Ceiling: 3.0 pts)\n\n"
-            f"🔒 <b>Action Required:</b> Halt real money trading immediately. Audit market regime and review logs.\n"
+            f"  • Current Drawdown: <code>{curr_dd:.1f}%</code>\n"
+            f"  • Consecutive Losses: <code>{consec_losses}</code>\n\n"
+            f"🔒 <b>Action Required:</b> Halt trading immediately. Review risk settings.\n"
             f"⏱ <b>Timestamp:</b> {now_str} IST"
         )
         self.send_message_async(message)
@@ -287,7 +263,7 @@ class TelegramNotifier:
         now_str = now_ist().strftime("%H:%M:%S")
         message = (
             f"🚨 <b>EMERGENCY CIRCUIT BREAKER ACTIVATED</b>\n\n"
-            f"⚠️ <b>Action:</b> Panic switch triggered! All open options positions liquidated at market.\n"
+            f"⚠️ <b>Action:</b> Panic switch triggered! All open positions liquidated at market.\n"
             f"🛑 <b>Reason:</b> {reason}\n"
             f"🔒 <b>State:</b> Trading Engine HALTED\n"
             f"⏱ <b>Timestamp:</b> {now_str} IST"
@@ -296,10 +272,7 @@ class TelegramNotifier:
 
     def notify_eod_summary(self, state_mgr: Any, mode_override: Optional[str] = None):
         """
-        Sends End of Day (EOD) Performance Reports:
-        1. Always dispatches the Live Real Trading Report (Trades, Gross PnL, Brokerage/Tax, Net PnL, Capital).
-        2. Dispatches the Paper Trading Report & System Performance / Pre-flight Checklist IF AND ONLY IF 
-           the Paper Trading Agent is RUNNING (or took paper trades today).
+        Sends clean, meaningful End of Day (EOD) Performance Reports.
         """
         if not self.enabled:
             return False, "Telegram notifications disabled"
@@ -310,178 +283,99 @@ class TelegramNotifier:
         overall_success = True
         overall_detail = "Reports sent successfully"
 
-        # -------------------------------------------------------------
-        # 1. REAL LIVE TRADING EOD REPORT (Sent Every Session)
-        # -------------------------------------------------------------
-        real_trades = list(getattr(state_mgr, "completed_trades", []))
-        real_gross = float(getattr(state_mgr, "realized_pnl", 0.0))
-        real_brokerage = float(getattr(state_mgr, "total_brokerage", 0.0))
-        real_net = float(getattr(state_mgr, "net_pnl", real_gross - real_brokerage))
+        # Check which mode was active today
+        is_live_active = getattr(state_mgr, "execution_mode", "PAPER") == "REAL" or len(getattr(state_mgr, "completed_trades", [])) > 0
         
-        # Live broker RMS
-        rms = getattr(state_mgr, "broker_rms", {})
-        real_net_equity = float(rms.get("net", 0.0) or getattr(state_mgr, "equity", 0.0))
-        real_avail_cash = float(rms.get("availablecash", 0.0) or getattr(state_mgr, "available_margin", 0.0))
-        real_status = getattr(state_mgr, "real_agent_status", "IDLE")
+        # 1. LIVE REPORT (if real trades were taken or mode is REAL)
+        if is_live_active:
+            trades = list(getattr(state_mgr, "completed_trades", []))
+            gross = float(getattr(state_mgr, "realized_pnl", 0.0))
+            brokerage = float(getattr(state_mgr, "total_brokerage", 0.0))
+            net = float(getattr(state_mgr, "net_pnl", gross - brokerage))
+            
+            rms = getattr(state_mgr, "broker_rms", {})
+            net_equity = float(rms.get("net", 0.0) or getattr(state_mgr, "equity", 0.0))
+            
+            total = len(trades)
+            wins = sum(1 for t in trades if float(t.get("net_pnl", 0.0)) > 0)
+            losses = sum(1 for t in trades if float(t.get("net_pnl", 0.0)) <= 0)
+            winrate = (wins / total * 100.0) if total > 0 else 0.0
 
-        real_total = len(real_trades)
-        real_winning = sum(1 for t in real_trades if float(t.get("net_pnl", 0.0)) > 0)
-        real_losing = sum(1 for t in real_trades if float(t.get("net_pnl", 0.0)) <= 0)
-        real_winrate = (real_winning / real_total * 100.0) if real_total > 0 else 0.0
+            net_icon = "🟢" if net >= 0 else "🔴"
+            net_prefix = "+" if net >= 0 else "-"
+            gross_prefix = "+" if gross >= 0 else "-"
 
-        real_net_icon = "🟢" if real_net >= 0 else "🔴"
-        real_net_prefix = "+" if real_net >= 0 else "-"
-        real_gross_prefix = "+" if real_gross >= 0 else "-"
+            trade_lines = []
+            for t in trades[-10:]:
+                t_sym = t.get("symbol", "OPT")
+                t_net = float(t.get("net_pnl", 0.0))
+                t_icon = "✅" if t_net >= 0 else "❌"
+                trade_lines.append(f"  {t_icon} <code>{t_sym}</code>: {t_net:+,.2f}")
+            breakdown = "\n".join(trade_lines) if trade_lines else "  <i>No positions executed today</i>"
 
-        real_trade_snippets = []
-        for t in real_trades[-5:]:
-            t_sym = t.get("symbol", "OPT")
-            t_net = float(t.get("net_pnl", 0.0))
-            t_icon = "✅" if t_net >= 0 else "❌"
-            real_trade_snippets.append(f"  {t_icon} <code>{t_sym}</code>: {t_net:+,.2f}")
-        real_breakdown = "\n".join(real_trade_snippets) if real_trade_snippets else "  <i>No live positions taken/closed today</i>"
-
-        # Analytical diagnostic for Real Trades
-        if real_total > 0:
-            if real_winrate >= 50.0:
-                real_analytics = (
-                    "📊 <b>Session Diagnostics:</b>\n"
-                    "  🎯 <b>What Worked:</b> Clean momentum breakout follow-through and strict prime-window discipline.\n"
-                    "  🛡 <b>Strategy Engine:</b> Spreads / 12% max stops shielded capital against morning volatility crush."
-                )
-            else:
-                real_analytics = (
-                    "📊 <b>Session Diagnostics:</b>\n"
-                    "  ⚠️ <b>What Didn't Work:</b> Market regime choppy with range compression; adverse mean-reversions.\n"
-                    "  🛡 <b>Strategy Engine:</b> Max 2 trades/day and drawdown limit stopped further bleeding."
-                )
-        else:
-            real_analytics = (
-                "📊 <b>Session Diagnostics:</b>\n"
-                "  🎯 <b>What Worked:</b> Strict filters rejected low-quality setups; preserved 100% capital buffer."
+            msg = (
+                f"📊 <b>END OF DAY REPORT — {date_str}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🏷 <b>Mode:</b> ⚡ <b>REAL LIVE TRADING</b>\n"
+                f"🎯 <b>Result:</b> {wins}W / {losses}L (<code>{winrate:.0f}% Win Rate</code>)\n"
+                f"🔢 <b>Trades Taken:</b> {total}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💰 <b>Gross P&L:</b> <code>{gross_prefix}₹{abs(gross):,.2f}</code>\n"
+                f"💸 <b>Brokerage & Taxes:</b> <code>-₹{brokerage:,.2f}</code>\n"
+                f"{net_icon} <b>Net Realized P&L:</b> <code>{net_prefix}₹{abs(net):,.2f}</code>\n\n"
+                f"💼 <b>Broker Net Balance:</b> ₹{net_equity:,.2f}\n\n"
+                f"📋 <b>Today's Trades:</b>\n{breakdown}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"⏱ <i>Generated at {now_str} IST</i>"
             )
+            res_live, det_live = self.send_message_sync(msg)
+            if not res_live:
+                overall_success = False
+                overall_detail = det_live
 
-        real_msg = (
-            f"⚡ <b>REAL LIVE TRADING — EOD REPORT</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📅 <b>Date:</b> {date_str} ({now_str} IST)\n"
-            f"🛡 <b>Agent Status:</b> <code>{real_status}</code>\n"
-            f"🔢 <b>Trades Taken:</b> {real_total} | 🎯 <b>Win Rate:</b> <code>{real_winrate:.1f}%</code>\n"
-            f"✅ <b>Wins:</b> {real_winning} | ❌ <b>Losses:</b> {real_losing}\n\n"
-            f"💰 <b>Gross P&L:</b> <code>{real_gross_prefix}₹{abs(real_gross):,.2f}</code>\n"
-            f"💸 <b>Brokerage & Taxes:</b> <code>-₹{real_brokerage:,.2f}</code>\n"
-            f"{real_net_icon} <b>Net Realised P&L:</b> <code>{real_net_prefix}₹{abs(real_net):,.2f}</code>\n\n"
-            f"💼 <b>Broker Net Balance:</b> ₹{real_net_equity:,.2f}\n"
-            f"💵 <b>Available Margin:</b> ₹{real_avail_cash:,.2f}\n\n"
-            f"📋 <b>Live Trade Ledger:</b>\n{real_breakdown}\n\n"
-            f"{real_analytics}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━"
-        )
-        res_real, det_real = self.send_message_sync(real_msg)
-        if not res_real:
-            overall_success = False
-            overall_detail = det_real
-
-        # -------------------------------------------------------------
-        # 2. PAPER TRADING & SYSTEM INTEGRITY REPORT (Only if Paper Active)
-        # -------------------------------------------------------------
-        paper_status = getattr(state_mgr, "paper_agent_status", "IDLE")
+        # 2. PAPER REPORT (if paper mode or paper trades taken)
         paper_trades = list(getattr(state_mgr, "paper_completed_trades", []))
-        
-        # Send paper report only if paper engine is RUNNING or executed trades today
-        should_send_paper = (paper_status == "RUNNING" or len(paper_trades) > 0 or mode_override == "PAPER")
+        paper_status = getattr(state_mgr, "paper_agent_status", "IDLE")
+        should_send_paper = (paper_status == "RUNNING" or len(paper_trades) > 0 or getattr(state_mgr, "execution_mode", "PAPER") == "PAPER" or mode_override == "PAPER")
 
-        if should_send_paper:
+        if should_send_paper and not is_live_active:
             paper_gross = float(getattr(state_mgr, "paper_realized_pnl", 0.0))
             paper_brokerage = float(getattr(state_mgr, "paper_total_brokerage", 0.0))
             paper_net = float(getattr(state_mgr, "paper_net_pnl", paper_gross - paper_brokerage))
             paper_cap = float(getattr(state_mgr, "paper_capital", 50000.0))
-            paper_start_cap = float(getattr(state_mgr, "paper_starting_capital", 50000.0))
-            paper_dd = float(getattr(state_mgr, "paper_drawdown_pct", 0.0))
-
             paper_total = len(paper_trades)
-            paper_winning = sum(1 for t in paper_trades if float(t.get("net_pnl", 0.0)) > 0)
-            paper_losing = sum(1 for t in paper_trades if float(t.get("net_pnl", 0.0)) <= 0)
-            paper_winrate = (paper_winning / paper_total * 100.0) if paper_total > 0 else 0.0
+            paper_wins = sum(1 for t in paper_trades if float(t.get("net_pnl", 0.0)) > 0)
+            paper_losses = sum(1 for t in paper_trades if float(t.get("net_pnl", 0.0)) <= 0)
+            paper_winrate = (paper_wins / paper_total * 100.0) if paper_total > 0 else 0.0
 
-            paper_net_icon = "🟢" if paper_net >= 0 else "🔴"
-            paper_net_prefix = "+" if paper_net >= 0 else "-"
-            paper_gross_prefix = "+" if paper_gross >= 0 else "-"
+            net_icon = "🟢" if paper_net >= 0 else "🔴"
+            net_prefix = "+" if paper_net >= 0 else "-"
+            gross_prefix = "+" if paper_gross >= 0 else "-"
 
-            paper_snippets = []
-            for t in paper_trades[-5:]:
+            paper_lines = []
+            for t in paper_trades[-10:]:
                 t_sym = t.get("symbol", "OPT")
                 t_net = float(t.get("net_pnl", 0.0))
                 t_icon = "✅" if t_net >= 0 else "❌"
-                paper_snippets.append(f"  {t_icon} <code>{t_sym}</code>: {t_net:+,.2f}")
-            paper_breakdown = "\n".join(paper_snippets) if paper_snippets else "  <i>No paper positions closed today (Strict filters preserved capital)</i>"
+                paper_lines.append(f"  {t_icon} <code>{t_sym}</code>: {t_net:+,.2f}")
+            paper_breakdown = "\n".join(paper_lines) if paper_lines else "  <i>No paper trades executed today</i>"
 
-            # Paper Analytics Diagnostic
-            if paper_total > 0:
-                if paper_winrate >= 50.0:
-                    paper_analytics = (
-                        "💡 <b>Algorithmic Diagnostics:</b>\n"
-                        "  🎯 <b>What Worked:</b> Clean displacement candles & +1.5R breakeven protection locked gains.\n"
-                        "  🛡 <b>Risk Management:</b> Single/multi-lot sizing formula kept exposure under 1.8% equity."
-                    )
-                else:
-                    paper_analytics = (
-                        "💡 <b>Algorithmic Diagnostics:</b>\n"
-                        "  ⚠️ <b>What Didn't Work:</b> Sudden intraday mean-reversion & chop at opening range boundary.\n"
-                        "  🛡 <b>Risk Management:</b> Circuit breaker prevented secondary compounding loss."
-                    )
-            else:
-                paper_analytics = (
-                    "💡 <b>Algorithmic Diagnostics:</b>\n"
-                    "  🎯 <b>What Worked:</b> Volatility expansion filter & midday chop filters successfully avoided false triggers."
-                )
-
-            # Dynamic System Health & Data Integrity Audit
-            spot_levels = getattr(state_mgr, "spot_levels", {})
-            audit_lines = []
-            for idx in ["NIFTY", "BANKNIFTY", "SENSEX"]:
-                lvl = spot_levels.get(idx, {})
-                s_val = lvl.get("spot", 0.0)
-                pdh = lvl.get("pdh", 0.0)
-                pdl = lvl.get("pdl", 0.0)
-                vwap = lvl.get("vwap", 0.0)
-                
-                # Check health status
-                is_ok = (s_val > 0 and pdh > 0 and pdl > 0 and pdh > pdl)
-                chk_icon = "✅" if is_ok else "⚠️"
-                audit_lines.append(
-                    f"  {chk_icon} <b>{idx}:</b> Spot: <code>{s_val:,.1f}</code> | VWAP: <code>{vwap:,.1f}</code>\n"
-                    f"     ↳ PDH: <code>{pdh:,.1f}</code> | PDL: <code>{pdl:,.1f}</code>"
-                )
-
-            system_audit_txt = "\n".join(audit_lines)
-
-            # Strategy & Execution Checklist Status
-            strategy_stat = getattr(state_mgr, "strategy_status", "Active")
-            open_paper_pos = len([p for p in state_mgr.positions.values() if p.is_open and (getattr(p, 'is_paper', False) or getattr(p, 'execution_mode', '') == 'PAPER')])
-
-            paper_msg = (
-                f"📝 <b>PAPER TRADING & SYSTEM AUDIT REPORT</b>\n"
+            msg_paper = (
+                f"📊 <b>END OF DAY REPORT — {date_str}</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📅 <b>Date:</b> {date_str} ({now_str} IST)\n"
-                f"🤖 <b>Paper Agent:</b> <code>{paper_status}</code>\n"
-                f"🔢 <b>Simulated Trades:</b> {paper_total} | 🎯 <b>Win Rate:</b> <code>{paper_winrate:.1f}%</code>\n"
-                f"✅ <b>Wins:</b> {paper_winning} | ❌ <b>Losses:</b> {paper_losing}\n\n"
-                f"💰 <b>Paper Gross P&L:</b> <code>{paper_gross_prefix}₹{abs(paper_gross):,.2f}</code>\n"
+                f"🏷 <b>Mode:</b> 📝 <b>PAPER SIMULATION</b>\n"
+                f"🎯 <b>Result:</b> {paper_wins}W / {paper_losses}L (<code>{paper_winrate:.0f}% Win Rate</code>)\n"
+                f"🔢 <b>Trades Taken:</b> {paper_total}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💰 <b>Gross P&L:</b> <code>{gross_prefix}₹{abs(paper_gross):,.2f}</code>\n"
                 f"💸 <b>Simulated Charges:</b> <code>-₹{paper_brokerage:,.2f}</code>\n"
-                f"{paper_net_icon} <b>Paper Net Realised P&L:</b> <code>{paper_net_prefix}₹{abs(paper_net):,.2f}</code>\n\n"
-                f"💼 <b>Paper Capital:</b> ₹{paper_cap:,.2f} (Base: ₹{paper_start_cap:,.2f})\n"
-                f"📉 <b>Paper Drawdown:</b> {paper_dd:.2f}%\n"
-                f"📦 <b>Open Overnight Positions:</b> {open_paper_pos}\n\n"
-                f"📋 <b>Paper Activity:</b>\n{paper_breakdown}\n\n"
-                f"{paper_analytics}\n\n"
-                f"🔍 <b>SYSTEM HEALTH & LEVEL INTEGRITY CHECKLIST:</b>\n"
-                f"{system_audit_txt}\n\n"
-                f"⚙️ <b>Strategy State:</b> <i>{strategy_stat}</i>\n"
-                f"⏱ <b>Data Feed:</b> Real-time SmartAPI WebSockets active\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━"
+                f"{net_icon} <b>Net Realized P&L:</b> <code>{net_prefix}₹{abs(paper_net):,.2f}</code>\n\n"
+                f"💼 <b>Paper Capital:</b> ₹{paper_cap:,.2f}\n\n"
+                f"📋 <b>Today's Trades:</b>\n{paper_breakdown}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"⏱ <i>Generated at {now_str} IST</i>"
             )
-            res_paper, det_paper = self.send_message_sync(paper_msg)
+            res_paper, det_paper = self.send_message_sync(msg_paper)
             if not res_paper:
                 overall_success = False
                 overall_detail = det_paper

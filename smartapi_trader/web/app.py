@@ -704,6 +704,10 @@ class SettingsUpdateRequest(BaseModel):
     max_daily_drawdown_pct: Optional[float] = None
     max_trades_per_day: Optional[int] = None
     paper_initial_capital: Optional[float] = None
+    partial_exit_r: Optional[float] = None
+    target_2_r: Optional[float] = None
+    breakeven_trigger_r: Optional[float] = None
+    partial_exit_qty_pct: Optional[float] = None
     telegram_enabled: Optional[bool] = None
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
@@ -790,6 +794,30 @@ async def update_settings(req: SettingsUpdateRequest):
                 ctx.state_manager.max_trades_allowed = new_max
             rm = ctx.risk_manager or getattr(ctx.orchestrator, "risk_manager", None)
             if rm: rm.max_trades = new_max
+
+        if req.partial_exit_r is not None:
+            new_t1 = float(req.partial_exit_r)
+            cfg.setdefault("risk", {})["partial_exit_r"] = new_t1
+            rm = ctx.risk_manager or getattr(ctx.orchestrator, "risk_manager", None)
+            if rm: rm.tp1_r = new_t1
+
+        if req.target_2_r is not None:
+            new_t2 = float(req.target_2_r)
+            cfg.setdefault("risk", {})["target_2_r"] = new_t2
+            rm = ctx.risk_manager or getattr(ctx.orchestrator, "risk_manager", None)
+            if rm: rm.tp2_r = new_t2
+
+        if req.breakeven_trigger_r is not None:
+            new_be = float(req.breakeven_trigger_r)
+            cfg.setdefault("risk", {})["breakeven_trigger_r"] = new_be
+            rm = ctx.risk_manager or getattr(ctx.orchestrator, "risk_manager", None)
+            if rm: rm.be_trigger_r = new_be
+
+        if req.partial_exit_qty_pct is not None:
+            new_qty_pct = float(req.partial_exit_qty_pct)
+            cfg.setdefault("risk", {})["partial_exit_qty_pct"] = new_qty_pct
+            rm = ctx.risk_manager or getattr(ctx.orchestrator, "risk_manager", None)
+            if rm: rm.tp1_qty_pct = new_qty_pct
 
         if req.paper_initial_capital is not None: cfg.setdefault("execution", {})["paper_initial_capital"] = req.paper_initial_capital
 
