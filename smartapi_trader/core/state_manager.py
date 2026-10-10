@@ -7,6 +7,7 @@ from smartapi_trader.core.events import (
 from smartapi_trader.core.event_bus import EventBus
 from smartapi_trader.utils.logger import logger
 from smartapi_trader.utils.charges import calculate_option_charges
+from smartapi_trader.utils.tz import now_ist, ist_date_str, is_market_hours, is_trading_day
 
 class StateManager:
     """
@@ -64,6 +65,7 @@ class StateManager:
         self.is_panic_active = False
         self.is_halted = False
         self.strategy_status = "Scanning for Liquidity Sweep"
+        self.current_date = ist_date_str()
         
         # State collections
         self.positions: Dict[str, PositionEvent] = {} # Keyed by symbol
@@ -340,7 +342,91 @@ class StateManager:
         }
         self.storage.save_daily_ledger(ledger_data)
 
+    def check_and_perform_daily_rollover(self) -> bool:
+        """
+        Checks if the date has changed (in IST). If so, archives yesterday's state,
+        resets intraday session counters (trades taken, intraday PnL, completed trades list),
+        and rolls over closing capital to the new day's starting baseline.
+        """
+        today_str = ist_date_str()
+        if getattr(self, "current_date", None) == today_str:
+            return False
+
+        old_date = getattr(self, "current_date", "initial")
+        logger.info(f"[STATE] 🌅 Daily rollover triggered: {old_date} -> {today_str}. Refreshing session state for today.")
+        self.current_date = today_str
+
+        # Check if today's ledger already exists in SQLite (e.g. if service restarted mid-day)
+        if self.storage:
+            ledger = self.storage.load_daily_ledger(today_str)
+            if ledger:
+                self.trades_taken_today = int(ledger.get("trades_taken_today") or 0)
+                self.consecutive_losses = int(ledger.get("consecutive_losses") or 0)
+                self.realized_pnl = float(ledger.get("realized_pnl") or 0.0)
+                self.total_brokerage = float(ledger.get("total_brokerage") or 0.0)
+                self.net_pnl = float(ledger.get("net_pnl") or 0.0)
+                self.daily_pnl = self.net_pnl
+                self.paper_capital = float(ledger.get("paper_capital") or self.paper_capital)
+                self.paper_starting_capital = float(ledger.get("paper_starting_capital") or self.paper_capital)
+                self.paper_available_margin = self.paper_capital
+                self.paper_realized_pnl = float(ledger.get("paper_realized_pnl") or 0.0)
+                self.paper_total_brokerage = float(ledger.get("paper_total_brokerage") or 0.0)
+                self.paper_net_pnl = float(ledger.get("paper_net_pnl") or 0.0)
+                self.paper_daily_pnl = self.paper_net_pnl
+                self.paper_trades_taken = int(ledger.get("paper_trades_taken") or 0)
+            else:
+                # Brand new day: reset daily metrics, carry forward closing capital
+                self.trades_taken_today = 0
+                self.consecutive_losses = 0
+                self.realized_pnl = 0.0
+                self.total_brokerage = 0.0
+                self.net_pnl = 0.0
+                self.daily_pnl = 0.0
+                self.daily_drawdown_pct = 0.0
+                self.starting_equity = self.equity
+
+                self.paper_starting_capital = self.paper_capital
+                self.paper_available_margin = self.paper_capital
+                self.paper_realized_pnl = 0.0
+                self.paper_total_brokerage = 0.0
+                self.paper_net_pnl = 0.0
+                self.paper_daily_pnl = 0.0
+                self.paper_drawdown_pct = 0.0
+                self.paper_trades_taken = 0
+
+            # Reload strictly today's orders & trades
+            self.orders = {ord_obj.order_id: ord_obj for ord_obj in self.storage.load_todays_orders(limit=50)}
+            self.completed_trades = self.storage.load_todays_trades(is_paper=False)
+            self.paper_completed_trades = self.storage.load_todays_trades(is_paper=True)
+            self._sync_ledger_to_storage()
+        else:
+            self.trades_taken_today = 0
+            self.consecutive_losses = 0
+            self.realized_pnl = 0.0
+            self.total_brokerage = 0.0
+            self.net_pnl = 0.0
+            self.daily_pnl = 0.0
+            self.daily_drawdown_pct = 0.0
+            self.starting_equity = self.equity
+
+            self.paper_starting_capital = self.paper_capital
+            self.paper_available_margin = self.paper_capital
+            self.paper_realized_pnl = 0.0
+            self.paper_total_brokerage = 0.0
+            self.paper_net_pnl = 0.0
+            self.paper_daily_pnl = 0.0
+            self.paper_drawdown_pct = 0.0
+            self.paper_trades_taken = 0
+            self.orders = {}
+            self.completed_trades = []
+            self.paper_completed_trades = []
+
+        self._recalculate_portfolio()
+        self.broadcast_state()
+        return True
+
     def persist_position(self, pos: PositionEvent):
+
         """Persists current state of a position (e.g. SL moved to breakeven, partial exit)."""
         if self.storage:
             is_paper = (self.execution_mode == "PAPER") or getattr(pos, "is_paper", False)
@@ -764,6 +850,7 @@ class StateManager:
 
     def get_snapshot(self) -> Dict[str, Any]:
         """Provides full serializable system snapshot for dashboard."""
+        self.check_and_perform_daily_rollover()
         live_net = float(self.broker_rms.get("net", 0.0) or 0.0)
         live_cash = float(self.broker_rms.get("availablecash", 0.0) or 0.0)
 
@@ -818,13 +905,9 @@ class StateManager:
 
     @staticmethod
     def is_market_open() -> bool:
-        """Checks if current IST time is within active market hours (Mon-Fri 09:15-15:30 IST)."""
-        from datetime import timezone, timedelta, time
-        ist = timezone(timedelta(hours=5, minutes=30))
-        now_ist = datetime.now(ist)
-        if now_ist.weekday() >= 5:
-            return False
-        return time(9, 15) <= now_ist.time() <= time(15, 30)
+        """Checks if current IST time is within active market hours (Mon-Fri 09:15-15:30 IST, non-holiday)."""
+        return is_market_hours()
+
 
     def broadcast_state(self):
         """Enqueues a SystemStateEvent onto the event bus."""

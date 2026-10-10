@@ -154,13 +154,11 @@ class TradingOrchestrator:
         while True:
             try:
                 await asyncio.sleep(120)  # Every 2 minutes
-                from smartapi_trader.utils.tz import now_ist
+                from smartapi_trader.utils.tz import now_ist, is_market_hours
                 now = now_ist()
                 
-                # Check if market is active (Mon-Fri 09:15 - 15:30 IST)
-                is_weekday = (now.weekday() < 5)
-                now_t = now.time()
-                is_mkt_hours = is_weekday and (dtime(9, 15) <= now_t <= dtime(15, 30))
+                # Check if market is active (Mon-Fri 09:15 - 15:30 IST, excluding exchange holidays)
+                is_mkt_hours = is_market_hours(now)
                 
                 if is_mkt_hours:
                     issues = []
@@ -211,14 +209,22 @@ class TradingOrchestrator:
                 await asyncio.sleep(60)
 
     async def _eod_monitor_loop(self):
-        """Monitors clock and dispatches daily EOD report to Telegram at 15:15 IST."""
+        """Monitors clock and dispatches daily EOD report to Telegram at 15:15 IST on active trading days."""
         last_sent_date = None
         while True:
             try:
                 await asyncio.sleep(15)
-                from smartapi_trader.utils.tz import now_ist
+                from smartapi_trader.utils.tz import now_ist, is_trading_day
                 now = now_ist()
                 now_str = now.strftime("%Y-%m-%d")
+
+                # Continuously ensure daily rollover occurs cleanly across midnight
+                if hasattr(self, "state_mgr") and self.state_mgr:
+                    self.state_mgr.check_and_perform_daily_rollover()
+
+                # Automated daily EOD reports only run on active trading days (Mon-Fri, non-holiday)
+                if not is_trading_day(now):
+                    continue
                 
                 # Check target EOD time (default 15:15 IST)
                 eod_time_str = self.settings.get("telegram", {}).get("eod_report_time", "15:15")
@@ -237,6 +243,7 @@ class TradingOrchestrator:
             except Exception as e:
                 logger.error(f"[EOD_MONITOR] Error in EOD loop: {e}")
                 await asyncio.sleep(30)
+
 
     async def initialize(self):
         """Pre-flight setup: indexes scrip master and subscribes to index spot contracts."""

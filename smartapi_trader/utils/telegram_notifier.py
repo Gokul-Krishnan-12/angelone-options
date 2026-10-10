@@ -277,6 +277,9 @@ class TelegramNotifier:
         if not self.enabled:
             return False, "Telegram notifications disabled"
 
+        if hasattr(state_mgr, "check_and_perform_daily_rollover"):
+            state_mgr.check_and_perform_daily_rollover()
+
         date_str = now_ist().strftime("%d %b %Y")
         now_str = now_ist().strftime("%H:%M:%S")
 
@@ -285,6 +288,7 @@ class TelegramNotifier:
 
         # Check which mode was active today
         is_live_active = getattr(state_mgr, "execution_mode", "PAPER") == "REAL" or len(getattr(state_mgr, "completed_trades", [])) > 0
+
         
         # 1. LIVE REPORT (if real trades were taken or mode is REAL)
         if is_live_active:
