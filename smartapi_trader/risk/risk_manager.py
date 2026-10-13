@@ -47,6 +47,8 @@ class RiskManager:
         self.tp2_r = self.cfg.get("target_2_r", 3.0)                    # Target 2 (Full exit for runner at +3.0R)
         self.tp1_qty_pct = self.cfg.get("partial_exit_qty_pct", 0.60)
         self.max_slippage_pct = config.get("execution", {}).get("max_slippage_pct", 2.0)
+        self.correlation_guard = bool(self.cfg.get("correlation_guard", True))
+        self.max_open_positions = int(self.cfg.get("max_open_positions", 1))
 
         # Wire up listeners
         self.bus.subscribe(EventType.SIGNAL, self._on_signal)
@@ -80,6 +82,32 @@ class RiskManager:
         if trades_count >= self.max_trades:
             self._raise_alert("WARNING", "MaxTradesLimit", f"Daily trade quota reached ({trades_count}/{self.max_trades}).")
             return
+
+        # 2b. Concurrent Positions & Correlation Guard Check
+        open_positions = [p for p in self.state_mgr.positions.values() if p.is_open]
+        if len(open_positions) >= self.max_open_positions:
+            self._raise_alert(
+                "WARNING",
+                "MaxPositionsLimit",
+                f"Order rejected: Maximum concurrent open positions limit reached ({len(open_positions)}/{self.max_open_positions})."
+            )
+            return
+
+        if self.correlation_guard and open_positions:
+            sig_underlying = getattr(signal, "underlying", "").upper()
+            sig_opt_type = getattr(signal, "option_type", "").upper()
+            index_names = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"}
+
+            for p in open_positions:
+                p_underlying = getattr(p, "underlying", "").upper()
+                p_opt_type = getattr(p, "option_type", "").upper()
+                if (sig_underlying in index_names and p_underlying in index_names) and (sig_opt_type == p_opt_type or self.max_open_positions <= 1):
+                    self._raise_alert(
+                        "WARNING",
+                        "CorrelationGuard",
+                        f"Order rejected: Correlated index position already open ({p.symbol} in {p_underlying} with {p_opt_type})."
+                    )
+                    return
 
         # 3. Consecutive Loss Circuit Breaker
         if self.state_mgr.consecutive_losses >= self.consecutive_loss_limit:
@@ -128,18 +156,35 @@ class RiskManager:
 
         lot_size = signal.lot_size
         risk_per_lot = unit_risk * lot_size
-        lots = math.floor(capital_at_risk / risk_per_lot)
+
+        # Enforce cumulative open risk <= max daily drawdown threshold (3.0% of equity)
+        current_open_risk = sum(
+            (max(0.0, p.entry_price - p.stop_loss) if p.stop_loss > 0 else (p.entry_price * 0.12)) * p.quantity
+            for p in open_positions
+        )
+        max_tolerable_risk = equity * self.max_drawdown_pct
+        remaining_risk_budget = max(0.0, max_tolerable_risk - current_open_risk)
+
+        if (current_open_risk + risk_per_lot) > max_tolerable_risk:
+            self._raise_alert(
+                "WARNING",
+                "CumulativeRiskExceeded",
+                f"Order rejected: Combined open risk (₹{current_open_risk + risk_per_lot:.2f}) exceeds max daily drawdown limit (₹{max_tolerable_risk:.2f}). Required single-lot risk: ₹{risk_per_lot:.2f}, remaining risk budget: ₹{remaining_risk_budget:.2f}."
+            )
+            return
+
+        effective_capital_at_risk = min(capital_at_risk, remaining_risk_budget)
+        lots = math.floor(effective_capital_at_risk / risk_per_lot)
 
         if lots < 1:
             # Allow minimum 1 lot for both REAL and PAPER if available margin covers the contract
-            # and single-lot risk does not exceed the maximum daily drawdown limit (3.0% of equity)
+            # and combined open risk does not exceed the maximum daily drawdown limit (3.0% of equity)
             margin_req = signal.entry_price * lot_size
-            max_tolerable_risk = equity * self.max_drawdown_pct
-            if margin_req <= available_margin and risk_per_lot <= max_tolerable_risk:
+            if margin_req <= available_margin and (current_open_risk + risk_per_lot) <= max_tolerable_risk:
                 lots = 1
-                logger.info(f"[RISK] Minimum 1 lot permitted for {signal.underlying} (Margin: ₹{margin_req:.2f} <= ₹{available_margin:.2f}, Risk: ₹{risk_per_lot:.2f} <= ₹{max_tolerable_risk:.2f}).")
+                logger.info(f"[RISK] Minimum 1 lot permitted for {signal.underlying} (Margin: ₹{margin_req:.2f} <= ₹{available_margin:.2f}, Combined Risk: ₹{current_open_risk + risk_per_lot:.2f} <= ₹{max_tolerable_risk:.2f}).")
             else:
-                reason = "Margin insufficient" if margin_req > available_margin else f"Single lot risk (₹{risk_per_lot:.2f}) exceeds max daily risk (₹{max_tolerable_risk:.2f})"
+                reason = "Margin insufficient" if margin_req > available_margin else f"Single lot risk (₹{risk_per_lot:.2f}) exceeds available risk budget (₹{remaining_risk_budget:.2f})"
                 self._raise_alert("WARNING", "InsufficientRiskCapital", f"Order rejected: {reason}. Required: ₹{margin_req:.2f}, Available: ₹{available_margin:.2f}.")
                 return
 
@@ -150,7 +195,7 @@ class RiskManager:
             self._raise_alert("WARNING", "MarginExhaustion", f"Required margin (₹{margin_required:.2f}) exceeds available (₹{available_margin:.2f}).")
             return
 
-        logger.info(f"[RISK] Order APPROVED: {signal.tradingsymbol} Lots={lots} (Qty={total_quantity}) Risk=₹{capital_at_risk:.2f} Margin=₹{margin_required:.2f}")
+        logger.info(f"[RISK] Order APPROVED: {signal.tradingsymbol} Lots={lots} (Qty={total_quantity}) Risk=₹{risk_per_lot * lots:.2f} Margin=₹{margin_required:.2f}")
 
         # Construct and submit validated order
         strat_name = getattr(signal, "strategy_name", "ILSME_Sniper")

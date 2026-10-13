@@ -718,6 +718,9 @@ class SettingsUpdateRequest(BaseModel):
     ema_fast_period: Optional[int] = None
     ema_slow_period: Optional[int] = None
     active_indices: Optional[List[str]] = None
+    correlation_guard: Optional[bool] = None
+    max_open_positions: Optional[int] = None
+    orb_cutoff_time: Optional[str] = None
 
 
 @app.get("/api/settings")
@@ -818,6 +821,22 @@ async def update_settings(req: SettingsUpdateRequest):
             cfg.setdefault("risk", {})["partial_exit_qty_pct"] = new_qty_pct
             rm = ctx.risk_manager or getattr(ctx.orchestrator, "risk_manager", None)
             if rm: rm.tp1_qty_pct = new_qty_pct
+
+        if req.correlation_guard is not None:
+            cfg.setdefault("risk", {})["correlation_guard"] = req.correlation_guard
+            rm = ctx.risk_manager or getattr(ctx.orchestrator, "risk_manager", None)
+            if rm: rm.correlation_guard = req.correlation_guard
+
+        if req.max_open_positions is not None:
+            new_max_pos = int(req.max_open_positions)
+            cfg.setdefault("risk", {})["max_open_positions"] = new_max_pos
+            rm = ctx.risk_manager or getattr(ctx.orchestrator, "risk_manager", None)
+            if rm: rm.max_open_positions = new_max_pos
+
+        if req.orb_cutoff_time is not None:
+            cfg.setdefault("risk", {})["orb_cutoff_time"] = req.orb_cutoff_time.strip()
+            if ctx.strategy and hasattr(ctx.strategy, "risk_cfg"):
+                ctx.strategy.risk_cfg["orb_cutoff_time"] = req.orb_cutoff_time.strip()
 
         if req.paper_initial_capital is not None: cfg.setdefault("execution", {})["paper_initial_capital"] = req.paper_initial_capital
 

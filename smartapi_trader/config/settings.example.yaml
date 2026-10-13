@@ -27,6 +27,8 @@ risk:
   breakeven_trigger_r: 0.8
   consecutive_loss_limit: 2
   correlation_guard: true
+  max_open_positions: 1
+  orb_cutoff_time: '10:30'
   dynamic_sl_buffer: true
   expiry_0dte_block_until: '13:00'
   ignore_time_filter_in_paper: false

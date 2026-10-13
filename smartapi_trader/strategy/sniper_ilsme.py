@@ -47,12 +47,34 @@ class SniperILSMEStrategy(BaseStrategy):
         self.bars: Dict[str, Dict[str, List[BarEvent]]] = {}
         self.option_volume_history: Dict[str, List[int]] = {}
 
+        # Wire position updates to keep in_trade state in sync
+        self.bus.subscribe(EventType.POSITION_UPDATE, self._on_position_update)
+
+    async def _on_position_update(self, event: Any):
+        """Syncs in_trade state when positions open or close."""
+        underlying = getattr(event, "underlying", "")
+        if underlying in self.state:
+            is_open = getattr(event, "is_open", False)
+            self.state[underlying]["in_trade"] = is_open
+
     def _init_index_state(self, underlying: str):
         # Dynamically load true Previous Day High (PDH) and Low (PDL)
         pdh, pdl, ref_spot = self._fetch_dynamic_pdh_pdl(underlying)
         
         # Check if booting after 09:30 IST today; if so, attempt to backfill genuine 09:15-09:30 Opening Range
         or_h, or_l, or_settled = self._backfill_opening_range(underlying, ref_spot)
+
+        # Detect if breakout already occurred before boot or if cutoff already passed
+        or_already_broken = False
+        if or_settled and ref_spot > 0:
+            orb_cutoff_str = str(self.risk_cfg.get("orb_cutoff_time", self.cfg.get("orb_cutoff_time", "11:00")))
+            try:
+                ch, cm = map(int, orb_cutoff_str.split(":"))
+                cutoff_t = time(ch, cm)
+            except Exception:
+                cutoff_t = time(11, 0)
+            if ref_spot > or_h or ref_spot < or_l or ist_time() >= cutoff_t:
+                or_already_broken = True
 
         self.state[underlying] = {
             "pdh": pdh,
@@ -64,6 +86,7 @@ class SniperILSMEStrategy(BaseStrategy):
             "or_high": or_h,
             "or_low": or_l,
             "or_settled": or_settled,
+            "or_triggered_today": or_already_broken,
             "sweep_status": "NONE",       # "NONE", "BULLISH_SWEEP", "BEARISH_SWEEP"
             "sweep_price": 0.0,
             "sweep_time": None,
@@ -72,7 +95,7 @@ class SniperILSMEStrategy(BaseStrategy):
         }
         logger.info(
             f"[STRATEGY] Initialized {underlying} Reference Levels -> PDH: {pdh:.2f} | PDL: {pdl:.2f} | "
-            f"OR High: {or_h:.2f} | OR Low: {or_l:.2f} (Settled: {or_settled})"
+            f"OR High: {or_h:.2f} | OR Low: {or_l:.2f} (Settled: {or_settled}, PreBroken/Triggered: {or_already_broken})"
         )
 
     def _backfill_opening_range(self, underlying: str, ref_spot: float) -> tuple[float, float, bool]:
@@ -396,9 +419,24 @@ class SniperILSMEStrategy(BaseStrategy):
         # =====================================================================
         # MODEL 2: MOMENTUM TREND / OPENING RANGE BREAKOUT (ORB) ENGINE
         # =====================================================================
-        if self.cfg.get("enable_momentum_breakout", True) and st.get("or_settled") and not st.get("armed_fvg") and not st.get("in_trade"):
+        is_pos_open = any(p.underlying == underlying and p.is_open for p in self.state_mgr.positions.values())
+        if (
+            self.cfg.get("enable_momentum_breakout", True)
+            and st.get("or_settled")
+            and not st.get("or_triggered_today")
+            and not st.get("armed_fvg")
+            and not st.get("in_trade")
+            and not is_pos_open
+        ):
             now_t = ist_time()
-            if (time(9, 30) <= now_t <= time(14, 30)) and not self._is_midday_chop():
+            orb_cutoff_str = str(self.risk_cfg.get("orb_cutoff_time", self.cfg.get("orb_cutoff_time", "11:00")))
+            try:
+                ch, cm = map(int, orb_cutoff_str.split(":"))
+                orb_cutoff = time(ch, cm)
+            except Exception:
+                orb_cutoff = time(11, 0)
+
+            if (time(9, 30) <= now_t <= orb_cutoff) and not self._is_midday_chop():
                 or_h = st["or_high"]
                 or_l = st["or_low"]
                 or_rng = max(1.0, or_h - or_l)
@@ -410,8 +448,12 @@ class SniperILSMEStrategy(BaseStrategy):
                     # Opening range is too narrow / low-volatility chop regime
                     return
 
-                # Bullish Breakout: 3m Close > OR High + Close > VWAP
-                if bar.close > or_h and bar.close > vwap and (bar.close - or_h) <= (or_rng * 0.40):
+                # True Crossover Requirement: Check previous 3m closed candle
+                prev_closed = c2.close
+
+                # Bullish Breakout: Previous bar was <= OR High, current bar closes > OR High + Close > VWAP
+                if prev_closed <= or_h and bar.close > or_h and bar.close > vwap and (bar.close - or_h) <= (or_rng * 0.40):
+                    st["or_triggered_today"] = True
                     st["armed_fvg"] = {
                         "source": "MOMENTUM_ORB",
                         "type": "BUY_CE",
@@ -421,15 +463,16 @@ class SniperILSMEStrategy(BaseStrategy):
                         "displacement_high": bar.high,
                         "underlying": underlying
                     }
-                    status_msg = f"🚀 Momentum ORB Formed ({underlying} Call): Breakout above OR High ₹{or_h:.2f}"
+                    status_msg = f"🚀 Momentum ORB Formed ({underlying} Call): Fresh Breakout above OR High ₹{or_h:.2f}"
                     self.state_mgr.set_strategy_status(status_msg)
                     logger.info(f"[STRATEGY] {status_msg}")
                     # Direct execution on momentum bar
                     await self._generate_sniper_signal(underlying, "BUY_CE", bar.close, st["armed_fvg"])
                     st["armed_fvg"] = None
 
-                # Bearish Breakout: 3m Close < OR Low + Close < VWAP
-                elif bar.close < or_l and bar.close < vwap and (or_l - bar.close) <= (or_rng * 0.40):
+                # Bearish Breakdown: Previous bar was >= OR Low, current bar closes < OR Low + Close < VWAP
+                elif prev_closed >= or_l and bar.close < or_l and bar.close < vwap and (or_l - bar.close) <= (or_rng * 0.40):
+                    st["or_triggered_today"] = True
                     st["armed_fvg"] = {
                         "source": "MOMENTUM_ORB",
                         "type": "BUY_PE",
@@ -439,7 +482,7 @@ class SniperILSMEStrategy(BaseStrategy):
                         "displacement_low": bar.low,
                         "underlying": underlying
                     }
-                    status_msg = f"🚀 Momentum ORB Formed ({underlying} Put): Breakdown below OR Low ₹{or_l:.2f}"
+                    status_msg = f"🚀 Momentum ORB Formed ({underlying} Put): Fresh Breakdown below OR Low ₹{or_l:.2f}"
                     self.state_mgr.set_strategy_status(status_msg)
                     logger.info(f"[STRATEGY] {status_msg}")
                     # Direct execution on momentum bar
