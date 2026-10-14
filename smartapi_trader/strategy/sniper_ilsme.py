@@ -257,6 +257,10 @@ class SniperILSMEStrategy(BaseStrategy):
         # Check if tick belongs to underlying index spot
         for sym_name, sym_info in self.symbols_cfg.items():
             if str(event.token) == str(sym_info.get("spot_token")):
+                # Guard: Strict active indices enforcement - ignore ticks for disabled indices
+                if sym_name not in self.active_indices:
+                    return
+
                 if sym_name not in self.state:
                     self._init_index_state(sym_name)
                 st = self.state[sym_name]
@@ -298,7 +302,7 @@ class SniperILSMEStrategy(BaseStrategy):
                 target_underlying = sym_name
                 break
 
-        if not target_underlying:
+        if not target_underlying or target_underlying not in self.active_indices:
             return
 
         if event.is_closed:
@@ -535,7 +539,15 @@ class SniperILSMEStrategy(BaseStrategy):
         # =====================================================================
         # MODEL 3: 15-MINUTE DONCHIAN TREND BREAKOUT & MOMENTUM EXPANSION
         # =====================================================================
-        if self.cfg.get("enable_trend_pullback", True) and not st.get("armed_fvg") and not st.get("in_trade"):
+        is_paper = (self.state_mgr.execution_mode == "PAPER")
+        current_trades = self.state_mgr.paper_trades_taken if is_paper else self.state_mgr.trades_taken_today
+        if (
+            self.cfg.get("enable_trend_pullback", True)
+            and underlying in self.active_indices
+            and not st.get("armed_fvg")
+            and not st.get("in_trade")
+            and current_trades < self.state_mgr.max_trades_allowed
+        ):
             now_t = ist_time()
             if (time(9, 30) <= now_t <= time(14, 45)) and not self._is_midday_chop():
                 if len(closed_3m) >= 6:
@@ -613,7 +625,7 @@ class SniperILSMEStrategy(BaseStrategy):
         # Check if trade already active or daily limit reached
         is_paper = (self.state_mgr.execution_mode == "PAPER")
         current_trades = self.state_mgr.paper_trades_taken if is_paper else self.state_mgr.trades_taken_today
-        if st.get("in_trade") or current_trades >= self.state_mgr.max_trades_allowed:
+        if st.get("in_trade") or current_trades >= self.state_mgr.max_trades_allowed or self.state_mgr.consecutive_losses >= 2 or self.state_mgr.is_panic_active or self.state_mgr.is_halted:
             return
 
         triggered = False
@@ -647,6 +659,24 @@ class SniperILSMEStrategy(BaseStrategy):
 
     async def _generate_sniper_signal(self, underlying: str, signal_type: str, spot: float, fvg: Dict[str, Any]):
         """Resolves target option strike and emits SignalEvent."""
+        if underlying not in self.active_indices:
+            logger.warning(f"[STRATEGY] Blocked signal dispatch for {underlying}: Index is disabled in active_indices settings.")
+            return
+
+        is_paper = (self.state_mgr.execution_mode == "PAPER")
+        current_trades = self.state_mgr.paper_trades_taken if is_paper else self.state_mgr.trades_taken_today
+        if current_trades >= self.state_mgr.max_trades_allowed:
+            logger.warning(f"[STRATEGY] Blocked signal dispatch for {underlying}: Daily trade limit reached ({current_trades}/{self.state_mgr.max_trades_allowed}).")
+            return
+
+        if self.state_mgr.consecutive_losses >= 2:
+            logger.warning(f"[STRATEGY] Blocked signal dispatch for {underlying}: Consecutive loss circuit tripped ({self.state_mgr.consecutive_losses} losses).")
+            return
+
+        if self.state_mgr.is_panic_active or self.state_mgr.is_halted:
+            logger.warning(f"[STRATEGY] Blocked signal dispatch for {underlying}: System is in PANIC or HALTED state.")
+            return
+
         st = self.state[underlying]
         opt_type = "CE" if "CE" in signal_type else "PE"
         strat_source = fvg.get("source", "ILSME_REVERSAL")

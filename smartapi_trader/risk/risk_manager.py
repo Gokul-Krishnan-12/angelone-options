@@ -33,6 +33,7 @@ class RiskManager:
     ):
         self.bus = event_bus
         self.state_mgr = state_manager
+        self.raw_config = config
         self.cfg = config.get("risk", {})
         self.notifier = notifier
         self.live_engine = live_engine
@@ -74,6 +75,13 @@ class RiskManager:
         # 1. System Halt or Emergency Panic
         if self.state_mgr.is_panic_active or self.state_mgr.is_halted:
             self._raise_alert("WARNING", "Panic/Halted", "Order rejected: System is in PANIC or HALT mode.")
+            return
+
+        # 1b. Active Indices Filter Guard
+        active_indices = self.raw_config.get("strategy", {}).get("active_indices", ["NIFTY", "BANKNIFTY", "SENSEX"])
+        underlying = getattr(signal, "underlying", "").upper()
+        if underlying and underlying not in [idx.upper() for idx in active_indices]:
+            self._raise_alert("WARNING", "DisabledIndex", f"Order rejected: {underlying} is disabled in active_indices settings.")
             return
 
         # 2. Daily Trade Budget Check

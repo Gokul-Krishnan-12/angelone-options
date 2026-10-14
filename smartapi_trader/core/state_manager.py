@@ -313,6 +313,16 @@ class StateManager:
                 self.net_pnl = round(sum(float(t.get("net_pnl", 0.0)) for t in self.completed_trades), 2)
                 self.daily_pnl = self.net_pnl
                 self.trades_taken_today = sum(1 for t in self.completed_trades if not (t.get("is_partial") or "Partial" in str(t.get("exit_reason", ""))))
+                streak = 0
+                for tr in reversed(self.completed_trades):
+                    if tr.get("is_partial") or "Partial" in str(tr.get("exit_reason", "")):
+                        continue
+                    if float(tr.get("gross_pnl", 0.0)) < 0:
+                        streak += 1
+                    else:
+                        break
+                if self.execution_mode == "LIVE":
+                    self.consecutive_losses = streak
                 self._sync_ledger_to_storage()
 
             self._recalculate_portfolio()
@@ -632,27 +642,35 @@ class StateManager:
 
         total_unrealized = sum(p.unrealized_pnl for p in self.positions.values() if p.is_open and p.quantity > 0)
         self.unrealized_pnl = round(total_unrealized, 2)
-        self.daily_pnl = round(self.realized_pnl + self.unrealized_pnl, 2)
+
+        # Always update paper metrics so Paper Trading Hub displays accurate data
+        paper_base = self.paper_starting_capital if self.paper_starting_capital > 0 else 50000.0
+        self.paper_daily_pnl = round(self.paper_net_pnl + (self.unrealized_pnl if self.execution_mode == "PAPER" else 0.0), 2)
+        self.paper_capital = round(paper_base + self.paper_daily_pnl, 2)
+        self.paper_available_margin = self.paper_capital
+        if paper_base > 0:
+            self.paper_drawdown_pct = max(0.0, round((paper_base - self.paper_capital) / paper_base * 100, 2))
+        else:
+            self.paper_drawdown_pct = 0.0
 
         is_paper = (self.execution_mode == "PAPER")
-        base_eq = self.paper_starting_capital if is_paper else self.starting_equity
-        if base_eq <= 0:
-            base_eq = self.paper_capital if is_paper else 50000.0
-
-        self.equity = round(base_eq + self.daily_pnl, 2)
         if is_paper:
-            self.paper_capital = self.equity
-            self.paper_daily_pnl = self.daily_pnl
             self.paper_unrealized_pnl = self.unrealized_pnl
+            self.daily_pnl = self.paper_daily_pnl
+            self.equity = self.paper_capital
+            self.daily_drawdown_pct = self.paper_drawdown_pct
+        else:
+            self.daily_pnl = round(self.realized_pnl + self.unrealized_pnl, 2)
+            base_eq = self.starting_equity if self.starting_equity > 0 else 50000.0
+            self.equity = round(base_eq + self.daily_pnl, 2)
+            if base_eq > 0:
+                drawdown = (base_eq - self.equity) / base_eq
+                self.daily_drawdown_pct = max(0.0, round(drawdown * 100, 2))
+            else:
+                self.daily_drawdown_pct = 0.0
 
         if self.equity > self.peak_equity:
             self.peak_equity = self.equity
-
-        if base_eq > 0:
-            drawdown = (base_eq - self.equity) / base_eq
-            self.daily_drawdown_pct = max(0.0, round(drawdown * 100, 2))
-        else:
-            self.daily_drawdown_pct = 0.0
 
     def record_completed_trade(
         self,
@@ -728,9 +746,12 @@ class StateManager:
             self.paper_realized_pnl += round(pnl, 2)
             self.paper_total_brokerage += total_fee
             self.paper_net_pnl += net
-            self.paper_capital += net
             if not is_partial:
                 self.paper_trades_taken += 1
+                if pnl < 0:
+                    self.consecutive_losses += 1
+                else:
+                    self.consecutive_losses = 0
             self.paper_completed_trades.append(trade_record)
         else:
             self.realized_pnl += round(pnl, 2)
@@ -738,12 +759,11 @@ class StateManager:
             self.net_pnl += net
             if not is_partial:
                 self.trades_taken_today += 1
-            self.completed_trades.append(trade_record)
-            if not is_partial:
                 if pnl < 0:
                     self.consecutive_losses += 1
                 else:
                     self.consecutive_losses = 0
+            self.completed_trades.append(trade_record)
 
         self.trade_history.insert(0, trade_record)
 
@@ -751,6 +771,8 @@ class StateManager:
             self.storage.save_trade(trade_record)
             self.storage.mark_position_closed(symbol, realized_pnl=pnl)
         self._recalculate_portfolio()
+        if self.storage:
+            self._sync_ledger_to_storage()
         self.broadcast_state()
 
         # Systematic Health & Scaling Governance Audit
@@ -806,6 +828,7 @@ class StateManager:
             if self.storage:
                 self.storage.delete_paper_trade(target.get("id"))
             self._recalculate_paper_ledger()
+            self._recalculate_portfolio()
             if self.storage:
                 self._sync_ledger_to_storage()
             self.broadcast_state()
@@ -820,6 +843,12 @@ class StateManager:
         self.paper_daily_pnl = 0.0
         self.paper_capital = float(self.paper_starting_capital)
         self.paper_available_margin = float(self.paper_starting_capital)
+        self.paper_drawdown_pct = 0.0
+        if self.execution_mode == "PAPER":
+            self.consecutive_losses = 0
+            self.daily_drawdown_pct = 0.0
+            self.daily_pnl = 0.0
+            self.equity = float(self.paper_starting_capital)
         paper_order_ids = [oid for oid, ord_obj in self.orders.items() if getattr(ord_obj, "order_id", "").startswith(("ORD_NIFTY_", "ORD_BANKNIFTY_", "MANUAL_EXIT_"))]
         for oid in paper_order_ids:
             self.orders.pop(oid, None)
@@ -843,9 +872,25 @@ class StateManager:
         self.paper_total_brokerage = round(brokerage, 2)
         self.paper_net_pnl = round(net, 2)
         self.paper_daily_pnl = round(net, 2)
-        self.paper_capital = round(self.paper_starting_capital + net, 2)
+        base_eq = self.paper_starting_capital if self.paper_starting_capital > 0 else 50000.0
+        self.paper_capital = round(base_eq + net, 2)
         self.paper_available_margin = self.paper_capital
+        if base_eq > 0:
+            self.paper_drawdown_pct = max(0.0, round((base_eq - self.paper_capital) / base_eq * 100, 2))
+        else:
+            self.paper_drawdown_pct = 0.0
         self.paper_trades_taken = sum(1 for t in self.paper_completed_trades if not (t.get("is_partial") or "Partial" in str(t.get("exit_reason", ""))))
+
+        streak = 0
+        for tr in reversed(self.paper_completed_trades):
+            if tr.get("is_partial") or "Partial" in str(tr.get("exit_reason", "")):
+                continue
+            if float(tr.get("gross_pnl", 0.0)) < 0:
+                streak += 1
+            else:
+                break
+        if self.execution_mode == "PAPER":
+            self.consecutive_losses = streak
 
 
     def get_snapshot(self) -> Dict[str, Any]:
