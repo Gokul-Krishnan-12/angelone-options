@@ -58,12 +58,15 @@ strategy:
   fvg_min_points: 2.5
   macro_timeframe_minutes: 15
   max_bid_ask_spread_pct: 1.5
+  max_spike_candle_pct: 1.2
   micro_timeframe_minutes: 3
   min_open_interest: 50000
   min_wick_ratio: 0.35
   name: ILSME_Sniper
   preferred_delta_max: 0.6
   preferred_delta_min: 0.48
+  require_candle_confirmation: true
+  sweep_ttl_minutes: 20.0
   volume_expansion_multiplier: 1.8
   volume_sma_period: 20
 telegram:

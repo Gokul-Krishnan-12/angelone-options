@@ -721,6 +721,9 @@ class SettingsUpdateRequest(BaseModel):
     correlation_guard: Optional[bool] = None
     max_open_positions: Optional[int] = None
     orb_cutoff_time: Optional[str] = None
+    sweep_ttl_minutes: Optional[float] = None
+    max_spike_candle_pct: Optional[float] = None
+    require_candle_confirmation: Optional[bool] = None
 
 
 @app.get("/api/settings")
@@ -878,6 +881,21 @@ async def update_settings(req: SettingsUpdateRequest):
                 for idx in cleaned_indices:
                     if idx not in ctx.strategy.state:
                         ctx.strategy._init_index_state(idx)
+
+        if req.sweep_ttl_minutes is not None:
+            cfg.setdefault("strategy", {})["sweep_ttl_minutes"] = float(req.sweep_ttl_minutes)
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["sweep_ttl_minutes"] = float(req.sweep_ttl_minutes)
+
+        if req.max_spike_candle_pct is not None:
+            cfg.setdefault("strategy", {})["max_spike_candle_pct"] = float(req.max_spike_candle_pct)
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["max_spike_candle_pct"] = float(req.max_spike_candle_pct)
+
+        if req.require_candle_confirmation is not None:
+            cfg.setdefault("strategy", {})["require_candle_confirmation"] = req.require_candle_confirmation
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["require_candle_confirmation"] = req.require_candle_confirmation
 
         with open(config_path, "w") as f:
             yaml.safe_dump(cfg, f, default_flow_style=False)

@@ -1,5 +1,5 @@
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timezone, time
 from typing import Dict, List, Optional, Tuple
 from smartapi_trader.core.events import TickEvent, BarEvent
 from smartapi_trader.core.event_bus import EventBus
@@ -149,6 +149,16 @@ class CandleAggregator:
             elif candle_start > curr.start_time:
                 # Current candle has closed!
                 curr.is_closed = True
+
+                # Discard pre-market candles that started before 09:15 IST
+                # Prevents overnight ticks and 09:00-09:08 premarket auction prints from poisoning strategy indicators
+                bar_start_t = curr.start_time.time()
+                if bar_start_t < time(9, 15):
+                    logger.info(f"[CANDLE] Discarded pre-market closed candle for {tick.symbol} {tf_key} (start: {bar_start_t})")
+                    curr = Candle(tick.symbol, tick.token, tick.exchange, tf_key, candle_start)
+                    self.current_candles[token][tf_key] = curr
+                    continue
+
                 self.history[token][tf_key].append(curr)
                 # Keep max 100 historical bars
                 if len(self.history[token][tf_key]) > 100:

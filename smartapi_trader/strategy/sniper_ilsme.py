@@ -302,6 +302,16 @@ class SniperILSMEStrategy(BaseStrategy):
             return
 
         if event.is_closed:
+            # Defensive guard: Discard pre-market bars that started before 09:15 IST
+            if getattr(event, "bar_start_time", None):
+                try:
+                    b_iso = event.bar_start_time.replace("Z", "+00:00")
+                    b_dt = datetime.fromisoformat(b_iso)
+                    if b_dt.time() < time(9, 15):
+                        return
+                except Exception:
+                    pass
+
             self.bars[token][tf].append(event)
             if len(self.bars[token][tf]) > 50:
                 self.bars[token][tf].pop(0)
@@ -327,6 +337,18 @@ class SniperILSMEStrategy(BaseStrategy):
 
         st = self.state[underlying]
         rng = max(0.01, bar.high - bar.low)
+
+        # Outlier spike filter: reject candles whose range exceeds max_spike_candle_pct of spot/open
+        max_spike_pct = float(self.cfg.get("max_spike_candle_pct", 1.2))
+        ref_price = bar.open if bar.open > 0 else (st.get("last_spot") or 1.0)
+        spike_pct = (rng / ref_price) * 100.0
+        if spike_pct > max_spike_pct:
+            logger.warning(
+                f"[STRATEGY] ⚠️ Rejected anomalous spike candle for {underlying}: "
+                f"Range={rng:.2f} pts ({spike_pct:.2f}% > {max_spike_pct:.1f}% limit). Ignored for sweep evaluation."
+            )
+            return
+
         lower_wick = (min(bar.open, bar.close) - bar.low) / rng
         upper_wick = (bar.high - max(bar.open, bar.close)) / rng
 
@@ -358,6 +380,27 @@ class SniperILSMEStrategy(BaseStrategy):
             return
 
         st = self.state[underlying]
+
+        # Check 3m bar for anomalous spike
+        max_spike_pct = float(self.cfg.get("max_spike_candle_pct", 1.2))
+        ref_price = bar.open if bar.open > 0 else (st.get("last_spot") or 1.0)
+        if ((bar.high - bar.low) / ref_price) * 100.0 > max_spike_pct:
+            return
+
+        # Sweep TTL (Time-To-Live) Expiry Check: Invalidate stale sweeps if elapsed time exceeds sweep_ttl_minutes
+        if st.get("sweep_status") != "NONE" and st.get("sweep_time"):
+            elapsed_minutes = (now_ist() - st["sweep_time"]).total_seconds() / 60.0
+            sweep_ttl = float(self.cfg.get("sweep_ttl_minutes", 20.0))
+            if elapsed_minutes > sweep_ttl:
+                logger.info(
+                    f"[STRATEGY] Expiring stale {st['sweep_status']} for {underlying}: "
+                    f"{elapsed_minutes:.1f}m elapsed (TTL: {sweep_ttl:.1f}m)"
+                )
+                st["sweep_status"] = "NONE"
+                st["sweep_time"] = None
+                st["sweep_price"] = 0.0
+                st["armed_fvg"] = None
+
         vwap = bar.vwap or st["vwap"]
         token = bar.token
         closed_3m = self.bars.get(token, {}).get("3m", [])
@@ -579,11 +622,23 @@ class SniperILSMEStrategy(BaseStrategy):
         if signal_type == "BUY_CE":
             # Retraces into top/middle of Bullish FVG
             if current_price <= fvg["top"] and current_price >= fvg["bottom"]:
-                triggered = True
+                if self.cfg.get("require_candle_confirmation", True):
+                    # Confirmation buffer: ensure price is holding above the lower 20% floor of FVG
+                    fvg_floor = fvg["bottom"] + ((fvg["top"] - fvg["bottom"]) * 0.20)
+                    if current_price >= fvg_floor:
+                        triggered = True
+                else:
+                    triggered = True
         elif signal_type == "BUY_PE":
             # Retraces into bottom/middle of Bearish FVG
             if current_price >= fvg["bottom"] and current_price <= fvg["top"]:
-                triggered = True
+                if self.cfg.get("require_candle_confirmation", True):
+                    # Confirmation buffer: ensure price is holding below upper 20% ceiling of FVG
+                    fvg_ceiling = fvg["top"] - ((fvg["top"] - fvg["bottom"]) * 0.20)
+                    if current_price <= fvg_ceiling:
+                        triggered = True
+                else:
+                    triggered = True
 
         if triggered:
             st["armed_fvg"] = None
