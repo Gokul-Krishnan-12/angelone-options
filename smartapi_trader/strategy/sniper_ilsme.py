@@ -49,6 +49,7 @@ class SniperILSMEStrategy(BaseStrategy):
 
         # Wire position updates to keep in_trade state in sync
         self.bus.subscribe(EventType.POSITION_UPDATE, self._on_position_update)
+        self.bus.subscribe(EventType.RISK_ALERT, self._on_risk_alert)
 
     async def _on_position_update(self, event: Any):
         """Syncs in_trade state when positions open or close."""
@@ -56,6 +57,34 @@ class SniperILSMEStrategy(BaseStrategy):
         if underlying in self.state:
             is_open = getattr(event, "is_open", False)
             self.state[underlying]["in_trade"] = is_open
+            if not is_open:
+                self.state_mgr.set_strategy_status("Scanning for Liquidity Sweep & Momentum Breakouts")
+
+    async def _on_risk_alert(self, event: Any):
+        """Immediately clears in_trade lock if an order was rejected by Risk Manager."""
+        action = getattr(event, "action_taken", "")
+        if action == "REJECT":
+            for underlying, st in self.state.items():
+                if not any(getattr(p, "underlying", "") == underlying and getattr(p, "is_open", False) for p in self.state_mgr.positions.values()):
+                    st["in_trade"] = False
+                    st["last_signal_time"] = None
+            self.state_mgr.set_strategy_status("Scanning for Liquidity Sweep & Momentum Breakouts")
+
+    def _is_in_trade(self, underlying: str) -> bool:
+        """Determines if there is an active open position for this underlying."""
+        if any(getattr(p, "underlying", "") == underlying and getattr(p, "is_open", False) for p in self.state_mgr.positions.values()):
+            return True
+        st = self.state.get(underlying, {})
+        last_sig_t = st.get("last_signal_time")
+        if last_sig_t:
+            cur_sec = ist_time().hour * 3600 + ist_time().minute * 60 + ist_time().second
+            sig_sec = last_sig_t.hour * 3600 + last_sig_t.minute * 60 + last_sig_t.second
+            elapsed_sec = cur_sec - sig_sec
+            if 0 <= elapsed_sec < 30 and st.get("in_trade"):
+                return True
+            elif elapsed_sec >= 30 and not any(getattr(p, "underlying", "") == underlying and getattr(p, "is_open", False) for p in self.state_mgr.positions.values()):
+                st["in_trade"] = False
+        return bool(st.get("in_trade", False))
 
     def _init_index_state(self, underlying: str):
         # Dynamically load true Previous Day High (PDH) and Low (PDL)
@@ -333,7 +362,8 @@ class SniperILSMEStrategy(BaseStrategy):
         15-minute Macro Timeframe Logic:
         Evaluates structural sweeps of PDH / PDL or Session Extremes with wick rejection.
         """
-        if not self._is_market_hours() or self._is_midday_chop():
+        # Strictly discard any 15m bar closing before 09:30 IST (such as 09:00-09:15 premarket auction bars)
+        if ist_time() < time(9, 30) or not self._is_market_hours() or self._is_midday_chop():
             return
 
         if not self.cfg.get("enable_ilsme_sweep", True):
@@ -434,7 +464,8 @@ class SniperILSMEStrategy(BaseStrategy):
                         "bottom": fvg_bottom,
                         "displacement_low": c2.low,
                         "displacement_high": c2.high,
-                        "underlying": underlying
+                        "underlying": underlying,
+                        "armed_time": now_ist()
                     }
                     status_msg = f"FVG Formed ({underlying} Call): Armed for retracement retest [{fvg_bottom:.1f}-{fvg_top:.1f}]"
                     self.state_mgr.set_strategy_status(status_msg)
@@ -456,7 +487,8 @@ class SniperILSMEStrategy(BaseStrategy):
                         "bottom": fvg_bottom,
                         "displacement_high": c2.high,
                         "displacement_low": c2.low,
-                        "underlying": underlying
+                        "underlying": underlying,
+                        "armed_time": now_ist()
                     }
                     status_msg = f"FVG Formed ({underlying} Put): Armed for retracement retest [{fvg_bottom:.1f}-{fvg_top:.1f}]"
                     self.state_mgr.set_strategy_status(status_msg)
@@ -472,7 +504,7 @@ class SniperILSMEStrategy(BaseStrategy):
             and st.get("or_settled")
             and not st.get("or_triggered_today")
             and not st.get("armed_fvg")
-            and not st.get("in_trade")
+            and not self._is_in_trade(underlying)
             and not is_pos_open
         ):
             now_t = ist_time()
@@ -545,7 +577,7 @@ class SniperILSMEStrategy(BaseStrategy):
             self.cfg.get("enable_trend_pullback", True)
             and underlying in self.active_indices
             and not st.get("armed_fvg")
-            and not st.get("in_trade")
+            and not self._is_in_trade(underlying)
             and current_trades < self.state_mgr.max_trades_allowed
         ):
             now_t = ist_time()
@@ -622,22 +654,35 @@ class SniperILSMEStrategy(BaseStrategy):
             st["armed_fvg"] = None
             return
 
+        # FVG Retest TTL Check: Invalidate FVG if price failed to retest within fvg_ttl_minutes
+        fvg_armed_time = fvg.get("armed_time")
+        if fvg_armed_time:
+            elapsed_fvg_mins = (now_ist() - fvg_armed_time).total_seconds() / 60.0
+            max_fvg_ttl = float(self.cfg.get("fvg_ttl_minutes", 15.0))
+            if elapsed_fvg_mins > max_fvg_ttl:
+                logger.info(f"[STRATEGY] Expiring stale FVG for {underlying}: {elapsed_fvg_mins:.1f}m elapsed (Limit: {max_fvg_ttl}m)")
+                st["armed_fvg"] = None
+                return
+
         # Check if trade already active or daily limit reached
         is_paper = (self.state_mgr.execution_mode == "PAPER")
         current_trades = self.state_mgr.paper_trades_taken if is_paper else self.state_mgr.trades_taken_today
-        if st.get("in_trade") or current_trades >= self.state_mgr.max_trades_allowed or self.state_mgr.consecutive_losses >= 2 or self.state_mgr.is_panic_active or self.state_mgr.is_halted:
+        if self._is_in_trade(underlying) or current_trades >= self.state_mgr.max_trades_allowed or self.state_mgr.consecutive_losses >= 2 or self.state_mgr.is_panic_active or self.state_mgr.is_halted:
             return
 
         triggered = False
         signal_type = fvg["type"] # "BUY_CE" or "BUY_PE"
+        vwap = st.get("vwap", 0.0)
+        bounce_buffer = float(self.cfg.get("fvg_bounce_confirmation_pts", 3.0))
 
         if signal_type == "BUY_CE":
             # Retraces into top/middle of Bullish FVG
             if current_price <= fvg["top"] and current_price >= fvg["bottom"]:
                 if self.cfg.get("require_candle_confirmation", True):
-                    # Confirmation buffer: ensure price is holding above the lower 20% floor of FVG
-                    fvg_floor = fvg["bottom"] + ((fvg["top"] - fvg["bottom"]) * 0.20)
-                    if current_price >= fvg_floor:
+                    # Track minimum price reached within the FVG
+                    fvg["trough"] = min(fvg.get("trough", current_price), current_price)
+                    # Anti-knife-catching: Require price to bounce off the trough by bounce_buffer AND hold above VWAP
+                    if (current_price - fvg["trough"]) >= bounce_buffer and current_price >= vwap:
                         triggered = True
                 else:
                     triggered = True
@@ -645,9 +690,10 @@ class SniperILSMEStrategy(BaseStrategy):
             # Retraces into bottom/middle of Bearish FVG
             if current_price >= fvg["bottom"] and current_price <= fvg["top"]:
                 if self.cfg.get("require_candle_confirmation", True):
-                    # Confirmation buffer: ensure price is holding below upper 20% ceiling of FVG
-                    fvg_ceiling = fvg["top"] - ((fvg["top"] - fvg["bottom"]) * 0.20)
-                    if current_price <= fvg_ceiling:
+                    # Track peak price reached within the FVG
+                    fvg["peak"] = max(fvg.get("peak", current_price), current_price)
+                    # Anti-knife-catching: Require price to reject off peak by bounce_buffer AND hold below VWAP
+                    if (fvg["peak"] - current_price) >= bounce_buffer and current_price <= vwap:
                         triggered = True
                 else:
                     triggered = True
@@ -755,13 +801,17 @@ class SniperILSMEStrategy(BaseStrategy):
         else:
             logger.warning(f"[STRATEGY] Real exchange LTP unavailable for {option_contract['tradingsymbol']}; using dynamic model premium: ₹{entry_price} (Intrinsic: ₹{intrinsic:.2f}, Extrinsic: ₹{atm_extrinsic * decay_factor:.2f})")
         
-        # Stop-loss calculation: If setup provides swing_pts, use structural delta-based SL
+        # Stop-loss calculation: If setup provides swing_pts, use structural delta-based SL,
+        # but clamp unit_risk to max_sl_percent (default 12%) so single-lot risk does not exceed daily drawdown budget
+        max_sl_pct = float(self.risk_cfg.get("max_sl_percent", 0.12))
         swing_pts = fvg.get("swing_pts")
         if swing_pts and swing_pts > 0:
-            unit_risk = round(swing_pts * 0.55, 2)
+            raw_unit_risk = round(swing_pts * 0.55, 2)
+            max_allowed_unit_risk = round(entry_price * max_sl_pct, 2)
+            unit_risk = min(raw_unit_risk, max_allowed_unit_risk)
             stop_loss = round(max(1.0, entry_price - unit_risk), 2)
         else:
-            sl_pct = self.risk_cfg.get("initial_sl_percent", 0.12)
+            sl_pct = self.risk_cfg.get("initial_sl_percent", 0.10)
             stop_loss = round(entry_price * (1.0 - sl_pct), 2)
             unit_risk = entry_price - stop_loss
         
@@ -806,7 +856,8 @@ class SniperILSMEStrategy(BaseStrategy):
         )
 
         self.state[underlying]["in_trade"] = True
-        self.state_mgr.set_strategy_status(f"In Trade ({strat_label}): {option_contract['tradingsymbol']}")
+        self.state[underlying]["last_signal_time"] = ist_time()
+        self.state_mgr.set_strategy_status(f"Dispatching Signal ({strat_label}): {option_contract['tradingsymbol']}")
         logger.info(f"[STRATEGY] ===> DISPATCHING SNIPER SIGNAL [{strat_label}]: {signal.signal_type} {signal.tradingsymbol} Entry={entry_price} SL={stop_loss} T1={target_1} (Structural Swing Level: {swing_inval})")
         
         await self.bus.publish(signal)

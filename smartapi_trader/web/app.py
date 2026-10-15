@@ -724,6 +724,9 @@ class SettingsUpdateRequest(BaseModel):
     sweep_ttl_minutes: Optional[float] = None
     max_spike_candle_pct: Optional[float] = None
     require_candle_confirmation: Optional[bool] = None
+    fvg_ttl_minutes: Optional[float] = None
+    fvg_bounce_confirmation_pts: Optional[float] = None
+    max_sl_percent: Optional[float] = None
 
 
 @app.get("/api/settings")
@@ -896,6 +899,21 @@ async def update_settings(req: SettingsUpdateRequest):
             cfg.setdefault("strategy", {})["require_candle_confirmation"] = req.require_candle_confirmation
             if ctx.strategy and hasattr(ctx.strategy, "cfg"):
                 ctx.strategy.cfg["require_candle_confirmation"] = req.require_candle_confirmation
+
+        if req.fvg_ttl_minutes is not None:
+            cfg.setdefault("strategy", {})["fvg_ttl_minutes"] = float(req.fvg_ttl_minutes)
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["fvg_ttl_minutes"] = float(req.fvg_ttl_minutes)
+
+        if req.fvg_bounce_confirmation_pts is not None:
+            cfg.setdefault("strategy", {})["fvg_bounce_confirmation_pts"] = float(req.fvg_bounce_confirmation_pts)
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["fvg_bounce_confirmation_pts"] = float(req.fvg_bounce_confirmation_pts)
+
+        if req.max_sl_percent is not None:
+            cfg.setdefault("risk", {})["max_sl_percent"] = float(req.max_sl_percent)
+            if ctx.risk_manager and hasattr(ctx.risk_manager, "cfg"):
+                ctx.risk_manager.cfg["max_sl_percent"] = float(req.max_sl_percent)
 
         with open(config_path, "w") as f:
             yaml.safe_dump(cfg, f, default_flow_style=False)

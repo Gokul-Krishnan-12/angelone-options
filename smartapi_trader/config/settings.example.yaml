@@ -38,6 +38,8 @@ risk:
   market_close_time: '15:30'
   market_open_time: 09:15
   max_daily_drawdown_pct: 0.03
+  max_open_positions: 1
+  max_sl_percent: 0.12
   max_sl_buffer_pct: 0.055
   max_trades_per_day: 2
   midday_chop_filter_end: '13:30'
@@ -55,10 +57,12 @@ strategy:
   - NIFTY
   - BANKNIFTY
   - SENSEX
+  fvg_bounce_confirmation_pts: 3.5
   fvg_min_points: 2.5
+  fvg_ttl_minutes: 15.0
   macro_timeframe_minutes: 15
   max_bid_ask_spread_pct: 1.5
-  max_spike_candle_pct: 1.2
+  max_spike_candle_pct: 1.0
   micro_timeframe_minutes: 3
   min_open_interest: 50000
   min_wick_ratio: 0.35
@@ -66,7 +70,7 @@ strategy:
   preferred_delta_max: 0.6
   preferred_delta_min: 0.48
   require_candle_confirmation: true
-  sweep_ttl_minutes: 20.0
+  sweep_ttl_minutes: 15.0
   volume_expansion_multiplier: 1.8
   volume_sma_period: 20
 telegram:
