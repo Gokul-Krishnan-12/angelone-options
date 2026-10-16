@@ -57,6 +57,12 @@ strategy:
   - NIFTY
   - BANKNIFTY
   - SENSEX
+  trade_cooldown_minutes: 15.0
+  max_vwap_atr_multiplier: 1.6
+  max_consecutive_trend_bars: 4
+  max_vwap_distance_nifty: 32.0
+  max_vwap_distance_sensex: 90.0
+  max_vwap_distance_banknifty: 65.0
   fvg_bounce_confirmation_pts: 3.5
   fvg_min_points: 2.5
   fvg_ttl_minutes: 15.0

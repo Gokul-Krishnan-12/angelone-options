@@ -39,6 +39,9 @@ class SniperILSMEStrategy(BaseStrategy):
         
         # State tracking per underlying: "NIFTY", "BANKNIFTY", "SENSEX"
         self.active_indices = self.cfg.get("active_indices", ["NIFTY", "BANKNIFTY", "SENSEX"])
+        self.trade_cooldown_mins = float(self.cfg.get("trade_cooldown_minutes", 15.0))
+        self.max_consecutive_trend_bars = int(self.cfg.get("max_consecutive_trend_bars", 4))
+        self.max_vwap_atr_mult = float(self.cfg.get("max_vwap_atr_multiplier", 1.6))
         self.state: Dict[str, Dict[str, Any]] = {}
         for idx in self.active_indices:
             self._init_index_state(idx)
@@ -56,6 +59,10 @@ class SniperILSMEStrategy(BaseStrategy):
         underlying = getattr(event, "underlying", "")
         if underlying in self.state:
             is_open = getattr(event, "is_open", False)
+            was_open = self.state[underlying].get("in_trade", False)
+            if was_open and not is_open:
+                self.state[underlying]["last_exit_time"] = now_ist()
+                logger.info(f"[STRATEGY] Position closed for {underlying}. Cooldown active for {self.trade_cooldown_mins} minutes.")
             self.state[underlying]["in_trade"] = is_open
             if not is_open:
                 self.state_mgr.set_strategy_status("Scanning for Liquidity Sweep & Momentum Breakouts")
@@ -120,6 +127,7 @@ class SniperILSMEStrategy(BaseStrategy):
             "sweep_price": 0.0,
             "sweep_time": None,
             "armed_fvg": None,           # Holds pending FVG or Breakout zone dict
+            "last_exit_time": None,      # Post-trade cooldown timestamp
             "in_trade": False
         }
         logger.info(
@@ -200,7 +208,7 @@ class SniperILSMEStrategy(BaseStrategy):
         today_str = datetime.now().strftime("%Y-%m-%d")
         idx_key = underlying.lower()
         
-        # 1. Try local historical 3m / 15m candle store
+        # 1. Try local historical 3m / 15m candle store (only if fresh within 4 calendar days)
         for tf in ["3m", "15m"]:
             path = f"data/historical/{idx_key}_{tf}.json"
             if os.path.exists(path):
@@ -210,12 +218,18 @@ class SniperILSMEStrategy(BaseStrategy):
                     dates = sorted(list(set(c[0][:10] for c in bars if c[0][:10] < today_str)))
                     if dates:
                         prev_date = dates[-1]
-                        prev_bars = [c for c in bars if c[0].startswith(prev_date)]
-                        if prev_bars:
-                            pdh = max(b[2] for b in prev_bars)
-                            pdl = min(b[3] for b in prev_bars)
-                            close = prev_bars[-1][4]
-                            return pdh, pdl, close
+                        prev_dt = datetime.strptime(prev_date, "%Y-%m-%d").date()
+                        days_diff = (datetime.now().date() - prev_dt).days
+                        if days_diff <= 4:
+                            prev_bars = [c for c in bars if c[0].startswith(prev_date)]
+                            if prev_bars:
+                                pdh = max(b[2] for b in prev_bars)
+                                pdl = min(b[3] for b in prev_bars)
+                                close = prev_bars[-1][4]
+                                logger.info(f"[STRATEGY] Loaded fresh PDH/PDL for {underlying} from {path} (Date: {prev_date}) -> PDH: {pdh:.2f}, PDL: {pdl:.2f}")
+                                return pdh, pdl, close
+                        else:
+                            logger.warning(f"[STRATEGY] Local historical data in {path} is stale ({prev_date}, {days_diff} days old). Skipping to live SmartAPI.")
                 except Exception as e:
                     logger.warning(f"[STRATEGY] Error reading {path} for PDH/PDL: {e}")
 
@@ -223,6 +237,8 @@ class SniperILSMEStrategy(BaseStrategy):
         smart_api = getattr(self.auth_mgr, "smart_api", None)
         if self.auth_mgr and not self.auth_mgr.is_simulated and smart_api:
             try:
+                import time as _pytime
+                _pytime.sleep(0.4)  # Prevent Angel One SmartAPI 3 req/sec rate limit violation
                 sym_info = self.symbols_cfg.get(underlying, {})
                 tok = sym_info.get("spot_token")
                 exch = sym_info.get("exchange", "NSE")
@@ -241,7 +257,9 @@ class SniperILSMEStrategy(BaseStrategy):
                     valid = [d for d in data if d[0][:10] < today_str]
                     if valid:
                         last_day = valid[-1]
-                        return float(last_day[2]), float(last_day[3]), float(last_day[4])
+                        pdh, pdl, close = float(last_day[2]), float(last_day[3]), float(last_day[4])
+                        logger.info(f"[STRATEGY] Loaded live broker PDH/PDL for {underlying} (Date: {last_day[0][:10]}) -> PDH: {pdh:.2f}, PDL: {pdl:.2f}, Prev Close: {close:.2f}")
+                        return pdh, pdl, close
             except Exception as api_err:
                 logger.warning(f"[STRATEGY] SmartAPI daily candle fetch for {underlying} failed: {api_err}")
 
@@ -404,6 +422,21 @@ class SniperILSMEStrategy(BaseStrategy):
             self.state_mgr.set_strategy_status(status_msg)
             logger.info(f"[STRATEGY] {underlying} 15m BEARISH LIQUIDITY SWEEP at {bar.high:.2f} (Wick: {upper_wick:.1%})")
 
+    def _calculate_atr(self, token: str, period: int = 14) -> float:
+        """Calculates rolling ATR from closed 3m bars."""
+        closed = self.bars.get(token, {}).get("3m", [])
+        if len(closed) < 2:
+            return 0.0
+        trs = []
+        for i in range(1, len(closed)):
+            h = closed[i].high
+            l = closed[i].low
+            prev_c = closed[i - 1].close
+            tr = max(h - l, abs(h - prev_c), abs(l - prev_c))
+            trs.append(tr)
+        sample = trs[-period:]
+        return sum(sample) / len(sample) if sample else 0.0
+
     async def _evaluate_3m_micro_displacement(self, underlying: str, bar: BarEvent):
         """
         3-minute Micro Timeframe Logic:
@@ -495,6 +528,14 @@ class SniperILSMEStrategy(BaseStrategy):
                     logger.info(f"[STRATEGY] {status_msg}")
                     return
 
+        # Trade Cooldown Guard: Prevent immediate re-entry churn on the same underlying
+        last_exit = st.get("last_exit_time")
+        in_cooldown = False
+        if last_exit:
+            elapsed_cooldown = (now_ist() - last_exit).total_seconds() / 60.0
+            if elapsed_cooldown < self.trade_cooldown_mins:
+                in_cooldown = True
+
         # =====================================================================
         # MODEL 2: MOMENTUM TREND / OPENING RANGE BREAKOUT (ORB) ENGINE
         # =====================================================================
@@ -505,6 +546,7 @@ class SniperILSMEStrategy(BaseStrategy):
             and not st.get("or_triggered_today")
             and not st.get("armed_fvg")
             and not self._is_in_trade(underlying)
+            and not in_cooldown
             and not is_pos_open
         ):
             now_t = ist_time()
@@ -578,6 +620,7 @@ class SniperILSMEStrategy(BaseStrategy):
             and underlying in self.active_indices
             and not st.get("armed_fvg")
             and not self._is_in_trade(underlying)
+            and not in_cooldown
             and current_trades < self.state_mgr.max_trades_allowed
         ):
             now_t = ist_time()
@@ -600,11 +643,33 @@ class SniperILSMEStrategy(BaseStrategy):
                     d_low = min(b.low for b in prior_5_bars)
                     curr_bar = closed_3m[-1]
 
+                    # Volatility-Normalized Rubber-Band Ceiling (ATR Multiplier with static point fallback)
+                    atr_val = self._calculate_atr(token, period=14)
                     min_vd = 12.0 if underlying == "NIFTY" else (36.0 if underlying == "SENSEX" else 25.0)
+                    default_max_vd = 32.0 if underlying == "NIFTY" else (90.0 if underlying == "SENSEX" else 65.0)
+                    configured_max_vd = float(self.cfg.get(f"max_vwap_distance_{underlying.lower()}", default_max_vd))
+                    
+                    if atr_val > 1.0:
+                        max_vd = max(min_vd * 1.5, min(configured_max_vd * 1.5, atr_val * self.max_vwap_atr_mult))
+                    else:
+                        max_vd = configured_max_vd
+
                     min_b = 5.0 if underlying == "NIFTY" else (15.0 if underlying == "SENSEX" else 10.0)
 
+                    # Climax Exhaustion Guard: Avoid entering if consecutive bars in trend direction without pause
+                    prior_trend_bars = closed_3m[-self.max_consecutive_trend_bars:]
+                    is_bearish_exhaustion = (len(prior_trend_bars) >= self.max_consecutive_trend_bars and all(b.close < b.open for b in prior_trend_bars))
+                    is_bullish_exhaustion = (len(prior_trend_bars) >= self.max_consecutive_trend_bars and all(b.close > b.open for b in prior_trend_bars))
+
+                    # Volatility distances to VWAP
+                    vwap_dist_bear = vwap - curr_bar.close
+                    vwap_dist_bull = curr_bar.close - vwap
+
                     # Bearish Momentum Expansion: 3m Close breaks 15m low below VWAP with EMA 9 < 21 & displacement
-                    if curr_bar.close < d_low and curr_bar.close < vwap and ema_fast < ema_slow and (vwap - curr_bar.close) >= min_vd:
+                    if curr_bar.close < d_low and curr_bar.close < vwap and ema_fast < ema_slow and (min_vd <= vwap_dist_bear <= max_vd):
+                        if is_bearish_exhaustion:
+                            logger.info(f"[STRATEGY] Blocked Bearish Donchian Breakdown on {underlying}: Climax exhaustion ({self.max_consecutive_trend_bars} consecutive red bars).")
+                            return
                         if (curr_bar.open - curr_bar.close) >= min_b:
                             swing_pts = max(18.0 if underlying == "NIFTY" else 55.0, d_high - curr_bar.close)
                             st["armed_fvg"] = {
@@ -617,14 +682,17 @@ class SniperILSMEStrategy(BaseStrategy):
                                 "swing_pts": swing_pts,
                                 "underlying": underlying
                             }
-                            status_msg = f"📉 15m Donchian Trend Breakdown ({underlying} PE): Broke 15m Low ₹{d_low:.1f} (Risk: {swing_pts:.1f} pts)"
+                            status_msg = f"📉 15m Donchian Trend Breakdown ({underlying} PE): Broke 15m Low ₹{d_low:.1f} (Risk: {swing_pts:.1f} pts, VWAP Dist: {vwap_dist_bear:.1f} <= {max_vd:.1f})"
                             self.state_mgr.set_strategy_status(status_msg)
                             logger.info(f"[STRATEGY] {status_msg}")
                             await self._generate_sniper_signal(underlying, "BUY_PE", curr_bar.close, st["armed_fvg"])
                             st["armed_fvg"] = None
 
                     # Bullish Momentum Expansion: 3m Close breaks 15m high above VWAP with EMA 9 > 21 & displacement
-                    elif curr_bar.close > d_high and curr_bar.close > vwap and ema_fast > ema_slow and (curr_bar.close - vwap) >= min_vd:
+                    elif curr_bar.close > d_high and curr_bar.close > vwap and ema_fast > ema_slow and (min_vd <= vwap_dist_bull <= max_vd):
+                        if is_bullish_exhaustion:
+                            logger.info(f"[STRATEGY] Blocked Bullish Donchian Breakout on {underlying}: Climax exhaustion ({self.max_consecutive_trend_bars} consecutive green bars).")
+                            return
                         if (curr_bar.close - curr_bar.open) >= min_b:
                             swing_pts = max(18.0 if underlying == "NIFTY" else 55.0, curr_bar.close - d_low)
                             st["armed_fvg"] = {
@@ -637,7 +705,7 @@ class SniperILSMEStrategy(BaseStrategy):
                                 "swing_pts": swing_pts,
                                 "underlying": underlying
                             }
-                            status_msg = f"📈 15m Donchian Trend Breakout ({underlying} CE): Broke 15m High ₹{d_high:.1f} (Risk: {swing_pts:.1f} pts)"
+                            status_msg = f"📈 15m Donchian Trend Breakout ({underlying} CE): Broke 15m High ₹{d_high:.1f} (Risk: {swing_pts:.1f} pts, VWAP Dist: {vwap_dist_bull:.1f} <= {max_vd:.1f})"
                             self.state_mgr.set_strategy_status(status_msg)
                             logger.info(f"[STRATEGY] {status_msg}")
                             await self._generate_sniper_signal(underlying, "BUY_CE", curr_bar.close, st["armed_fvg"])
