@@ -34,6 +34,10 @@ class BacktestEngine:
         active_indices: Optional[List[str]] = None,
         slippage_pts_entry: float = 0.80,
         slippage_pts_exit: float = 0.50,
+        trade_cooldown_bars: int = 5,
+        max_vwap_distance_nifty: float = 32.0,
+        max_vwap_distance_sensex: float = 90.0,
+        max_consecutive_trend_bars: int = 4,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None
     ):
@@ -50,6 +54,10 @@ class BacktestEngine:
         self.active_indices = [x.upper() for x in (active_indices or ["NIFTY", "SENSEX"])]
         self.slippage_pts_entry = slippage_pts_entry
         self.slippage_pts_exit = slippage_pts_exit
+        self.trade_cooldown_bars = trade_cooldown_bars
+        self.max_vwap_distance_nifty = max_vwap_distance_nifty
+        self.max_vwap_distance_sensex = max_vwap_distance_sensex
+        self.max_consecutive_trend_bars = max_consecutive_trend_bars
         self.start_date = start_date
         self.end_date = end_date
 
@@ -165,7 +173,8 @@ class BacktestEngine:
                     "in_trade": False,
                     "or_high": -1e9,
                     "or_low": 1e9,
-                    "or_settled": False
+                    "or_settled": False,
+                    "last_exit_bar": -999
                 }
 
             max_len = max(len(v) for v in today_3m_by_idx.values()) if today_3m_by_idx else 0
@@ -245,7 +254,8 @@ class BacktestEngine:
                                     }
 
                     # 3. Momentum Trend / Opening Range Breakout (ORB) Engine
-                    if self.enable_momentum_breakout and st.get("or_settled") and not st.get("armed_fvg") and not st.get("in_trade"):
+                    in_cooldown = (bar_i - st.get("last_exit_bar", -999)) < self.trade_cooldown_bars
+                    if self.enable_momentum_breakout and st.get("or_settled") and not st.get("armed_fvg") and not st.get("in_trade") and not in_cooldown:
                         if ("09:30" <= time_part <= "11:15" or "13:30" <= time_part <= "14:30") and bar_i >= 5:
                             or_h = st["or_high"]
                             or_l = st["or_low"]
@@ -271,7 +281,7 @@ class BacktestEngine:
                                     }
 
                     # 4. 15-Minute Donchian Trend Breakout Engine
-                    if not st.get("armed_fvg") and not st.get("in_trade") and bar_i >= 5:
+                    if not st.get("armed_fvg") and not st.get("in_trade") and not in_cooldown and bar_i >= 5:
                         if ("09:30" <= time_part <= "11:45" or "12:45" <= time_part <= "14:45"):
                             prior_5 = bars[bar_i-5:bar_i]
                             d_high = max(b[2] for b in prior_5)
@@ -286,7 +296,15 @@ class BacktestEngine:
                                 ema9 = (rb[4] * k9) + (ema9 * (1.0 - k9))
                                 ema21 = (rb[4] * k21) + (ema21 * (1.0 - k21))
 
-                            if c < d_low and c < vwap and ema9 < ema21:
+                            min_vd = 12.0 if underlying == "NIFTY" else 36.0
+                            max_vd = self.max_vwap_distance_nifty if underlying == "NIFTY" else self.max_vwap_distance_sensex
+
+                            # Climax Exhaustion Guard
+                            prior_trend = bars[max(0, bar_i - self.max_consecutive_trend_bars):bar_i]
+                            is_bear_exhaust = len(prior_trend) >= self.max_consecutive_trend_bars and all(b[4] < b[1] for b in prior_trend)
+                            is_bull_exhaust = len(prior_trend) >= self.max_consecutive_trend_bars and all(b[4] > b[1] for b in prior_trend)
+
+                            if c < d_low and c < vwap and ema9 < ema21 and (min_vd <= (vwap - c) <= max_vd) and not is_bear_exhaust:
                                 swing_pts = max(18.0 if underlying == "NIFTY" else 55.0, d_high - c)
                                 st["armed_fvg"] = {
                                     "source": "TREND_PULLBACK",
@@ -296,7 +314,7 @@ class BacktestEngine:
                                     "swing_inval": d_high,
                                     "swing_pts": swing_pts
                                 }
-                            elif c > d_high and c > vwap and ema9 > ema21:
+                            elif c > d_high and c > vwap and ema9 > ema21 and (min_vd <= (c - vwap) <= max_vd) and not is_bull_exhaust:
                                 swing_pts = max(18.0 if underlying == "NIFTY" else 55.0, c - d_low)
                                 st["armed_fvg"] = {
                                     "source": "TREND_PULLBACK",
@@ -456,6 +474,8 @@ class BacktestEngine:
                                     realized_gross += (exit_price - entry_opt) * remaining_qty
                                     remaining_qty = 0
                                     break
+
+                            st["last_exit_bar"] = fwd_i
 
                             if remaining_qty > 0:
                                 exit_slip = self.slippage_pts_exit * slip_mult
