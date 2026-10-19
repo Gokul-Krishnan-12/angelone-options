@@ -76,26 +76,41 @@ class AngelAuthManager:
 
     def renew_token_if_needed(self) -> str:
         """Refreshes the JWT token before expiration."""
-        if self.is_simulated or not self.smart_api:
-            return self.jwt_token
+        jwt, _ = self.refresh_or_reauth(force=False)
+        return jwt
 
-        if time.time() > (self.session_expiry - 1800): # within 30 min of expiry
+    def refresh_or_reauth(self, force: bool = False) -> Tuple[str, str]:
+        """
+        Ensures active valid session, re-authenticating if expired, close to expiry, or forced.
+        Returns: (jwt_token, feed_token)
+        """
+        if self.is_simulated or not self.is_configured():
+            return self.jwt_token, self.feed_token
+
+        if force or time.time() > (self.session_expiry - 1800):
             try:
-                logger.info("[AUTH] Refreshing session JWT tokens...")
-                token_data = self.smart_api.generateToken(self.refresh_token)
-                if token_data.get("status"):
-                    self.jwt_token = token_data["data"]["jwtToken"]
-                    self.feed_token = token_data["data"]["feedToken"]
-                    self.session_expiry = time.time() + (23 * 3600)
-                    logger.info("[AUTH] Tokens refreshed successfully.")
-                else:
-                    logger.warning(f"[AUTH] Token refresh failed: {token_data.get('message')}. Re-authenticating...")
-                    self.initialize_session()
-            except Exception as e:
-                logger.error(f"[AUTH] Exception while refreshing token: {e}. Re-authenticating...")
-                self.initialize_session()
+                # Try refresh token first if not forced and refresh token exists
+                if not force and self.refresh_token and self.smart_api:
+                    logger.info("[AUTH] Refreshing session JWT tokens via refresh token...")
+                    token_data = self.smart_api.generateToken(self.refresh_token)
+                    if token_data and token_data.get("status"):
+                        self.jwt_token = token_data["data"]["jwtToken"]
+                        self.feed_token = token_data["data"]["feedToken"]
+                        self.session_expiry = time.time() + (23 * 3600)
+                        logger.info("[AUTH] Tokens refreshed successfully via refresh token.")
+                        return self.jwt_token, self.feed_token
 
-        return self.jwt_token
+                # Re-authenticate full SmartConnect session with TOTP
+                logger.info("[AUTH] Re-authenticating full SmartConnect session with TOTP...")
+                self.initialize_session()
+            except Exception as e:
+                logger.error(f"[AUTH] Re-authentication attempt failed: {e}. Retrying full init...")
+                try:
+                    self.initialize_session()
+                except Exception as e2:
+                    logger.error(f"[AUTH] Full session re-init failed: {e2}")
+
+        return self.jwt_token, self.feed_token
 
     def fetch_rms_balance(self) -> Dict[str, Any]:
         """Queries Angel One RMS Limit endpoint for real margin data."""

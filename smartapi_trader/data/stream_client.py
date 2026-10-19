@@ -19,7 +19,8 @@ class SmartStreamClient:
         api_key: str,
         client_code: str,
         feed_token: str,
-        is_simulated: bool = False
+        is_simulated: bool = False,
+        auth_manager: Optional[Any] = None
     ):
         self.bus = event_bus
         self.auth_token = auth_token
@@ -27,6 +28,7 @@ class SmartStreamClient:
         self.client_code = client_code
         self.feed_token = feed_token
         self.is_simulated = is_simulated
+        self.auth_manager = auth_manager
         
         self.subscribed_tokens: Dict[str, Dict[str, Any]] = {} # token -> info
         self.is_connected = False
@@ -36,6 +38,12 @@ class SmartStreamClient:
         self._ws_task: Optional[asyncio.Task] = None
         self._sim_task: Optional[asyncio.Task] = None
         self._ws_client = None
+
+    def update_tokens(self, auth_token: str, feed_token: str):
+        """Updates auth and feed tokens for subsequent connection attempts."""
+        self.auth_token = auth_token
+        self.feed_token = feed_token
+        logger.info("[STREAM] Updated WebSocket auth & feed tokens.")
 
     def subscribe(self, token: str, symbol: str, exchange: str = "NSE", mode: int = 2):
         """Adds a token to the active subscription list."""
@@ -81,33 +89,62 @@ class SmartStreamClient:
         logger.info("[STREAM] Stream client stopped.")
 
     async def _run_live_stream(self):
-        """Connects via SmartWebSocketV2 with auto-reconnect backoff."""
+        """Connects via SmartWebSocketV2 with auto-reconnect backoff and dynamic token renewal."""
+        consecutive_failures = 0
         backoff = 2
         while self.running:
             try:
+                # If experiencing repeated connection failures, attempt token refresh/re-authentication
+                if self.auth_manager:
+                    session_expiry = getattr(self.auth_manager, "session_expiry", 0)
+                    needs_refresh = (consecutive_failures >= 2) or (time.time() > (session_expiry - 1800))
+                    if needs_refresh:
+                        force_totp = consecutive_failures >= 3
+                        logger.warning(
+                            f"[STREAM] Refreshing Angel One session tokens before reconnect "
+                            f"(failures: {consecutive_failures}, force_totp: {force_totp})..."
+                        )
+                        try:
+                            self.auth_manager.refresh_or_reauth(force=force_totp)
+                            if self.auth_manager.jwt_token and self.auth_manager.feed_token:
+                                self.auth_token = self.auth_manager.jwt_token
+                                self.feed_token = self.auth_manager.feed_token
+                        except Exception as reauth_err:
+                            logger.error(f"[STREAM] Exception during token refresh: {reauth_err}")
+
                 from SmartApi.smartWebSocketV2 import SmartWebSocketV2
                 
                 loop = asyncio.get_event_loop()
 
                 def on_data(wsapp, message):
+                    nonlocal consecutive_failures, backoff
+                    consecutive_failures = 0
+                    backoff = 2
                     try:
                         self._parse_and_publish_tick(message)
                     except Exception as e:
                         logger.error(f"[STREAM] Error parsing tick: {e}")
 
                 def on_open(wsapp):
+                    nonlocal consecutive_failures, backoff
                     self.is_connected = True
+                    consecutive_failures = 0
+                    backoff = 2
                     logger.info("[STREAM] SmartWebSocketV2 connected successfully!")
                     # Resubscribe all tokens
                     self._resubscribe_all()
 
                 def on_close(wsapp):
+                    nonlocal consecutive_failures
                     self.is_connected = False
-                    logger.warning("[STREAM] SmartWebSocketV2 connection closed.")
+                    consecutive_failures += 1
+                    logger.warning(f"[STREAM] SmartWebSocketV2 connection closed (failures: {consecutive_failures}).")
 
                 def on_error(wsapp, error):
+                    nonlocal consecutive_failures
                     self.is_connected = False
-                    logger.error(f"[STREAM] SmartWebSocketV2 error: {error}")
+                    consecutive_failures += 1
+                    logger.error(f"[STREAM] SmartWebSocketV2 error: {error} (failures: {consecutive_failures})")
 
                 self._ws_client = SmartWebSocketV2(
                     auth_token=self.auth_token,
@@ -124,7 +161,8 @@ class SmartStreamClient:
                 await loop.run_in_executor(None, self._ws_client.connect)
                 
             except Exception as e:
-                logger.error(f"[STREAM] WebSocket connection exception: {e}. Reconnecting in {backoff}s...")
+                consecutive_failures += 1
+                logger.error(f"[STREAM] WebSocket connection exception: {e} (failures: {consecutive_failures}). Reconnecting in {backoff}s...")
                 self.is_connected = False
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)

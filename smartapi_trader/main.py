@@ -115,7 +115,8 @@ class TradingOrchestrator:
             api_key=broker_cfg.get("api_key", ""),
             client_code=broker_cfg.get("client_code", ""),
             feed_token=self.feed_token,
-            is_simulated=is_sim
+            is_simulated=is_sim,
+            auth_manager=self.auth_manager
         )
 
         # Connect pipeline event listeners
@@ -221,9 +222,18 @@ class TradingOrchestrator:
                 # Continuously ensure daily rollover occurs cleanly across midnight
                 if hasattr(self, "state_mgr") and self.state_mgr:
                     rolled = self.state_mgr.check_and_perform_daily_rollover()
-                    if rolled and hasattr(self, "strategy") and self.strategy:
-                        self.strategy.reset_daily_state()
-                        logger.info("[ORCHESTRATOR] 🌅 Strategy daily state successfully reset with fresh levels for new session.")
+                    if rolled:
+                        if hasattr(self, "auth_manager") and self.auth_manager and not self.auth_manager.is_simulated:
+                            logger.info("[ORCHESTRATOR] 🌅 Daily rollover: Refreshing Angel One authentication session...")
+                            try:
+                                self.auth_manager.initialize_session()
+                                if hasattr(self, "stream_client") and self.stream_client:
+                                    self.stream_client.update_tokens(self.auth_manager.jwt_token, self.auth_manager.feed_token)
+                            except Exception as reauth_err:
+                                logger.error(f"[ORCHESTRATOR] Daily rollover reauth error: {reauth_err}")
+                        if hasattr(self, "strategy") and self.strategy:
+                            self.strategy.reset_daily_state()
+                            logger.info("[ORCHESTRATOR] 🌅 Strategy daily state successfully reset with fresh levels for new session.")
 
                 # Automated daily EOD reports only run on active trading days (Mon-Fri, non-holiday)
                 if not is_trading_day(now):
