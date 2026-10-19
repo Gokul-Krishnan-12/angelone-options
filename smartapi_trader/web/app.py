@@ -403,6 +403,10 @@ async def reset_panic():
     if not ctx.state_manager:
         raise HTTPException(status_code=503, detail="State manager not initialized")
     ctx.state_manager.reset_panic()
+    if ctx.risk_manager:
+        ctx.risk_manager.reset_daily_limits()
+    elif ctx.orchestrator and hasattr(ctx.orchestrator, "risk_manager") and ctx.orchestrator.risk_manager:
+        ctx.orchestrator.risk_manager.reset_daily_limits()
     await ws_manager.broadcast({
         "type": "PANIC_CLEARED",
         "message": "System operational. Scanner re-armed."

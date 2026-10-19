@@ -25,6 +25,9 @@ class TelegramNotifier:
         self.bot_token = str(self.config.get("bot_token", "8834022656:AAGsTEx46GIgP7XBar5Z4URNP2oEvZGfojM")).strip()
         self.chat_id = str(self.config.get("chat_id", "650527213")).strip()
         self.enabled = bool(self.config.get("enabled", True))
+        self._last_panic_alert_time = 0.0
+        self._last_panic_reason = ""
+        self._last_discard_alert_time = 0.0
 
     def update_config(self, config: Dict[str, Any]):
         self.config = config
@@ -242,6 +245,16 @@ class TelegramNotifier:
 
     def notify_discard_alert(self, reason: str, stats: Dict[str, Any]):
         """Dispatches high-priority quarantine alert when system health limits are breached."""
+        if not self.enabled:
+            return
+
+        now_ts = time.time()
+        last_alert = getattr(self, "_last_discard_alert_time", 0.0)
+        if now_ts - last_alert < 600.0:
+            logger.warning(f"[TELEGRAM] Suppressed duplicate quarantine alert (throttled): {reason}")
+            return
+        self._last_discard_alert_time = now_ts
+
         now_str = now_ist().strftime("%H:%M:%S")
         curr_dd = stats.get("drawdown_pct", 0.0)
         consec_losses = stats.get("consecutive_losses", 0)
@@ -259,7 +272,21 @@ class TelegramNotifier:
         self.send_message_async(message)
 
     def notify_panic_triggered(self, reason: str = "Operator Manual Panic"):
-        """Emergency circuit breaker notification."""
+        """Emergency circuit breaker notification with anti-spam throttling."""
+        if not self.enabled:
+            return
+
+        now_ts = time.time()
+        last_alert = getattr(self, "_last_panic_alert_time", 0.0)
+        last_reason = getattr(self, "_last_panic_reason", "")
+        # Debounce: strictly throttle duplicate panic notifications (min 30s cooldown between any panic, 15m for same reason)
+        if (now_ts - last_alert < 30.0) or ((now_ts - last_alert < 900.0) and (reason == last_reason)):
+            logger.warning(f"[TELEGRAM] Suppressed duplicate panic alert (throttled): {reason}")
+            return
+
+        self._last_panic_alert_time = now_ts
+        self._last_panic_reason = reason
+
         now_str = now_ist().strftime("%H:%M:%S")
         message = (
             f"🚨 <b>EMERGENCY CIRCUIT BREAKER ACTIVATED</b>\n\n"

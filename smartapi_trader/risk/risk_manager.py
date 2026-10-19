@@ -50,6 +50,7 @@ class RiskManager:
         self.max_slippage_pct = config.get("execution", {}).get("max_slippage_pct", 2.0)
         self.correlation_guard = bool(self.cfg.get("correlation_guard", True))
         self.max_open_positions = int(self.cfg.get("max_open_positions", 1))
+        self._daily_drawdown_halted = False
 
         # Wire up listeners
         self.bus.subscribe(EventType.SIGNAL, self._on_signal)
@@ -125,6 +126,7 @@ class RiskManager:
         # 4. Daily Drawdown Circuit Breaker (3.0%)
         current_drawdown = self.state_mgr.daily_drawdown_pct / 100.0
         if current_drawdown >= self.max_drawdown_pct:
+            self._daily_drawdown_halted = True
             self._raise_alert("CRITICAL", "MaxDrawdownBreach", f"Drawdown ({current_drawdown:.1%}) exceeds 3.0% hard threshold! System halted.")
             self.state_mgr.trigger_panic()
             return
@@ -327,11 +329,16 @@ class RiskManager:
 
         # 2. Hard Daily Drawdown Monitor
         if self.state_mgr.daily_drawdown_pct >= (self.max_drawdown_pct * 100):
-            logger.critical(f"[RISK] Daily Drawdown limit ({self.state_mgr.daily_drawdown_pct}%) breached! Triggering immediate circuit breaker liquidation.")
-            await self._square_off_all("Hard 3.0% daily drawdown circuit breaker breach")
-            self.state_mgr.trigger_panic()
-            if self.notifier:
-                self.notifier.notify_panic_triggered("Hard 3.0% daily drawdown circuit breaker breach")
+            if not getattr(self, "_daily_drawdown_halted", False):
+                self._daily_drawdown_halted = True
+                if not self.state_mgr.is_panic_active and not self.state_mgr.is_halted:
+                    logger.critical(f"[RISK] Daily Drawdown limit ({self.state_mgr.daily_drawdown_pct:.2f}%) breached! Triggering immediate circuit breaker liquidation.")
+                    await self._square_off_all("Hard 3.0% daily drawdown circuit breaker breach")
+                    self.state_mgr.trigger_panic()
+                    if self.notifier:
+                        self.notifier.notify_panic_triggered("Hard 3.0% daily drawdown circuit breaker breach")
+                else:
+                    logger.warning(f"[RISK] Daily Drawdown limit ({self.state_mgr.daily_drawdown_pct:.2f}%) breached, but system is already in PANIC/HALT mode. Latching circuit breaker.")
             return
 
         # 3. Position-level Trailing & Bracket Management
@@ -595,3 +602,8 @@ class RiskManager:
         logger.warning(f"[RISK_ALERT] [{level}] {rule}: {msg}")
         alert = RiskAlertEvent(level=level, rule_name=rule, message=msg, action_taken="REJECT")
         self.bus.publish_nowait(alert)
+
+    def reset_daily_limits(self):
+        """Resets intraday circuit breaker latch flags (e.g. at daily rollover or manual reset)."""
+        self._daily_drawdown_halted = False
+        logger.info("[RISK] Intraday risk circuit breaker flags reset.")

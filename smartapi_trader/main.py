@@ -234,6 +234,9 @@ class TradingOrchestrator:
                         if hasattr(self, "strategy") and self.strategy:
                             self.strategy.reset_daily_state()
                             logger.info("[ORCHESTRATOR] 🌅 Strategy daily state successfully reset with fresh levels for new session.")
+                        if hasattr(self, "risk_manager") and self.risk_manager:
+                            self.risk_manager.reset_daily_limits()
+                            logger.info("[ORCHESTRATOR] 🌅 Risk manager daily limits successfully reset for new session.")
 
                 # Automated daily EOD reports only run on active trading days (Mon-Fri, non-holiday)
                 if not is_trading_day(now):

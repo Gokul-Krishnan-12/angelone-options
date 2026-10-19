@@ -431,6 +431,12 @@ class StateManager:
             self.completed_trades = []
             self.paper_completed_trades = []
 
+        if self.is_panic_active:
+            logger.info("[STATE] 🌅 Resetting panic state from previous session on daily rollover.")
+            self.is_panic_active = False
+            self.is_halted = False
+            self.strategy_status = "Scanning for Liquidity Sweep"
+
         self._recalculate_portfolio()
         self.broadcast_state()
         return True
@@ -571,6 +577,8 @@ class StateManager:
         self.broadcast_state()
 
     def trigger_panic(self):
+        if self.is_panic_active and self.is_halted:
+            return
         self.is_panic_active = True
         self.is_halted = True
         self.strategy_status = "EMERGENCY PANIC TRIGGERED - HALTED"
