@@ -366,6 +366,15 @@ class Test9TelegramBotAndCommands(unittest.TestCase):
         self.assertIn("Today's Net P&L:", res)
         self.assertIn("Active Capital:", res)
 
+    def test_resume_and_reset_command(self):
+        self.state_mgr.trigger_panic()
+        self.assertTrue(self.state_mgr.is_panic_active)
+        self.assertTrue(self.state_mgr.is_halted)
+        res = self.bot.dispatch_command("/resume", [])
+        self.assertIn("EMERGENCY PANIC CLEARED", res)
+        self.assertFalse(self.state_mgr.is_panic_active)
+        self.assertFalse(self.state_mgr.is_halted)
+
 
 class Test10WebEndpointsAndAuthFlow(unittest.IsolatedAsyncioTestCase):
     """Verifies FastAPI REST and WebSocket endpoints, auth protection, and control plane logic."""

@@ -468,6 +468,7 @@ class StateManager:
         self.paper_agent_status = "RUNNING"
         self.real_agent_status = "PAUSED"
         self.is_halted = False
+        self.is_panic_active = False
         self.strategy_status = "Paper Agent: Scanning for Liquidity Sweep"
         logger.info("[AGENT] Paper Trading Agent STARTED.")
         self._sync_ledger_to_storage()

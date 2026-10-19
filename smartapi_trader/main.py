@@ -148,18 +148,28 @@ class TradingOrchestrator:
 
     async def _market_health_watchdog_loop(self):
         """
-        Actively monitors stream connectivity, agent status, and server health during market hours (09:15 - 15:30 IST).
+        Actively monitors stream connectivity, agent status, and server health during market hours (09:15 - 15:15 IST).
         Runs every 2 minutes to minimize CPU load and sends high-priority Telegram alerts if issues are detected.
         """
         last_alert_time = 0.0
+        last_panic_alert_time = 0.0
         while True:
             try:
                 await asyncio.sleep(120)  # Every 2 minutes
                 from smartapi_trader.utils.tz import now_ist, is_market_hours
+                from datetime import time as dt_time
                 now = now_ist()
                 
-                # Check if market is active (Mon-Fri 09:15 - 15:30 IST, excluding exchange holidays)
-                is_mkt_hours = is_market_hours(now)
+                # Check target EOD cutoff (default 15:15 IST) so alerts do not fire post-EOD report
+                eod_time_str = self.settings.get("telegram", {}).get("eod_report_time", "15:15")
+                try:
+                    parts = eod_time_str.split(":")
+                    eod_cutoff = dt_time(int(parts[0]), int(parts[1]) if len(parts) > 1 else 15)
+                except Exception:
+                    eod_cutoff = dt_time(15, 15)
+
+                # Check if market is active (Mon-Fri 09:15 - EOD cutoff IST, excluding exchange holidays)
+                is_mkt_hours = is_market_hours(now) and (now.time() < eod_cutoff)
                 
                 if is_mkt_hours:
                     issues = []
@@ -180,8 +190,13 @@ class TradingOrchestrator:
                     real_st = getattr(self.state_mgr, "real_agent_status", "PAUSED")
                     is_panic = getattr(self.state_mgr, "is_panic_active", False)
                     
+                    # Anti-spam: Emergency panic is an intentional safety shutdown (e.g. daily drawdown circuit breaker).
+                    # It is already alerted once by the RiskManager. Only remind the operator at most once per 60 minutes.
                     if is_panic:
-                        issues.append("🚨 System is in EMERGENCY PANIC / HALT state!")
+                        now_ts = time.time()
+                        if (now_ts - last_panic_alert_time) > 3600:
+                            issues.append("🚨 System is in EMERGENCY PANIC / HALT state!")
+                            last_panic_alert_time = now_ts
                     elif self.mode == "LIVE" and real_st != "RUNNING":
                         issues.append(f"⚠️ Mode is LIVE but Real Agent is {real_st} (not RUNNING).")
                     elif self.mode == "PAPER" and paper_st != "RUNNING":
@@ -196,7 +211,7 @@ class TradingOrchestrator:
                             f"━━━━━━━━━━━━━━━━━━━━━━━\n"
                             f"⏰ <b>Time:</b> {now.strftime('%H:%M:%S')} IST\n"
                             f"⚠️ <b>Detected Issues:</b>\n{alert_body}\n\n"
-                            f"<i>Use /status to diagnose or /start to resume execution.</i>\n"
+                            f"<i>Use /status to diagnose, /resume to reset panic, or /start to resume execution.</i>\n"
                             f"━━━━━━━━━━━━━━━━━━━━━━━"
                         )
                         if self.notifier:

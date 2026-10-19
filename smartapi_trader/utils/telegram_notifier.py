@@ -540,6 +540,8 @@ class TelegramBotController:
             return self._cmd_start(["real"])
         elif cmd in ("/start_paper", "start_paper", "/paper", "paper"):
             return self._cmd_start(["paper"])
+        elif cmd in ("/resume", "resume", "/reset", "reset", "/reset_panic", "reset_panic"):
+            return self._cmd_reset_panic()
         elif cmd in ("/stop", "stop"):
             return self._cmd_stop()
         elif cmd in ("/squareoff", "squareoff", "/panic", "panic"):
@@ -720,6 +722,12 @@ class TelegramBotController:
         return "📬 <i>End of Day (EOD) Report dispatched above!</i>"
 
     def _cmd_start(self, args: List[str]) -> str:
+        # If emergency panic was active, clear panic and reset daily risk circuit breaker
+        if getattr(self.state_mgr, "is_panic_active", False):
+            self.state_mgr.reset_panic()
+            if self.orchestrator and hasattr(self.orchestrator, "risk_manager") and self.orchestrator.risk_manager:
+                self.orchestrator.risk_manager.reset_daily_limits()
+
         sub = args[0].lower() if args else "paper"
         if sub in ("real", "live"):
             # 1. Verify broker credentials & active session
@@ -778,6 +786,15 @@ class TelegramBotController:
         self.state_mgr.pause_real_agent()
         return "⏸ <b>Trading Agents PAUSED.</b> Scanning paused."
 
+    def _cmd_reset_panic(self) -> str:
+        self.state_mgr.reset_panic()
+        if self.orchestrator and hasattr(self.orchestrator, "risk_manager") and self.orchestrator.risk_manager:
+            self.orchestrator.risk_manager.reset_daily_limits()
+        mode = self.state_mgr.execution_mode
+        if mode == "PAPER":
+            self.state_mgr.start_paper_agent()
+        return "✅ <b>EMERGENCY PANIC CLEARED.</b> Circuit breakers reset and scanner re-armed."
+
     def _cmd_squareoff(self) -> str:
         self.state_mgr.trigger_panic()
         # Square off open positions
@@ -806,6 +823,7 @@ class TelegramBotController:
             "🕹 <b>Remote Engine Control:</b>\n"
             "• <code>/start paper</code> — Start paper trading agent\n"
             "• <code>/start live</code> — Arm real live Angel One execution\n"
+            "• <code>/resume</code> or <code>/reset</code> — Clear emergency panic & reset circuit breakers\n"
             "• <code>/stop</code> — Pause active trading agent\n"
             "• <code>/squareoff</code> — Emergency Panic! Liquidate all contracts\n"
             "• <code>/help</code> — Show this commands menu"
