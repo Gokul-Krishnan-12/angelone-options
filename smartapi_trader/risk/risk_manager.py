@@ -43,10 +43,10 @@ class RiskManager:
         self.max_drawdown_pct = self.cfg.get("max_daily_drawdown_pct", 0.03) # 3.0%
         self.max_trades = self.cfg.get("max_trades_per_day", 2)
         self.consecutive_loss_limit = self.cfg.get("consecutive_loss_limit", 2)
-        self.be_trigger_r = self.cfg.get("breakeven_trigger_r", 1.0)
-        self.tp1_r = self.cfg.get("partial_exit_r", 2.0)
+        self.be_trigger_r = self.cfg.get("breakeven_trigger_r", 1.2)
+        self.tp1_r = self.cfg.get("partial_exit_r", 2.5)
         self.tp2_r = self.cfg.get("target_2_r", 3.0)                    # Target 2 (Full exit for runner at +3.0R)
-        self.tp1_qty_pct = self.cfg.get("partial_exit_qty_pct", 0.60)
+        self.tp1_qty_pct = self.cfg.get("partial_exit_qty_pct", 0.50)
         self.max_slippage_pct = config.get("execution", {}).get("max_slippage_pct", 2.0)
         self.correlation_guard = bool(self.cfg.get("correlation_guard", True))
         self.max_open_positions = int(self.cfg.get("max_open_positions", 1))
@@ -365,7 +365,7 @@ class RiskManager:
                 entry_ts = pos.created_at_ts
             
             elapsed_mins = (datetime.now().timestamp() - entry_ts) / 60.0
-            stagnation_limit_mins = float(self.cfg.get("stagnation_timeout_mins", 15))
+            stagnation_limit_mins = float(self.cfg.get("stagnation_timeout_mins", 25))
             if elapsed_mins >= stagnation_limit_mins and profit_points < (unit_risk * 0.5):
                 logger.warning(f"[RISK] ⏳ STAGNATION EXIT TRIGGERED for {symbol}: Position held {elapsed_mins:.1f}m without reaching +0.5R displacement. Liquidating to eliminate theta decay.")
                 await self._exit_position(pos, ltp, f"Stagnation / Time-Decay Exit ({stagnation_limit_mins:.0f}m)")

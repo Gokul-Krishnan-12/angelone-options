@@ -49,7 +49,7 @@ risk:
   partial_exit_qty_pct: 0.5
   partial_exit_r: 2.5
   risk_per_trade_pct: 0.018
-  stagnation_timeout_mins: 45
+  stagnation_timeout_mins: 25
   structural_swing_break_confirmation: true
   trail_remainder_swing: true
 strategy:

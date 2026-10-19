@@ -20,9 +20,9 @@ class RealisticBacktestEngine:
         starting_capital: float = 50000.0,
         risk_per_trade_pct: float = 0.015,
         max_trades_per_day: int = 2,
-        initial_sl_pct: float = 0.10,
-        be_trigger_r: float = 0.60,
-        tp1_r: float = 2.2,
+        initial_sl_pct: float = 0.12,
+        be_trigger_r: float = 1.2,
+        tp1_r: float = 2.5,
         tp1_qty_pct: float = 0.50,
         slippage_pts_entry: float = 0.80, # 0.8 pt entry spread crossing on Nifty
         slippage_pts_exit: float = 0.50,  # 0.5 pt stop/market exit spread crossing

@@ -896,12 +896,12 @@ class SniperILSMEStrategy(BaseStrategy):
             unit_risk = min(raw_unit_risk, max_allowed_unit_risk)
             stop_loss = round(max(1.0, entry_price - unit_risk), 2)
         else:
-            sl_pct = self.risk_cfg.get("initial_sl_percent", 0.10)
+            sl_pct = self.risk_cfg.get("initial_sl_percent", 0.12)
             stop_loss = round(entry_price * (1.0 - sl_pct), 2)
             unit_risk = entry_price - stop_loss
         
-        # Target 1: +2.0R to +3.0R (Full exit on 1 lot, 50% partial exit on >=2 lots)
-        target_r = self.risk_cfg.get("partial_exit_r", 2.0)
+        # Target 1: +2.5R to +3.0R (Full exit on 1 lot, 50% partial exit on >=2 lots)
+        target_r = self.risk_cfg.get("partial_exit_r", 2.5)
         target_1 = round(entry_price + (unit_risk * target_r), 2)
 
         # Structural Invalidation Level (3m swing high for CE, swing low for PE)
