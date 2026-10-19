@@ -42,6 +42,8 @@ class SniperILSMEStrategy(BaseStrategy):
         self.trade_cooldown_mins = float(self.cfg.get("trade_cooldown_minutes", 15.0))
         self.max_consecutive_trend_bars = int(self.cfg.get("max_consecutive_trend_bars", 4))
         self.max_vwap_atr_mult = float(self.cfg.get("max_vwap_atr_multiplier", 1.6))
+        self.donchian_lookback_bars = int(self.cfg.get("donchian_lookback_bars", 15))
+        self.donchian_require_or_break = bool(self.cfg.get("donchian_require_or_break", True))
         self.state: Dict[str, Dict[str, Any]] = {}
         for idx in self.active_indices:
             self._init_index_state(idx)
@@ -637,11 +639,20 @@ class SniperILSMEStrategy(BaseStrategy):
                         ema_fast = (b.close * k_fast) + (ema_fast * (1.0 - k_fast))
                         ema_slow = (b.close * k_slow) + (ema_slow * (1.0 - k_slow))
 
-                    # 15m Rolling Range (last 5 closed 3m bars)
-                    prior_5_bars = closed_3m[-6:-1]
-                    d_high = max(b.high for b in prior_5_bars)
-                    d_low = min(b.low for b in prior_5_bars)
+                    # Multi-Bar Rolling Donchian Range (configurable lookback, default 15 bars = 45m)
+                    donch_bars = self.donchian_lookback_bars
+                    if len(closed_3m) < (donch_bars + 1):
+                        return
+                    prior_donch_bars = closed_3m[-(donch_bars + 1):-1]
+                    d_high = max(b.high for b in prior_donch_bars)
+                    d_low = min(b.low for b in prior_donch_bars)
                     curr_bar = closed_3m[-1]
+
+                    # Opening Range filter: block breakout if price is trapped inside Opening Range
+                    or_h = st.get("or_high", 0.0)
+                    or_l = st.get("or_low", 999999.0)
+                    pass_or_bull = (not self.donchian_require_or_break) or (or_h > 0 and curr_bar.close > or_h)
+                    pass_or_bear = (not self.donchian_require_or_break) or (or_l < 999999.0 and curr_bar.close < or_l)
 
                     # Volatility-Normalized Rubber-Band Ceiling (ATR Multiplier with static point fallback)
                     atr_val = self._calculate_atr(token, period=14)
@@ -665,8 +676,11 @@ class SniperILSMEStrategy(BaseStrategy):
                     vwap_dist_bear = vwap - curr_bar.close
                     vwap_dist_bull = curr_bar.close - vwap
 
-                    # Bearish Momentum Expansion: 3m Close breaks 15m low below VWAP with EMA 9 < 21 & displacement
+                    # Bearish Momentum Expansion: 3m Close breaks Donchian low below VWAP with EMA 9 < 21 & outside OR
                     if curr_bar.close < d_low and curr_bar.close < vwap and ema_fast < ema_slow and (min_vd <= vwap_dist_bear <= max_vd):
+                        if not pass_or_bear:
+                            logger.info(f"[STRATEGY] Filtered out Bearish Donchian noise on {underlying}: Price ₹{curr_bar.close:.1f} is inside Opening Range (₹{or_l:.1f} - ₹{or_h:.1f}). Range chop protected.")
+                            return
                         if is_bearish_exhaustion:
                             logger.info(f"[STRATEGY] Blocked Bearish Donchian Breakdown on {underlying}: Climax exhaustion ({self.max_consecutive_trend_bars} consecutive red bars).")
                             return
@@ -682,14 +696,17 @@ class SniperILSMEStrategy(BaseStrategy):
                                 "swing_pts": swing_pts,
                                 "underlying": underlying
                             }
-                            status_msg = f"📉 15m Donchian Trend Breakdown ({underlying} PE): Broke 15m Low ₹{d_low:.1f} (Risk: {swing_pts:.1f} pts, VWAP Dist: {vwap_dist_bear:.1f} <= {max_vd:.1f})"
+                            status_msg = f"📉 {donch_bars*3}m Donchian Trend Breakdown ({underlying} PE): Broke {donch_bars*3}m Low ₹{d_low:.1f} below OR Low (Risk: {swing_pts:.1f} pts, VWAP Dist: {vwap_dist_bear:.1f} <= {max_vd:.1f})"
                             self.state_mgr.set_strategy_status(status_msg)
                             logger.info(f"[STRATEGY] {status_msg}")
                             await self._generate_sniper_signal(underlying, "BUY_PE", curr_bar.close, st["armed_fvg"])
                             st["armed_fvg"] = None
 
-                    # Bullish Momentum Expansion: 3m Close breaks 15m high above VWAP with EMA 9 > 21 & displacement
+                    # Bullish Momentum Expansion: 3m Close breaks Donchian high above VWAP with EMA 9 > 21 & outside OR
                     elif curr_bar.close > d_high and curr_bar.close > vwap and ema_fast > ema_slow and (min_vd <= vwap_dist_bull <= max_vd):
+                        if not pass_or_bull:
+                            logger.info(f"[STRATEGY] Filtered out Bullish Donchian noise on {underlying}: Price ₹{curr_bar.close:.1f} is inside Opening Range (₹{or_l:.1f} - ₹{or_h:.1f}). Range chop protected.")
+                            return
                         if is_bullish_exhaustion:
                             logger.info(f"[STRATEGY] Blocked Bullish Donchian Breakout on {underlying}: Climax exhaustion ({self.max_consecutive_trend_bars} consecutive green bars).")
                             return
@@ -705,7 +722,7 @@ class SniperILSMEStrategy(BaseStrategy):
                                 "swing_pts": swing_pts,
                                 "underlying": underlying
                             }
-                            status_msg = f"📈 15m Donchian Trend Breakout ({underlying} CE): Broke 15m High ₹{d_high:.1f} (Risk: {swing_pts:.1f} pts, VWAP Dist: {vwap_dist_bull:.1f} <= {max_vd:.1f})"
+                            status_msg = f"📈 {donch_bars*3}m Donchian Trend Breakout ({underlying} CE): Broke {donch_bars*3}m High ₹{d_high:.1f} above OR High (Risk: {swing_pts:.1f} pts, VWAP Dist: {vwap_dist_bull:.1f} <= {max_vd:.1f})"
                             self.state_mgr.set_strategy_status(status_msg)
                             logger.info(f"[STRATEGY] {status_msg}")
                             await self._generate_sniper_signal(underlying, "BUY_CE", curr_bar.close, st["armed_fvg"])

@@ -30,6 +30,10 @@ class BacktestEngine:
         tp1_qty_pct: float = 0.50,
         enable_ilsme_sweep: bool = True,
         enable_momentum_breakout: bool = True,
+        enable_trend_pullback: bool = True,
+        donchian_bars: int = 5,
+        donchian_require_or_break: bool = False,
+        donchian_require_htf_ema: bool = False,
         dynamic_compounding: bool = False,
         active_indices: Optional[List[str]] = None,
         slippage_pts_entry: float = 0.80,
@@ -50,6 +54,10 @@ class BacktestEngine:
         self.tp1_qty_pct = tp1_qty_pct
         self.enable_ilsme_sweep = enable_ilsme_sweep
         self.enable_momentum_breakout = enable_momentum_breakout
+        self.enable_trend_pullback = enable_trend_pullback
+        self.donchian_bars = donchian_bars
+        self.donchian_require_or_break = donchian_require_or_break
+        self.donchian_require_htf_ema = donchian_require_htf_ema
         self.dynamic_compounding = dynamic_compounding
         self.active_indices = [x.upper() for x in (active_indices or ["NIFTY", "SENSEX"])]
         self.slippage_pts_entry = slippage_pts_entry
@@ -280,12 +288,12 @@ class BacktestEngine:
                                         "swing_inval": or_l
                                     }
 
-                    # 4. 15-Minute Donchian Trend Breakout Engine
-                    if not st.get("armed_fvg") and not st.get("in_trade") and not in_cooldown and bar_i >= 5:
-                        if ("09:30" <= time_part <= "11:45" or "12:45" <= time_part <= "14:45"):
-                            prior_5 = bars[bar_i-5:bar_i]
-                            d_high = max(b[2] for b in prior_5)
-                            d_low = min(b[3] for b in prior_5)
+                    # 4. Donchian Trend Breakout Engine
+                    if self.enable_trend_pullback and not st.get("armed_fvg") and not st.get("in_trade") and not in_cooldown and bar_i >= self.donchian_bars:
+                        if ("09:30" <= time_part <= "11:15" or "13:30" <= time_part <= "14:45"):
+                            prior_bars = bars[bar_i - self.donchian_bars:bar_i]
+                            d_high = max(b[2] for b in prior_bars)
+                            d_low = min(b[3] for b in prior_bars)
 
                             recent_bars = bars[max(0, bar_i - 20):bar_i + 1]
                             ema9 = recent_bars[0][4]
@@ -304,7 +312,17 @@ class BacktestEngine:
                             is_bear_exhaust = len(prior_trend) >= self.max_consecutive_trend_bars and all(b[4] < b[1] for b in prior_trend)
                             is_bull_exhaust = len(prior_trend) >= self.max_consecutive_trend_bars and all(b[4] > b[1] for b in prior_trend)
 
-                            if c < d_low and c < vwap and ema9 < ema21 and (min_vd <= (vwap - c) <= max_vd) and not is_bear_exhaust:
+                            # Opening Range filter: block breakout if price is trapped inside Opening Range
+                            or_h = st.get("or_high", 1e9)
+                            or_l = st.get("or_low", -1e9)
+                            pass_or_filter_bull = (not self.donchian_require_or_break) or (c > or_h)
+                            pass_or_filter_bear = (not self.donchian_require_or_break) or (c < or_l)
+
+                            # Higher Timeframe EMA filter:
+                            pass_htf_bull = (not self.donchian_require_htf_ema) or (c > ema_val)
+                            pass_htf_bear = (not self.donchian_require_htf_ema) or (c < ema_val)
+
+                            if c < d_low and c < vwap and ema9 < ema21 and (min_vd <= (vwap - c) <= max_vd) and not is_bear_exhaust and pass_or_filter_bear and pass_htf_bear:
                                 swing_pts = max(18.0 if underlying == "NIFTY" else 55.0, d_high - c)
                                 st["armed_fvg"] = {
                                     "source": "TREND_PULLBACK",
@@ -314,7 +332,7 @@ class BacktestEngine:
                                     "swing_inval": d_high,
                                     "swing_pts": swing_pts
                                 }
-                            elif c > d_high and c > vwap and ema9 > ema21 and (min_vd <= (c - vwap) <= max_vd) and not is_bull_exhaust:
+                            elif c > d_high and c > vwap and ema9 > ema21 and (min_vd <= (c - vwap) <= max_vd) and not is_bull_exhaust and pass_or_filter_bull and pass_htf_bull:
                                 swing_pts = max(18.0 if underlying == "NIFTY" else 55.0, c - d_low)
                                 st["armed_fvg"] = {
                                     "source": "TREND_PULLBACK",

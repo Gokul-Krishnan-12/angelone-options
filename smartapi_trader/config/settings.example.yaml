@@ -24,7 +24,7 @@ execution:
   slippage_factor: 0.2
 risk:
   breakeven_mode: STRUCTURAL_SWING_BREAK
-  breakeven_trigger_r: 0.8
+  breakeven_trigger_r: 1.2
   consecutive_loss_limit: 2
   correlation_guard: true
   max_open_positions: 1
@@ -32,7 +32,7 @@ risk:
   dynamic_sl_buffer: true
   expiry_0dte_block_until: '13:00'
   ignore_time_filter_in_paper: false
-  initial_sl_percent: 0.1
+  initial_sl_percent: 0.12
   last_entry_time: '15:00'
   mandatory_square_off: '15:12'
   market_close_time: '15:30'
@@ -46,17 +46,21 @@ risk:
   midday_chop_filter_start: '11:15'
   min_capital_required: 50000.0
   min_sl_buffer_pct: 0.035
-  partial_exit_qty_pct: 0.6
-  partial_exit_r: 1.8
-  risk_per_trade_pct: 0.015
+  partial_exit_qty_pct: 0.5
+  partial_exit_r: 2.5
+  risk_per_trade_pct: 0.018
   stagnation_timeout_mins: 45
   structural_swing_break_confirmation: true
   trail_remainder_swing: true
 strategy:
   active_indices:
   - NIFTY
-  - BANKNIFTY
   - SENSEX
+  enable_ilsme_sweep: true
+  enable_momentum_breakout: true
+  enable_trend_pullback: true
+  donchian_lookback_bars: 15
+  donchian_require_or_break: true
   trade_cooldown_minutes: 15.0
   max_vwap_atr_multiplier: 1.6
   max_consecutive_trend_bars: 4
