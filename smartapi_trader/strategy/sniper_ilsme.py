@@ -296,10 +296,15 @@ class SniperILSMEStrategy(BaseStrategy):
         return start <= now <= end
 
     def _is_market_hours(self) -> bool:
-        """Trading entry window: 09:15 to 15:00 IST. No new setups or signals after 15:00."""
+        """Trading entry window: 09:15 to last_entry_time (default 14:30 IST). No new setups or signals after cutoff."""
         now = ist_time()
         start = time(9, 15)
-        end = time(15, 0)
+        last_entry_str = str(self.risk_cfg.get("last_entry_time", "14:30"))
+        try:
+            eh, em = map(int, last_entry_str.split(":"))
+            end = time(eh, em)
+        except Exception:
+            end = time(14, 30)
         return start <= now <= end
 
     async def on_tick(self, event: TickEvent):

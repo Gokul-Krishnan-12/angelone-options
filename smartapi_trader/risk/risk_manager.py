@@ -149,9 +149,16 @@ class RiskManager:
             self._raise_alert("WARNING", "MiddayChopFilter", f"Order rejected: Midday consolidation window ({start_str}-{end_str} IST).")
             return
 
-        # Strict entry cut-off (15:00 IST) - No new positions entered within 30 min of close
-        if now_time >= time(15, 0):
-            self._raise_alert("WARNING", "EODCutoff", "Order rejected: Past entry cut-off time (15:00 IST). Taking trades after 3:00 PM is restricted due to close risk.")
+        # Strict entry cut-off (configurable, default 14:30 IST) - No new positions entered late in the session
+        last_entry_str = str(self.cfg.get("last_entry_time", "14:30"))
+        try:
+            lh, lm = map(int, last_entry_str.split(":"))
+            entry_cutoff = time(lh, lm)
+        except Exception:
+            entry_cutoff = time(14, 30)
+
+        if now_time >= entry_cutoff:
+            self._raise_alert("WARNING", "EODCutoff", f"Order rejected: Past entry cut-off time ({last_entry_str} IST). Restricting late-day entry due to close and whipsaw risk.")
             return
 
         # 6. Sizing Formulation
