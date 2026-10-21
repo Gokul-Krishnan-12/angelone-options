@@ -25,7 +25,7 @@ class BacktestEngine:
         risk_per_trade_pct: float = 0.015,
         max_trades_per_day: int = 2,
         initial_sl_pct: float = 0.12,
-        be_trigger_r: float = 1.2,
+        be_trigger_r: float = 0.7,
         tp1_r: float = 2.5,
         tp1_qty_pct: float = 0.50,
         enable_ilsme_sweep: bool = True,
@@ -39,8 +39,8 @@ class BacktestEngine:
         slippage_pts_entry: float = 0.80,
         slippage_pts_exit: float = 0.50,
         trade_cooldown_bars: int = 5,
-        max_vwap_distance_nifty: float = 32.0,
-        max_vwap_distance_sensex: float = 90.0,
+        max_vwap_distance_nifty: float = 65.0,
+        max_vwap_distance_sensex: float = 180.0,
         max_consecutive_trend_bars: int = 4,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None
@@ -271,7 +271,12 @@ class BacktestEngine:
 
                             # Dead Chop Volatility Floor Filter
                             if or_rng >= d.get("min_or", 0.0):
-                                if c > or_h and c > vwap and c > ema_val and (c - or_h) <= (or_rng * 0.40):
+                                min_pen = 6.0 if underlying == "NIFTY" else 25.0
+                                candle_rng = max(0.01, h - l)
+                                u_wick = (h - max(b[1], c)) / candle_rng
+                                l_wick = (min(b[1], c) - l) / candle_rng
+
+                                if c >= (or_h + min_pen) and c > vwap and c > ema_val and c > b[1] and u_wick <= 0.35 and (c - or_h) <= (or_rng * 0.40):
                                     st["armed_fvg"] = {
                                         "source": "MOMENTUM_ORB",
                                         "type": "BUY_CE",
@@ -279,7 +284,7 @@ class BacktestEngine:
                                         "bottom": max(or_h, l),
                                         "swing_inval": or_h
                                     }
-                                elif c < or_l and c < vwap and c < ema_val and (or_l - c) <= (or_rng * 0.40):
+                                elif c <= (or_l - min_pen) and c < vwap and c < ema_val and c < b[1] and l_wick <= 0.35 and (or_l - c) <= (or_rng * 0.40):
                                     st["armed_fvg"] = {
                                         "source": "MOMENTUM_ORB",
                                         "type": "BUY_PE",
@@ -305,12 +310,7 @@ class BacktestEngine:
                                 ema21 = (rb[4] * k21) + (ema21 * (1.0 - k21))
 
                             min_vd = 12.0 if underlying == "NIFTY" else 36.0
-                            max_vd = self.max_vwap_distance_nifty if underlying == "NIFTY" else self.max_vwap_distance_sensex
-
-                            # Climax Exhaustion Guard
-                            prior_trend = bars[max(0, bar_i - self.max_consecutive_trend_bars):bar_i]
-                            is_bear_exhaust = len(prior_trend) >= self.max_consecutive_trend_bars and all(b[4] < b[1] for b in prior_trend)
-                            is_bull_exhaust = len(prior_trend) >= self.max_consecutive_trend_bars and all(b[4] > b[1] for b in prior_trend)
+                            base_max_vd = max(self.max_vwap_distance_nifty if underlying == "NIFTY" else self.max_vwap_distance_sensex, 65.0 if underlying == "NIFTY" else 180.0)
 
                             # Opening Range filter: block breakout if price is trapped inside Opening Range
                             or_h = st.get("or_high", 1e9)
@@ -318,11 +318,21 @@ class BacktestEngine:
                             pass_or_filter_bull = (not self.donchian_require_or_break) or (c > or_h)
                             pass_or_filter_bear = (not self.donchian_require_or_break) or (c < or_l)
 
+                            or_dist_bear = max(0.0, vwap - or_l) if or_l > -1e8 else 0.0
+                            or_dist_bull = max(0.0, or_h - vwap) if or_h < 1e8 else 0.0
+                            max_vd_bear = base_max_vd + (or_dist_bear if self.donchian_require_or_break else 0.0)
+                            max_vd_bull = base_max_vd + (or_dist_bull if self.donchian_require_or_break else 0.0)
+
+                            # Climax Exhaustion Guard
+                            prior_trend = bars[max(0, bar_i - self.max_consecutive_trend_bars):bar_i]
+                            is_bear_exhaust = len(prior_trend) >= self.max_consecutive_trend_bars and all(b[4] < b[1] for b in prior_trend)
+                            is_bull_exhaust = len(prior_trend) >= self.max_consecutive_trend_bars and all(b[4] > b[1] for b in prior_trend)
+
                             # Higher Timeframe EMA filter:
                             pass_htf_bull = (not self.donchian_require_htf_ema) or (c > ema_val)
                             pass_htf_bear = (not self.donchian_require_htf_ema) or (c < ema_val)
 
-                            if c < d_low and c < vwap and ema9 < ema21 and (min_vd <= (vwap - c) <= max_vd) and not is_bear_exhaust and pass_or_filter_bear and pass_htf_bear:
+                            if c < d_low and c < vwap and ema9 < ema21 and (min_vd <= (vwap - c) <= max_vd_bear) and not is_bear_exhaust and pass_or_filter_bear and pass_htf_bear:
                                 swing_pts = max(18.0 if underlying == "NIFTY" else 55.0, d_high - c)
                                 st["armed_fvg"] = {
                                     "source": "TREND_PULLBACK",
@@ -332,7 +342,7 @@ class BacktestEngine:
                                     "swing_inval": d_high,
                                     "swing_pts": swing_pts
                                 }
-                            elif c > d_high and c > vwap and ema9 > ema21 and (min_vd <= (c - vwap) <= max_vd) and not is_bull_exhaust and pass_or_filter_bull and pass_htf_bull:
+                            elif c > d_high and c > vwap and ema9 > ema21 and (min_vd <= (c - vwap) <= max_vd_bull) and not is_bull_exhaust and pass_or_filter_bull and pass_htf_bull:
                                 swing_pts = max(18.0 if underlying == "NIFTY" else 55.0, c - d_low)
                                 st["armed_fvg"] = {
                                     "source": "TREND_PULLBACK",
@@ -465,6 +475,20 @@ class BacktestEngine:
                                         realized_gross += (actual_exit - entry_opt) * qty_close
                                         remaining_qty -= qty_close
                                         be_moved = True
+
+                                # Structural Invalidation Check (Failed Breakout Trap Protection):
+                                if fvg.get("source") == "MOMENTUM_ORB":
+                                    is_inval = (trade_type == "BUY_CE" and f_c < (swing_inval - 2.0)) or \
+                                               (trade_type == "BUY_PE" and f_c > (swing_inval + 2.0))
+                                    if is_inval:
+                                        exit_slip = self.slippage_pts_exit * slip_mult
+                                        actual_exit = max(1.0, cur_opt_price - exit_slip)
+                                        exit_price = actual_exit
+                                        exit_time = f_ts
+                                        exit_reason = "Structural Invalidation: Failed Breakout Trap"
+                                        realized_gross += (exit_price - entry_opt) * remaining_qty
+                                        remaining_qty = 0
+                                        break
 
                                 # Stop Loss / Breakeven Stop Trigger
                                 cur_sl = raw_entry_opt if be_moved else sl_opt
