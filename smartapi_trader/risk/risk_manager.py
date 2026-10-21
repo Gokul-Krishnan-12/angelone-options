@@ -43,7 +43,7 @@ class RiskManager:
         self.max_drawdown_pct = self.cfg.get("max_daily_drawdown_pct", 0.03) # 3.0%
         self.max_trades = self.cfg.get("max_trades_per_day", 2)
         self.consecutive_loss_limit = self.cfg.get("consecutive_loss_limit", 2)
-        self.be_trigger_r = self.cfg.get("breakeven_trigger_r", 1.2)
+        self.be_trigger_r = self.cfg.get("breakeven_trigger_r", 0.7)
         self.tp1_r = self.cfg.get("partial_exit_r", 2.5)
         self.tp2_r = self.cfg.get("target_2_r", 3.0)                    # Target 2 (Full exit for runner at +3.0R)
         self.tp1_qty_pct = self.cfg.get("partial_exit_qty_pct", 0.50)
@@ -357,6 +357,27 @@ class RiskManager:
                 await self._exit_position(pos, ltp, "Stop-Loss Hit")
                 continue
 
+            # Structural Invalidation Check (Failed Breakout Trap Protection):
+            # If trade was entered on Momentum Breakout and underlying spot reverses back across the breakout level:
+            strat_name = getattr(pos, "strategy_name", "")
+            swing_level = getattr(pos, "swing_invalidation_level", 0.0)
+            if swing_level > 0 and "Breakout" in strat_name:
+                spot = self.state_mgr.spot_levels.get(pos.underlying, {}).get("spot", 0.0)
+                if spot > 0:
+                    is_invalidated = False
+                    if pos.option_type == "CE" and spot < (swing_level - 2.0):
+                        is_invalidated = True
+                    elif pos.option_type == "PE" and spot > (swing_level + 2.0):
+                        is_invalidated = True
+                    if is_invalidated:
+                        logger.warning(
+                            f"[RISK] ⚠️ STRUCTURAL BREAKOUT INVALIDATION for {symbol} ({pos.underlying}): "
+                            f"Spot ₹{spot:.2f} failed breakout and broke back across invalidation boundary ₹{swing_level:.2f}. "
+                            f"Liquidating position immediately to prevent trap stop-out."
+                        )
+                        await self._exit_position(pos, ltp, "Structural Invalidation: Failed Breakout Trap")
+                        continue
+
             # Stagnation / Time-Decay Exit (Mandatory 15-min check):
             # If open position fails to displace to at least +0.5R within 15 mins (5x 3m candles), trigger market exit
             entry_ts = getattr(pos, "created_at_ts", None)
@@ -549,6 +570,8 @@ class RiskManager:
         pos.is_open = False
         pnl = round((price - pos.entry_price) * pos.quantity, 2)
         pos.realized_pnl = pnl
+        self.state_mgr.persist_position(pos)
+        await self.bus.publish(pos)
         
         exit_order = OrderEvent(
             order_id=f"ORD_EXIT_FULL_{int(datetime.now().timestamp() * 1000)}",

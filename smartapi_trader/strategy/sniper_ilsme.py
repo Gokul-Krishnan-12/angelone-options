@@ -571,11 +571,36 @@ class SniperILSMEStrategy(BaseStrategy):
                     # Opening range is too narrow / low-volatility chop regime
                     return
 
+                # Institutional Penetration Buffer: require minimum penetration past OR extremes to avoid false breakout traps
+                min_penetration = float(self.cfg.get(f"orb_min_penetration_{underlying.lower()}", 6.0 if underlying == "NIFTY" else (25.0 if underlying == "SENSEX" else 20.0)))
+
+                # Volume Expansion Filter: Require breakout bar volume >= volume_expansion_multiplier * 20-bar SMA
+                require_vol = bool(self.cfg.get("require_volume_expansion", True))
+                vol_mult = float(self.cfg.get("volume_expansion_multiplier", 1.25))
+                vol_bars = [b.volume for b in closed_3m[-20:-1] if hasattr(b, 'volume') and b.volume > 0]
+                avg_vol = (sum(vol_bars) / len(vol_bars)) if vol_bars else 0
+
+                # Candle Anatomy: Ensure directional body and avoid fading heavy wick rejections
+                candle_rng = max(0.01, bar.high - bar.low)
+                upper_wick = (bar.high - max(bar.open, bar.close)) / candle_rng
+                lower_wick = (min(bar.open, bar.close) - bar.low) / candle_rng
+
                 # True Crossover Requirement: Check previous 3m closed candle
                 prev_closed = c2.close
 
-                # Bullish Breakout: Previous bar was <= OR High, current bar closes > OR High + Close > VWAP
-                if prev_closed <= or_h and bar.close > or_h and bar.close > vwap and (bar.close - or_h) <= (or_rng * 0.40):
+                # Bullish Breakout: Previous bar was <= OR High, current bar closes > OR High + Buffer + Close > VWAP
+                if (
+                    prev_closed <= or_h
+                    and bar.close >= (or_h + min_penetration)
+                    and bar.close > vwap
+                    and bar.close > bar.open  # Bullish candle body
+                    and upper_wick <= 0.35    # Rejection wick <= 35%
+                    and (bar.close - or_h) <= (or_rng * 0.40)
+                ):
+                    if require_vol and avg_vol > 0 and bar.volume < (avg_vol * vol_mult):
+                        logger.info(f"[STRATEGY] Filtered low-volume Bullish ORB on {underlying}: Vol {bar.volume} < {avg_vol * vol_mult:.0f}. Institutional participation missing.")
+                        return
+
                     st["or_triggered_today"] = True
                     st["armed_fvg"] = {
                         "source": "MOMENTUM_ORB",
@@ -586,15 +611,26 @@ class SniperILSMEStrategy(BaseStrategy):
                         "displacement_high": bar.high,
                         "underlying": underlying
                     }
-                    status_msg = f"🚀 Momentum ORB Formed ({underlying} Call): Fresh Breakout above OR High ₹{or_h:.2f}"
+                    status_msg = f"🚀 Momentum ORB Formed ({underlying} Call): Fresh Breakout above OR High ₹{or_h:.2f} (+{bar.close - or_h:.1f} pts, Vol: {bar.volume})"
                     self.state_mgr.set_strategy_status(status_msg)
                     logger.info(f"[STRATEGY] {status_msg}")
                     # Direct execution on momentum bar
                     await self._generate_sniper_signal(underlying, "BUY_CE", bar.close, st["armed_fvg"])
                     st["armed_fvg"] = None
 
-                # Bearish Breakdown: Previous bar was >= OR Low, current bar closes < OR Low + Close < VWAP
-                elif prev_closed >= or_l and bar.close < or_l and bar.close < vwap and (or_l - bar.close) <= (or_rng * 0.40):
+                # Bearish Breakdown: Previous bar was >= OR Low, current bar closes < OR Low - Buffer + Close < VWAP
+                elif (
+                    prev_closed >= or_l
+                    and bar.close <= (or_l - min_penetration)
+                    and bar.close < vwap
+                    and bar.close < bar.open  # Bearish candle body
+                    and lower_wick <= 0.35    # Rejection wick <= 35%
+                    and (or_l - bar.close) <= (or_rng * 0.40)
+                ):
+                    if require_vol and avg_vol > 0 and bar.volume < (avg_vol * vol_mult):
+                        logger.info(f"[STRATEGY] Filtered low-volume Bearish ORB on {underlying}: Vol {bar.volume} < {avg_vol * vol_mult:.0f}. Institutional participation missing.")
+                        return
+
                     st["or_triggered_today"] = True
                     st["armed_fvg"] = {
                         "source": "MOMENTUM_ORB",
@@ -605,7 +641,7 @@ class SniperILSMEStrategy(BaseStrategy):
                         "displacement_low": bar.low,
                         "underlying": underlying
                     }
-                    status_msg = f"🚀 Momentum ORB Formed ({underlying} Put): Fresh Breakdown below OR Low ₹{or_l:.2f}"
+                    status_msg = f"🚀 Momentum ORB Formed ({underlying} Put): Fresh Breakdown below OR Low ₹{or_l:.2f} (-{or_l - bar.close:.1f} pts, Vol: {bar.volume})"
                     self.state_mgr.set_strategy_status(status_msg)
                     logger.info(f"[STRATEGY] {status_msg}")
                     # Direct execution on momentum bar
@@ -654,16 +690,18 @@ class SniperILSMEStrategy(BaseStrategy):
                     pass_or_bull = (not self.donchian_require_or_break) or (or_h > 0 and curr_bar.close > or_h)
                     pass_or_bear = (not self.donchian_require_or_break) or (or_l < 999999.0 and curr_bar.close < or_l)
 
-                    # Volatility-Normalized Rubber-Band Ceiling (ATR Multiplier with static point fallback)
+                    # Volatility-Normalized Rubber-Band Ceiling (ATR Multiplier with structural OR displacement adaptation)
                     atr_val = self._calculate_atr(token, period=14)
                     min_vd = 12.0 if underlying == "NIFTY" else (36.0 if underlying == "SENSEX" else 25.0)
-                    default_max_vd = 32.0 if underlying == "NIFTY" else (90.0 if underlying == "SENSEX" else 65.0)
+                    default_max_vd = 65.0 if underlying == "NIFTY" else (180.0 if underlying == "SENSEX" else 130.0)
                     configured_max_vd = float(self.cfg.get(f"max_vwap_distance_{underlying.lower()}", default_max_vd))
                     
-                    if atr_val > 1.0:
-                        max_vd = max(min_vd * 1.5, min(configured_max_vd * 1.5, atr_val * self.max_vwap_atr_mult))
-                    else:
-                        max_vd = configured_max_vd
+                    # Adapt maximum VWAP distance if requiring OR breakout so structural expansion outside wide OR is not blocked
+                    or_dist_bear = max(0.0, vwap - or_l) if (or_l < 999999.0 and self.donchian_require_or_break) else 0.0
+                    or_dist_bull = max(0.0, or_h - vwap) if (or_h > 0.0 and self.donchian_require_or_break) else 0.0
+                    base_max_vd = max(configured_max_vd, atr_val * self.max_vwap_atr_mult if atr_val > 1.0 else configured_max_vd)
+                    max_vd_bear = base_max_vd + or_dist_bear
+                    max_vd_bull = base_max_vd + or_dist_bull
 
                     min_b = 5.0 if underlying == "NIFTY" else (15.0 if underlying == "SENSEX" else 10.0)
 
@@ -677,7 +715,7 @@ class SniperILSMEStrategy(BaseStrategy):
                     vwap_dist_bull = curr_bar.close - vwap
 
                     # Bearish Momentum Expansion: 3m Close breaks Donchian low below VWAP with EMA 9 < 21 & outside OR
-                    if curr_bar.close < d_low and curr_bar.close < vwap and ema_fast < ema_slow and (min_vd <= vwap_dist_bear <= max_vd):
+                    if curr_bar.close < d_low and curr_bar.close < vwap and ema_fast < ema_slow and (min_vd <= vwap_dist_bear <= max_vd_bear):
                         if not pass_or_bear:
                             logger.info(f"[STRATEGY] Filtered out Bearish Donchian noise on {underlying}: Price ₹{curr_bar.close:.1f} is inside Opening Range (₹{or_l:.1f} - ₹{or_h:.1f}). Range chop protected.")
                             return
@@ -696,14 +734,14 @@ class SniperILSMEStrategy(BaseStrategy):
                                 "swing_pts": swing_pts,
                                 "underlying": underlying
                             }
-                            status_msg = f"📉 {donch_bars*3}m Donchian Trend Breakdown ({underlying} PE): Broke {donch_bars*3}m Low ₹{d_low:.1f} below OR Low (Risk: {swing_pts:.1f} pts, VWAP Dist: {vwap_dist_bear:.1f} <= {max_vd:.1f})"
+                            status_msg = f"📉 {donch_bars*3}m Donchian Trend Breakdown ({underlying} PE): Broke {donch_bars*3}m Low ₹{d_low:.1f} below OR Low (Risk: {swing_pts:.1f} pts, VWAP Dist: {vwap_dist_bear:.1f} <= {max_vd_bear:.1f})"
                             self.state_mgr.set_strategy_status(status_msg)
                             logger.info(f"[STRATEGY] {status_msg}")
                             await self._generate_sniper_signal(underlying, "BUY_PE", curr_bar.close, st["armed_fvg"])
                             st["armed_fvg"] = None
 
                     # Bullish Momentum Expansion: 3m Close breaks Donchian high above VWAP with EMA 9 > 21 & outside OR
-                    elif curr_bar.close > d_high and curr_bar.close > vwap and ema_fast > ema_slow and (min_vd <= vwap_dist_bull <= max_vd):
+                    elif curr_bar.close > d_high and curr_bar.close > vwap and ema_fast > ema_slow and (min_vd <= vwap_dist_bull <= max_vd_bull):
                         if not pass_or_bull:
                             logger.info(f"[STRATEGY] Filtered out Bullish Donchian noise on {underlying}: Price ₹{curr_bar.close:.1f} is inside Opening Range (₹{or_l:.1f} - ₹{or_h:.1f}). Range chop protected.")
                             return
@@ -722,7 +760,7 @@ class SniperILSMEStrategy(BaseStrategy):
                                 "swing_pts": swing_pts,
                                 "underlying": underlying
                             }
-                            status_msg = f"📈 {donch_bars*3}m Donchian Trend Breakout ({underlying} CE): Broke {donch_bars*3}m High ₹{d_high:.1f} above OR High (Risk: {swing_pts:.1f} pts, VWAP Dist: {vwap_dist_bull:.1f} <= {max_vd:.1f})"
+                            status_msg = f"📈 {donch_bars*3}m Donchian Trend Breakout ({underlying} CE): Broke {donch_bars*3}m High ₹{d_high:.1f} above OR High (Risk: {swing_pts:.1f} pts, VWAP Dist: {vwap_dist_bull:.1f} <= {max_vd_bull:.1f})"
                             self.state_mgr.set_strategy_status(status_msg)
                             logger.info(f"[STRATEGY] {status_msg}")
                             await self._generate_sniper_signal(underlying, "BUY_CE", curr_bar.close, st["armed_fvg"])
@@ -904,13 +942,18 @@ class SniperILSMEStrategy(BaseStrategy):
         target_r = self.risk_cfg.get("partial_exit_r", 2.5)
         target_1 = round(entry_price + (unit_risk * target_r), 2)
 
-        # Structural Invalidation Level (3m swing high for CE, swing low for PE)
-        swing_inval = fvg.get("displacement_high" if signal_type == "BUY_CE" else "displacement_low", 0.0)
+        # Structural Invalidation Level:
+        # For ORB setups: drop back below OR High (for CE) or rise back above OR Low (for PE) is invalidation.
+        # For Donchian & ILSME: displacement swing level.
+        if strat_source == "MOMENTUM_ORB":
+            swing_inval = fvg.get("displacement_low" if signal_type == "BUY_CE" else "displacement_high", 0.0)
+        else:
+            swing_inval = fvg.get("displacement_high" if signal_type == "BUY_CE" else "displacement_low", 0.0)
 
         # Human readable reason & strat name
         if strat_source == "TREND_PULLBACK":
-            strat_label = "Trend Breakdown"
-            reason_text = f"Trend Expansion: {underlying} Breakdown below VWAP & EMA9/21"
+            strat_label = "Trend Breakout" if "CE" in signal_type else "Trend Breakdown"
+            reason_text = f"Trend Expansion: {underlying} {'Breakout above' if 'CE' in signal_type else 'Breakdown below'} VWAP & EMA9/21"
         elif strat_source == "MOMENTUM_ORB":
             strat_label = "Momentum Breakout"
             reason_text = f"Momentum ORB Breakout on {underlying}"
