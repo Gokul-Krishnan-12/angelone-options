@@ -167,19 +167,28 @@ class RiskManager:
         lot_size = signal.lot_size
         risk_per_lot = unit_risk * lot_size
 
-        # Enforce cumulative open risk <= max daily drawdown threshold (3.0% of equity)
+        # Enforce cumulative risk (already realized losses today + active open risk + new trade risk)
+        # does not exceed the hard maximum daily drawdown budget (e.g. 3.0% of day's starting capital).
+        base_starting_capital = (
+            self.state_mgr.paper_starting_capital
+            if is_paper
+            else (self.state_mgr.starting_equity if self.state_mgr.starting_equity > 0 else equity)
+        )
+        max_daily_loss_budget = base_starting_capital * self.max_drawdown_pct
+        today_realized_loss = abs(min(0.0, self.state_mgr.paper_net_pnl if is_paper else self.state_mgr.net_pnl))
+
         current_open_risk = sum(
             (max(0.0, p.entry_price - p.stop_loss) if p.stop_loss > 0 else (p.entry_price * 0.12)) * p.quantity
             for p in open_positions
         )
-        max_tolerable_risk = equity * self.max_drawdown_pct
-        remaining_risk_budget = max(0.0, max_tolerable_risk - current_open_risk)
+        remaining_risk_budget = max(0.0, max_daily_loss_budget - today_realized_loss - current_open_risk)
 
-        if (current_open_risk + risk_per_lot) > max_tolerable_risk:
+        if (current_open_risk + risk_per_lot + today_realized_loss) > max_daily_loss_budget:
             self._raise_alert(
                 "WARNING",
                 "CumulativeRiskExceeded",
-                f"Order rejected: Combined open risk (₹{current_open_risk + risk_per_lot:.2f}) exceeds max daily drawdown limit (₹{max_tolerable_risk:.2f}). Required single-lot risk: ₹{risk_per_lot:.2f}, remaining risk budget: ₹{remaining_risk_budget:.2f}."
+                f"Order rejected: Single-lot risk (₹{risk_per_lot:.2f}) exceeds remaining daily drawdown headroom (₹{remaining_risk_budget:.2f}). "
+                f"Max daily budget: ₹{max_daily_loss_budget:.2f}, Realized loss today: ₹{today_realized_loss:.2f}, Open risk: ₹{current_open_risk:.2f}."
             )
             return
 
@@ -187,15 +196,18 @@ class RiskManager:
         lots = math.floor(effective_capital_at_risk / risk_per_lot)
 
         if lots < 1:
-            # Allow minimum 1 lot for both REAL and PAPER if available margin covers the contract
-            # and combined open risk does not exceed the maximum daily drawdown limit (3.0% of equity)
+            # Allow minimum 1 lot only if available margin covers the contract
+            # AND the single lot risk fits strictly within the remaining daily drawdown headroom
             margin_req = signal.entry_price * lot_size
-            if margin_req <= available_margin and (current_open_risk + risk_per_lot) <= max_tolerable_risk:
+            if margin_req <= available_margin and (risk_per_lot <= remaining_risk_budget):
                 lots = 1
-                logger.info(f"[RISK] Minimum 1 lot permitted for {signal.underlying} (Margin: ₹{margin_req:.2f} <= ₹{available_margin:.2f}, Combined Risk: ₹{current_open_risk + risk_per_lot:.2f} <= ₹{max_tolerable_risk:.2f}).")
+                logger.info(
+                    f"[RISK] Minimum 1 lot permitted for {signal.underlying} "
+                    f"(Margin: ₹{margin_req:.2f} <= ₹{available_margin:.2f}, Risk: ₹{risk_per_lot:.2f} <= Headroom: ₹{remaining_risk_budget:.2f})."
+                )
             else:
-                reason = "Margin insufficient" if margin_req > available_margin else f"Single lot risk (₹{risk_per_lot:.2f}) exceeds available risk budget (₹{remaining_risk_budget:.2f})"
-                self._raise_alert("WARNING", "InsufficientRiskCapital", f"Order rejected: {reason}. Required: ₹{margin_req:.2f}, Available: ₹{available_margin:.2f}.")
+                reason = "Margin insufficient" if margin_req > available_margin else f"Single lot risk (₹{risk_per_lot:.2f}) exceeds remaining daily drawdown headroom (₹{remaining_risk_budget:.2f})"
+                self._raise_alert("WARNING", "InsufficientRiskCapital", f"Order rejected: {reason}. Required margin: ₹{margin_req:.2f}, Available: ₹{available_margin:.2f}.")
                 return
 
         total_quantity = lots * lot_size
