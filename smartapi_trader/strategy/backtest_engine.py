@@ -26,7 +26,7 @@ class BacktestEngine:
         max_trades_per_day: int = 2,
         initial_sl_pct: float = 0.12,
         be_trigger_r: float = 0.7,
-        tp1_r: float = 2.5,
+        tp1_r: float = 2.0,
         tp1_qty_pct: float = 0.50,
         enable_ilsme_sweep: bool = True,
         enable_momentum_breakout: bool = True,

@@ -44,7 +44,7 @@ class RiskManager:
         self.max_trades = self.cfg.get("max_trades_per_day", 2)
         self.consecutive_loss_limit = self.cfg.get("consecutive_loss_limit", 2)
         self.be_trigger_r = self.cfg.get("breakeven_trigger_r", 0.7)
-        self.tp1_r = self.cfg.get("partial_exit_r", 2.5)
+        self.tp1_r = self.cfg.get("partial_exit_r", 2.0)
         self.tp2_r = self.cfg.get("target_2_r", 3.0)                    # Target 2 (Full exit for runner at +3.0R)
         self.tp1_qty_pct = self.cfg.get("partial_exit_qty_pct", 0.50)
         self.max_slippage_pct = config.get("execution", {}).get("max_slippage_pct", 2.0)

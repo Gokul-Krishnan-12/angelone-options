@@ -943,8 +943,8 @@ class SniperILSMEStrategy(BaseStrategy):
             stop_loss = round(entry_price * (1.0 - sl_pct), 2)
             unit_risk = entry_price - stop_loss
         
-        # Target 1: +2.5R to +3.0R (Full exit on 1 lot, 50% partial exit on >=2 lots)
-        target_r = self.risk_cfg.get("partial_exit_r", 2.5)
+        # Target 1: +2.0R to +3.0R (Full exit on 1 lot, 50% partial exit on >=2 lots)
+        target_r = self.risk_cfg.get("partial_exit_r", 2.0)
         target_1 = round(entry_price + (unit_risk * target_r), 2)
 
         # Structural Invalidation Level:

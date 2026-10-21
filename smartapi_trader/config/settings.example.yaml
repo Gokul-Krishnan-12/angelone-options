@@ -47,7 +47,7 @@ risk:
   min_capital_required: 50000.0
   min_sl_buffer_pct: 0.035
   partial_exit_qty_pct: 0.5
-  partial_exit_r: 2.5
+  partial_exit_r: 2.0
   risk_per_trade_pct: 0.018
   stagnation_timeout_mins: 25
   structural_swing_break_confirmation: true
