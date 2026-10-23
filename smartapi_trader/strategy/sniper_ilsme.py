@@ -444,6 +444,50 @@ class SniperILSMEStrategy(BaseStrategy):
         sample = trs[-period:]
         return sum(sample) / len(sample) if sample else 0.0
 
+    def _check_macro_liquidity_clearance(
+        self,
+        underlying: str,
+        direction: str,
+        bar_close: float,
+        bar_high: float,
+        bar_low: float,
+        min_penetration: float,
+        or_bound: float
+    ) -> tuple[bool, str]:
+        """
+        Universal Macro Liquidity Clearance Guard:
+        Ensures an intraday breakout does not drive directly into an un-cleared
+        macro liquidity wall (Previous Day High or Low) where institutional reversals cluster.
+        """
+        st = self.state.get(underlying, {})
+        pdh = float(st.get("pdh", 0.0))
+        pdl = float(st.get("pdl", 0.0))
+        macro_clearance = float(self.cfg.get(
+            f"orb_macro_clearance_{underlying.lower()}",
+            30.0 if underlying == "NIFTY" else (100.0 if underlying == "SENSEX" else 80.0)
+        ))
+
+        if direction == "BULLISH":
+            if pdh > 0:
+                # Active sweep guard: candle tested PDH but failed to close above with buffer
+                if bar_high >= pdh and bar_close < (pdh + min_penetration):
+                    return False, f"Bar tested PDH (₹{pdh:.2f}) but failed to clear buffer (Close: ₹{bar_close:.2f}). Liquidity sweep risk."
+                # Restricted clearance: OR High is below PDH and distance to PDH is choked
+                if or_bound > 0 and or_bound < pdh and (pdh - or_bound) < macro_clearance:
+                    if bar_close < (pdh + min_penetration):
+                        return False, f"Room between OR High (₹{or_bound:.2f}) and PDH (₹{pdh:.2f}) is choked ({pdh - or_bound:.1f} pts < {macro_clearance:.1f} pts). Awaiting breakout above PDH."
+        elif direction == "BEARISH":
+            if pdl > 0:
+                # Active sweep guard: candle tested PDL but failed to close below with buffer
+                if bar_low <= pdl and bar_close > (pdl - min_penetration):
+                    return False, f"Bar tested PDL (₹{pdl:.2f}) but failed to clear buffer (Close: ₹{bar_close:.2f}). Liquidity sweep risk."
+                # Restricted clearance: OR Low is above PDL and distance to PDL is choked
+                if or_bound < 999999.0 and or_bound > pdl and (or_bound - pdl) < macro_clearance:
+                    if bar_close > (pdl - min_penetration):
+                        return False, f"Room between OR Low (₹{or_bound:.2f}) and PDL (₹{pdl:.2f}) is choked ({or_bound - pdl:.1f} pts < {macro_clearance:.1f} pts). Awaiting breakdown below PDL."
+
+        return True, "OK"
+
     async def _evaluate_3m_micro_displacement(self, underlying: str, bar: BarEvent):
         """
         3-minute Micro Timeframe Logic:
@@ -576,8 +620,11 @@ class SniperILSMEStrategy(BaseStrategy):
                     # Opening range is too narrow / low-volatility chop regime
                     return
 
-                # Institutional Penetration Buffer: require minimum penetration past OR extremes to avoid false breakout traps
-                min_penetration = float(self.cfg.get(f"orb_min_penetration_{underlying.lower()}", 6.0 if underlying == "NIFTY" else (25.0 if underlying == "SENSEX" else 20.0)))
+                # Institutional Penetration Buffer: Volatility-Adaptive (min_penetration or 0.25x ATR)
+                min_pen_cfg = float(self.cfg.get(f"orb_min_penetration_{underlying.lower()}", 6.0 if underlying == "NIFTY" else (25.0 if underlying == "SENSEX" else 20.0)))
+                use_adaptive_pen = bool(self.cfg.get("orb_use_adaptive_atr_buffer", True))
+                atr_cur = self._calculate_atr(token, period=14)
+                min_penetration = max(min_pen_cfg, (atr_cur * 0.25) if (use_adaptive_pen and atr_cur > 1.0) else min_pen_cfg)
 
                 # Volume Expansion Filter: Require breakout bar volume >= volume_expansion_multiplier * 20-bar SMA
                 require_vol = bool(self.cfg.get("require_volume_expansion", True))
@@ -585,8 +632,11 @@ class SniperILSMEStrategy(BaseStrategy):
                 vol_bars = [b.volume for b in closed_3m[-20:-1] if hasattr(b, 'volume') and b.volume > 0]
                 avg_vol = (sum(vol_bars) / len(vol_bars)) if vol_bars else 0
 
-                # Candle Anatomy: Ensure directional body and avoid fading heavy wick rejections
+                # Candle Anatomy & Body Quality Ratio: Ensure directional impulse body (>= 50% of range)
                 candle_rng = max(0.01, bar.high - bar.low)
+                candle_body = abs(bar.close - bar.open)
+                body_ratio = candle_body / candle_rng
+                min_body_ratio = float(self.cfg.get("orb_min_body_ratio", 0.50))
                 upper_wick = (bar.high - max(bar.open, bar.close)) / candle_rng
                 lower_wick = (min(bar.open, bar.close) - bar.low) / candle_rng
 
@@ -602,6 +652,13 @@ class SniperILSMEStrategy(BaseStrategy):
                     and upper_wick <= 0.35    # Rejection wick <= 35%
                     and (bar.close - or_h) <= (or_rng * 0.40)
                 ):
+                    clear_bull, reason_bull = self._check_macro_liquidity_clearance(underlying, "BULLISH", bar.close, bar.high, bar.low, min_penetration, or_h)
+                    if not clear_bull:
+                        logger.info(f"[STRATEGY] Filtered out Bullish ORB on {underlying}: {reason_bull}")
+                        return
+                    if body_ratio < min_body_ratio:
+                        logger.info(f"[STRATEGY] Filtered weak-bodied Bullish ORB on {underlying}: Body ratio {body_ratio:.1%} < {min_body_ratio:.0%}. Lacks institutional impulse.")
+                        return
                     if require_vol and avg_vol > 0 and bar.volume < (avg_vol * vol_mult):
                         logger.info(f"[STRATEGY] Filtered low-volume Bullish ORB on {underlying}: Vol {bar.volume} < {avg_vol * vol_mult:.0f}. Institutional participation missing.")
                         return
@@ -632,6 +689,13 @@ class SniperILSMEStrategy(BaseStrategy):
                     and lower_wick <= 0.35    # Rejection wick <= 35%
                     and (or_l - bar.close) <= (or_rng * 0.40)
                 ):
+                    clear_bear, reason_bear = self._check_macro_liquidity_clearance(underlying, "BEARISH", bar.close, bar.high, bar.low, min_penetration, or_l)
+                    if not clear_bear:
+                        logger.info(f"[STRATEGY] Filtered out Bearish ORB on {underlying}: {reason_bear}")
+                        return
+                    if body_ratio < min_body_ratio:
+                        logger.info(f"[STRATEGY] Filtered weak-bodied Bearish ORB on {underlying}: Body ratio {body_ratio:.1%} < {min_body_ratio:.0%}. Lacks institutional impulse.")
+                        return
                     if require_vol and avg_vol > 0 and bar.volume < (avg_vol * vol_mult):
                         logger.info(f"[STRATEGY] Filtered low-volume Bearish ORB on {underlying}: Vol {bar.volume} < {avg_vol * vol_mult:.0f}. Institutional participation missing.")
                         return
@@ -724,6 +788,10 @@ class SniperILSMEStrategy(BaseStrategy):
                         if not pass_or_bear:
                             logger.info(f"[STRATEGY] Filtered out Bearish Donchian noise on {underlying}: Price ₹{curr_bar.close:.1f} is inside Opening Range (₹{or_l:.1f} - ₹{or_h:.1f}). Range chop protected.")
                             return
+                        clear_bear, reason_bear = self._check_macro_liquidity_clearance(underlying, "BEARISH", curr_bar.close, curr_bar.high, curr_bar.low, min_b, or_l)
+                        if not clear_bear:
+                            logger.info(f"[STRATEGY] Filtered out Bearish Donchian on {underlying}: {reason_bear}")
+                            return
                         if is_bearish_exhaustion:
                             logger.info(f"[STRATEGY] Blocked Bearish Donchian Breakdown on {underlying}: Climax exhaustion ({self.max_consecutive_trend_bars} consecutive red bars).")
                             return
@@ -749,6 +817,10 @@ class SniperILSMEStrategy(BaseStrategy):
                     elif curr_bar.close > d_high and curr_bar.close > vwap and ema_fast > ema_slow and (min_vd <= vwap_dist_bull <= max_vd_bull):
                         if not pass_or_bull:
                             logger.info(f"[STRATEGY] Filtered out Bullish Donchian noise on {underlying}: Price ₹{curr_bar.close:.1f} is inside Opening Range (₹{or_l:.1f} - ₹{or_h:.1f}). Range chop protected.")
+                            return
+                        clear_bull, reason_bull = self._check_macro_liquidity_clearance(underlying, "BULLISH", curr_bar.close, curr_bar.high, curr_bar.low, min_b, or_h)
+                        if not clear_bull:
+                            logger.info(f"[STRATEGY] Filtered out Bullish Donchian on {underlying}: {reason_bull}")
                             return
                         if is_bullish_exhaustion:
                             logger.info(f"[STRATEGY] Blocked Bullish Donchian Breakout on {underlying}: Climax exhaustion ({self.max_consecutive_trend_bars} consecutive green bars).")
