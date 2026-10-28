@@ -41,7 +41,7 @@ export default function Settings({ state, onRefreshBalance }) {
 
   // Strategy Engines & Active Instruments
   const [enableIlsmeSweep, setEnableIlsmeSweep] = useState(true);
-  const [enableMomentumBreakout, setEnableMomentumBreakout] = useState(true);
+  const [enableMomentumBreakout, setEnableMomentumBreakout] = useState(false);
   const [enableTrendPullback, setEnableTrendPullback] = useState(true);
   const [activeIndices, setActiveIndices] = useState(['NIFTY']);
 
