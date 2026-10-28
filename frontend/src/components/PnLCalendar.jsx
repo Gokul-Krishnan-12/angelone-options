@@ -600,6 +600,7 @@ export default function PnLCalendar({ liveTrades = [] }) {
                   <thead>
                     <tr>
                       <th>TRADE ID / TIME</th>
+                      <th>STRATEGY</th>
                       <th>CONTRACT</th>
                       <th>STRIKE</th>
                       <th>TYPE</th>
@@ -615,11 +616,26 @@ export default function PnLCalendar({ liveTrades = [] }) {
                   <tbody>
                     {selectedDayData.trades.map((tr) => {
                       const strikeInfo = getStrikeBadge(tr);
+                      const isSpread = tr.execution_strategy === 'DEBIT_SPREAD' || tr.symbol?.includes('[SPREAD]');
                       return (
                         <tr key={tr.id}>
                           <td>
                             <div className="mono font-semibold" style={{ fontSize: '0.74rem', color: '#fff' }}>{tr.id}</div>
                             <div className="mono text-muted" style={{ fontSize: '0.68rem' }}>{tr.timestamp}</div>
+                          </td>
+                          <td>
+                            <span
+                              className="pill-badge"
+                              style={{
+                                background: isSpread ? 'rgba(168, 85, 247, 0.15)' : 'rgba(56, 189, 248, 0.12)',
+                                color: isSpread ? '#c084fc' : '#38bdf8',
+                                fontSize: '0.68rem',
+                                fontWeight: 700,
+                                padding: '0.15rem 0.45rem',
+                              }}
+                            >
+                              {isSpread ? '🛡️ SPREAD' : '● NAKED'}
+                            </span>
                           </td>
                           <td className="mono font-semibold">{tr.symbol}</td>
                           <td className="mono font-bold" style={{ color: 'var(--accent-blue)' }}>

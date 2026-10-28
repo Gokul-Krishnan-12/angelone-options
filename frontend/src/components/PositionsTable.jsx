@@ -133,6 +133,7 @@ export default function PositionsTable({
             <tr>
               <th>Contract Symbol</th>
               <th>Venue</th>
+              <th>Strategy</th>
               <th>Type</th>
               <th>Lots (Units)</th>
               <th>Entry Price</th>
@@ -147,7 +148,7 @@ export default function PositionsTable({
             {!hasPositions ? (
               <tr>
                 <td
-                  colSpan={10}
+                  colSpan={11}
                   style={{
                     textAlign: 'center',
                     color: 'var(--text-muted)',
@@ -160,6 +161,7 @@ export default function PositionsTable({
             ) : (
               displayedPositions.map((pos) => {
                 const isPaper = pos.is_paper || pos.execution_mode === 'PAPER' || pos.execution_venue === 'PAPER';
+                const isDebitSpread = pos.execution_strategy === 'DEBIT_SPREAD' || pos.symbol?.includes('[SPREAD]');
                 const pnl = parseFloat(pos.unrealized_pnl) || 0;
                 const pnlPct = parseFloat(pos.unrealized_pnl_pct) || 0;
                 const isProfitable = pnl >= 0;
@@ -193,6 +195,25 @@ export default function PositionsTable({
                       >
                         {isPaper ? '📝 PAPER' : '⚡ LIVE'}
                       </span>
+                    </td>
+                    <td>
+                      <span
+                        className="venue-pill"
+                        style={{
+                          background: isDebitSpread ? 'rgba(168, 85, 247, 0.15)' : 'rgba(56, 189, 248, 0.12)',
+                          color: isDebitSpread ? '#c084fc' : '#38bdf8',
+                          border: `1px solid ${isDebitSpread ? 'rgba(168, 85, 247, 0.3)' : 'rgba(56, 189, 248, 0.25)'}`,
+                          fontSize: '0.68rem',
+                          fontWeight: 700,
+                        }}
+                      >
+                        {isDebitSpread ? '🛡️ SPREAD' : '● NAKED'}
+                      </span>
+                      {isDebitSpread && pos.hedge_tradingsymbol && (
+                        <div style={{ fontSize: '0.62rem', color: 'var(--text-dim)', marginTop: '0.2rem' }} title={`Short Leg: ${pos.hedge_tradingsymbol}`}>
+                          Hedge: {pos.hedge_tradingsymbol.split(/(\d{4,5}[CP]E)/i)[1] || pos.hedge_tradingsymbol}
+                        </div>
+                      )}
                     </td>
                     <td>
                       <span

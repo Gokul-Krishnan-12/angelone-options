@@ -491,6 +491,189 @@ class Test10WebEndpointsAndAuthFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cm.exception.status_code, 400)
 
 
+class Test11BrokerReconciliationAndHardenedControls(unittest.IsolatedAsyncioTestCase):
+    """Verifies live order reconciliation, structural invalidation buffer, and hardened backtest metrics."""
+    async def asyncSetUp(self):
+        self.bus = EventBus()
+        self.bus.start()
+        self.state_mgr = StateManager(self.bus, execution_mode="LIVE", initial_capital=100000.0)
+
+    async def asyncTearDown(self):
+        await self.bus.stop()
+
+    async def test_live_order_reconciliation(self):
+        from smartapi_trader.execution.live_smartapi import LiveSmartAPIExecutionEngine
+        engine = LiveSmartAPIExecutionEngine(
+            event_bus=self.bus,
+            state_manager=self.state_mgr,
+            config={"broker": {"api_key": "test", "base_url": "https://test.angelone"}}
+        )
+        # Create a pending local order
+        local_order = OrderEvent(
+            order_id="ORD_12345",
+            symbol="NIFTY26OCT25000CE",
+            token="12345",
+            quantity=65,
+            price=150.0,
+            status="OPEN"
+        )
+        self.state_mgr.orders["ORD_12345"] = local_order
+
+        # Mock get_order_book to return broker status COMPLETE
+        async def mock_get_order_book():
+            return {
+                "status": True,
+                "data": [
+                    {
+                        "orderid": "ORD_12345",
+                        "orderstatus": "complete",
+                        "filledshares": "65",
+                        "averageprice": "151.2"
+                    }
+                ]
+            }
+        engine.get_order_book = mock_get_order_book
+
+        updated = await engine.reconcile_orders()
+        self.assertEqual(len(updated), 1)
+        self.assertEqual(updated[0]["new_status"], "FILLED")
+        self.assertEqual(local_order.status, "FILLED")
+        self.assertEqual(local_order.average_price, 151.2)
+
+    async def test_structural_invalidation_buffer(self):
+        from smartapi_trader.risk.risk_manager import RiskManager
+        cfg = {
+            "risk": {
+                "invalidation_buffer_pts": 12.0,
+                "breakeven_trigger_r": 1.5,
+                "max_open_positions": 1
+            }
+        }
+        rm = RiskManager(self.bus, self.state_mgr, cfg)
+        pos = PositionEvent(
+            symbol="NIFTY26OCT25000CE",
+            token="123",
+            underlying="NIFTY",
+            option_type="CE",
+            quantity=65,
+            entry_price=100.0,
+            current_ltp=100.0,
+            stop_loss=88.0,
+            target_1=130.0,
+            swing_invalidation_level=24800.0,
+            strategy_name="Momentum Breakout",
+            is_open=True
+        )
+        self.state_mgr.positions["NIFTY26OCT25000CE"] = pos
+
+        # Test spot at 24799.0 (only 1 point below 24800 swing level) -> should NOT invalidate with 12pt buffer
+        self.state_mgr.spot_levels["NIFTY"] = {"spot": 24799.0}
+        tick_normal = TickEvent(token="123", ltp=98.0)
+        await rm._on_tick(tick_normal)
+        self.assertTrue(pos.is_open, "Position should NOT be invalidated by a 1-point retest dip!")
+
+        # Test spot at 24785.0 (15 points below 24800 swing level, exceeds 12pt buffer) -> MUST invalidate
+        self.state_mgr.spot_levels["NIFTY"] = {"spot": 24785.0}
+        tick_inval = TickEvent(token="123", ltp=90.0)
+        await rm._on_tick(tick_inval)
+        self.assertFalse(pos.is_open, "Position MUST be invalidated when spot breaches swing level by >12 pts!")
+
+    def test_backtest_metrics_and_expectancy(self):
+        from smartapi_trader.strategy.backtest_engine import BacktestEngine
+        engine = BacktestEngine(starting_capital=50000.0, be_trigger_r=1.5, tp1_r=2.5)
+        res = engine.run(start_date="2026-09-25", end_date="2026-09-25")
+        s = res["summary"]
+        self.assertIn("expectancy_per_trade", s)
+        self.assertIn("payoff_ratio", s)
+        self.assertIn("friction_pct_of_gross", s)
+        self.assertEqual(engine.be_trigger_r, 1.5)
+
+    async def test_debit_spread_order_generation_and_execution(self):
+        from smartapi_trader.risk.risk_manager import RiskManager
+        from smartapi_trader.core.events import EventType
+
+        cfg = {
+            "risk": {
+                "max_open_positions": 2,
+                "risk_per_trade_pct": 0.015,
+                "debit_spread_take_profit_pct": 0.50,
+                "debit_spread_stop_loss_pct": 0.40
+            }
+        }
+        rm = RiskManager(self.bus, self.state_mgr, cfg)
+
+        captured_orders = []
+        async def mock_order_handler(event):
+            captured_orders.append(event)
+
+        self.bus.subscribe(EventType.ORDER_UPDATE, mock_order_handler)
+
+        sig = SignalEvent(
+            signal_id="SIG_TEST_SPREAD",
+            underlying="NIFTY",
+            signal_type="BUY_CE",
+            strike=24850.0,
+            option_type="CE",
+            tradingsymbol="NIFTY26OCT24850CE",
+            symboltoken="111",
+            lot_size=65,
+            entry_price=100.0,
+            stop_loss=80.0,
+            target_1=140.0,
+            execution_strategy="DEBIT_SPREAD",
+            hedge_tradingsymbol="NIFTY26OCT24900CE",
+            hedge_symboltoken="222",
+            hedge_strike=24900.0,
+            hedge_entry_price=60.0,
+            net_debit=40.0,
+            spread_width=50.0
+        )
+
+        await rm._on_signal(sig)
+        await asyncio.sleep(0.05)
+
+        # Must have emitted 2 orders: BUY on ATM long leg and SELL on OTM hedge leg
+        self.assertEqual(len(captured_orders), 2, "Debit spread must emit 2 bracket orders")
+        self.assertEqual(captured_orders[0].transaction_type, "BUY")
+        self.assertEqual(captured_orders[0].symbol, "NIFTY26OCT24850CE")
+        self.assertEqual(captured_orders[1].transaction_type, "SELL")
+        self.assertEqual(captured_orders[1].symbol, "NIFTY26OCT24900CE")
+
+        # Position must be registered with [SPREAD] tag
+        pos_key = "NIFTY26OCT24850CE[SPREAD]"
+        self.assertIn(pos_key, self.state_mgr.positions)
+        pos = self.state_mgr.positions[pos_key]
+        self.assertEqual(pos.execution_strategy, "DEBIT_SPREAD")
+        self.assertEqual(pos.hedge_tradingsymbol, "NIFTY26OCT24900CE")
+        self.assertEqual(pos.net_debit, 40.0)
+
+        # Now test liquidation sequence: BUY hedge back first, then SELL long leg
+        captured_orders.clear()
+        await rm._exit_position(pos, pos.current_ltp, "Take Profit Target Hit")
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(len(captured_orders), 2, "Exiting debit spread must emit 2 closing orders")
+        # Buy back short leg first to prevent margin penalty
+        self.assertEqual(captured_orders[0].transaction_type, "BUY")
+        self.assertEqual(captured_orders[0].symbol, "NIFTY26OCT24900CE")
+        # Sell long leg second
+        self.assertEqual(captured_orders[1].transaction_type, "SELL")
+        self.assertEqual(captured_orders[1].symbol, "NIFTY26OCT24850CE")
+
+    def test_backtest_engine_debit_spread_simulation(self):
+        from smartapi_trader.strategy.backtest_engine import BacktestEngine
+        engine = BacktestEngine(
+            starting_capital=50000.0,
+            execution_structure="DEBIT_SPREAD",
+            debit_spread_take_profit_pct=0.50,
+            debit_spread_stop_loss_pct=0.40
+        )
+        self.assertEqual(engine.execution_structure, "DEBIT_SPREAD")
+        res = engine.run(start_date="2026-09-25", end_date="2026-09-25")
+        self.assertIn("summary", res)
+        self.assertIn("trades", res)
+
+
 def run_all_tests():
     print("=" * 70)
     print("🚀 ANGEL ONE OPTIONS SNIPER - FULL REGRESSION TEST RUNNER")
@@ -508,6 +691,7 @@ def run_all_tests():
     suite.addTests(loader.loadTestsFromTestCase(Test8BacktestEngineSimulation))
     suite.addTests(loader.loadTestsFromTestCase(Test9TelegramBotAndCommands))
     suite.addTests(loader.loadTestsFromTestCase(Test10WebEndpointsAndAuthFlow))
+    suite.addTests(loader.loadTestsFromTestCase(Test11BrokerReconciliationAndHardenedControls))
 
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
@@ -523,3 +707,4 @@ def run_all_tests():
 if __name__ == "__main__":
     success = run_all_tests()
     sys.exit(0 if success else 1)
+

@@ -727,10 +727,15 @@ class SettingsUpdateRequest(BaseModel):
     orb_cutoff_time: Optional[str] = None
     sweep_ttl_minutes: Optional[float] = None
     max_spike_candle_pct: Optional[float] = None
-    require_candle_confirmation: Optional[bool] = None
     fvg_ttl_minutes: Optional[float] = None
     fvg_bounce_confirmation_pts: Optional[float] = None
     max_sl_percent: Optional[float] = None
+    require_candle_confirmation: Optional[bool] = None
+    real_execution_strategy: Optional[str] = None
+    paper_execution_strategies: Optional[List[str]] = None
+    debit_spread_strikes_otm: Optional[int] = None
+    debit_spread_take_profit_pct: Optional[float] = None
+    debit_spread_stop_loss_pct: Optional[float] = None
 
 
 @app.get("/api/settings")
@@ -919,6 +924,35 @@ async def update_settings(req: SettingsUpdateRequest):
             if ctx.risk_manager and hasattr(ctx.risk_manager, "cfg"):
                 ctx.risk_manager.cfg["max_sl_percent"] = float(req.max_sl_percent)
 
+        if req.real_execution_strategy is not None:
+            r_strat = req.real_execution_strategy.strip().upper()
+            if r_strat in ["NAKED", "DEBIT_SPREAD"]:
+                cfg.setdefault("strategy", {})["real_execution_strategy"] = r_strat
+                if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                    ctx.strategy.cfg["real_execution_strategy"] = r_strat
+
+        if req.paper_execution_strategies is not None:
+            p_strats = [s.strip().upper() for s in req.paper_execution_strategies if s.strip().upper() in ["NAKED", "DEBIT_SPREAD"]]
+            if p_strats:
+                cfg.setdefault("strategy", {})["paper_execution_strategies"] = p_strats
+                if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                    ctx.strategy.cfg["paper_execution_strategies"] = p_strats
+
+        if req.debit_spread_strikes_otm is not None:
+            cfg.setdefault("strategy", {})["debit_spread_strikes_otm"] = int(req.debit_spread_strikes_otm)
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["debit_spread_strikes_otm"] = int(req.debit_spread_strikes_otm)
+
+        if req.debit_spread_take_profit_pct is not None:
+            cfg.setdefault("strategy", {})["debit_spread_take_profit_pct"] = float(req.debit_spread_take_profit_pct)
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["debit_spread_take_profit_pct"] = float(req.debit_spread_take_profit_pct)
+
+        if req.debit_spread_stop_loss_pct is not None:
+            cfg.setdefault("strategy", {})["debit_spread_stop_loss_pct"] = float(req.debit_spread_stop_loss_pct)
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["debit_spread_stop_loss_pct"] = float(req.debit_spread_stop_loss_pct)
+
         with open(config_path, "w") as f:
             yaml.safe_dump(cfg, f, default_flow_style=False)
 
@@ -962,6 +996,58 @@ async def update_settings(req: SettingsUpdateRequest):
         return {"status": "success", "message": "Settings updated and saved successfully"}
     except Exception as e:
         logger.error(f"[SETTINGS] Failed to save settings: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+class RealModeStrategyRequest(BaseModel):
+    strategy: str  # "NAKED" or "DEBIT_SPREAD"
+
+class PaperModeStrategyRequest(BaseModel):
+    strategies: List[str]  # e.g. ["NAKED"], ["DEBIT_SPREAD"], or ["NAKED", "DEBIT_SPREAD"]
+
+@app.post("/api/strategy/real_mode")
+async def set_real_strategy_mode(req: RealModeStrategyRequest):
+    """Sets execution structure mode for Real Agent (NAKED or DEBIT_SPREAD)."""
+    import yaml
+    val = req.strategy.strip().upper()
+    if val not in ["NAKED", "DEBIT_SPREAD"]:
+        raise HTTPException(status_code=400, detail="Invalid strategy. Must be NAKED or DEBIT_SPREAD.")
+    config_path = os.path.join(BASE_DIR, "../config/settings.yaml")
+    try:
+        with open(config_path, "r") as f:
+            cfg = yaml.safe_load(f)
+        cfg.setdefault("strategy", {})["real_execution_strategy"] = val
+        with open(config_path, "w") as f:
+            yaml.safe_dump(cfg, f, default_flow_style=False)
+        if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+            ctx.strategy.cfg["real_execution_strategy"] = val
+        if ctx.state_manager:
+            ctx.state_manager.broadcast_state()
+        return {"status": "success", "real_execution_strategy": val}
+    except Exception as e:
+        logger.error(f"[STRATEGY] Error updating real mode strategy: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/strategy/paper_mode")
+async def set_paper_strategy_mode(req: PaperModeStrategyRequest):
+    """Sets execution structure mode(s) for Paper Agent (supports running both simultaneously!)."""
+    import yaml
+    val = [s.strip().upper() for s in req.strategies if s.strip().upper() in ["NAKED", "DEBIT_SPREAD"]]
+    if not val:
+        raise HTTPException(status_code=400, detail="Must select at least one strategy: NAKED or DEBIT_SPREAD.")
+    config_path = os.path.join(BASE_DIR, "../config/settings.yaml")
+    try:
+        with open(config_path, "r") as f:
+            cfg = yaml.safe_load(f)
+        cfg.setdefault("strategy", {})["paper_execution_strategies"] = val
+        with open(config_path, "w") as f:
+            yaml.safe_dump(cfg, f, default_flow_style=False)
+        if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+            ctx.strategy.cfg["paper_execution_strategies"] = val
+        if ctx.state_manager:
+            ctx.state_manager.broadcast_state()
+        return {"status": "success", "paper_execution_strategies": val}
+    except Exception as e:
+        logger.error(f"[STRATEGY] Error updating paper mode strategies: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 class BacktestRunRequest(BaseModel):

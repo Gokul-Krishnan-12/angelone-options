@@ -25,8 +25,8 @@ class BacktestEngine:
         risk_per_trade_pct: float = 0.015,
         max_trades_per_day: int = 2,
         initial_sl_pct: float = 0.12,
-        be_trigger_r: float = 0.7,
-        tp1_r: float = 2.0,
+        be_trigger_r: float = 1.5,
+        tp1_r: float = 2.5,
         tp1_qty_pct: float = 0.50,
         enable_ilsme_sweep: bool = True,
         enable_momentum_breakout: bool = True,
@@ -42,6 +42,10 @@ class BacktestEngine:
         max_vwap_distance_nifty: float = 65.0,
         max_vwap_distance_sensex: float = 180.0,
         max_consecutive_trend_bars: int = 4,
+        execution_structure: str = "NAKED",
+        debit_spread_strikes_otm: int = 1,
+        debit_spread_take_profit_pct: float = 0.50,
+        debit_spread_stop_loss_pct: float = 0.40,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None
     ):
@@ -66,6 +70,10 @@ class BacktestEngine:
         self.max_vwap_distance_nifty = max_vwap_distance_nifty
         self.max_vwap_distance_sensex = max_vwap_distance_sensex
         self.max_consecutive_trend_bars = max_consecutive_trend_bars
+        self.execution_structure = execution_structure.upper()
+        self.debit_spread_strikes_otm = debit_spread_strikes_otm
+        self.debit_spread_take_profit_pct = debit_spread_take_profit_pct
+        self.debit_spread_stop_loss_pct = debit_spread_stop_loss_pct
         self.start_date = start_date
         self.end_date = end_date
 
@@ -398,16 +406,34 @@ class BacktestEngine:
                             else:
                                 raw_entry_opt = round(120.0 + (dte * 6.5), 2)
 
-                            entry_slip = self.slippage_pts_entry * slip_mult
-                            entry_opt = round(raw_entry_opt + entry_slip, 2)
+                            is_spread = (self.execution_structure == "DEBIT_SPREAD")
+                            spread_width = 50.0 if underlying == "NIFTY" else 100.0
 
-                            swing_pts = fvg.get("swing_pts")
-                            if swing_pts and swing_pts > 0:
-                                unit_risk = round(swing_pts * 0.55, 2)
+                            if is_spread:
+                                # Debit Spread: Buy ATM + Sell 1-strike OTM
+                                # Net debit is approximately 45% of ATM premium
+                                raw_entry_opt = round(raw_entry_opt * 0.45, 2)
+                                entry_slip = (self.slippage_pts_entry * 1.4) * slip_mult
+                                entry_opt = round(raw_entry_opt + entry_slip, 2)
+                                max_spread_profit = max(5.0, round(spread_width - raw_entry_opt, 2))
+                                
+                                target_tp1 = round(max_spread_profit * self.debit_spread_take_profit_pct, 2)
+                                target_tp1_price = round(raw_entry_opt + target_tp1, 2)
+                                unit_risk = round(raw_entry_opt * self.debit_spread_stop_loss_pct, 2)
                                 sl_opt = round(max(1.0, raw_entry_opt - unit_risk), 2)
                             else:
-                                sl_opt = round(raw_entry_opt * (1.0 - self.initial_sl_pct), 2)
-                                unit_risk = entry_opt - sl_opt
+                                entry_slip = self.slippage_pts_entry * slip_mult
+                                entry_opt = round(raw_entry_opt + entry_slip, 2)
+
+                                swing_pts = fvg.get("swing_pts")
+                                if swing_pts and swing_pts > 0:
+                                    unit_risk = round(swing_pts * 0.55, 2)
+                                    sl_opt = round(max(1.0, raw_entry_opt - unit_risk), 2)
+                                else:
+                                    sl_opt = round(raw_entry_opt * (1.0 - self.initial_sl_pct), 2)
+                                    unit_risk = entry_opt - sl_opt
+                                target_tp1 = unit_risk * self.tp1_r
+                                target_tp1_price = raw_entry_opt + target_tp1
 
                             capital_at_risk = capital * self.risk_per_trade_pct
                             calc_lots = math.floor(capital_at_risk / (unit_risk * lot_size))
@@ -427,11 +453,10 @@ class BacktestEngine:
                             step = 50 if underlying == "NIFTY" else 100
                             strike_price = int(round(entry_spot / step) * step)
                             opt_label = "CE" if trade_type == "BUY_CE" else "PE"
-                            tradingsymbol = f"{underlying} {strike_price} {opt_label}"
+                            spread_tag = " [DEBIT SPREAD]" if is_spread else ""
+                            tradingsymbol = f"{underlying} {strike_price} {opt_label}{spread_tag}"
 
                             target_be = unit_risk * self.be_trigger_r
-                            target_tp1 = unit_risk * self.tp1_r
-                            target_tp1_price = raw_entry_opt + target_tp1
 
                             be_moved = False
                             partial_sold = False
@@ -441,19 +466,46 @@ class BacktestEngine:
                             exit_time = ts
                             exit_reason = "15:12 EOD Square-Off"
 
+                            trade_bars_held = 0
                             for fwd_i in range(bar_i + 1, len(bars)):
                                 fb = bars[fwd_i]
                                 f_ts, f_h, f_l, f_c = fb[0], fb[2], fb[3], fb[4]
                                 f_time = f_ts[11:16]
+                                trade_bars_held += 1
 
-                                delta = 0.52
+                                # Realistic intraday theta decay: ~0.06% of base option premium per 3m bar
+                                theta_decay = round(raw_entry_opt * 0.0006 * trade_bars_held, 2)
+
                                 spot_change = (f_c - entry_spot) if trade_type == "BUY_CE" else (entry_spot - f_c)
                                 high_spot_change = (f_h - entry_spot) if trade_type == "BUY_CE" else (entry_spot - f_l)
                                 low_spot_change = (f_l - entry_spot) if trade_type == "BUY_CE" else (entry_spot - f_h)
 
-                                cur_opt_price = max(1.0, raw_entry_opt + (spot_change * delta))
-                                peak_opt_price = max(1.0, raw_entry_opt + (high_spot_change * delta))
-                                trough_opt_price = max(1.0, raw_entry_opt + (low_spot_change * delta))
+                                if is_spread:
+                                    # Debit spread net delta: ~0.20, Theta factor: 0.35 (65% theta protection)
+                                    s_decay = round(theta_decay * 0.35, 2)
+                                    cur_opt_price = min(spread_width, max(0.5, round(raw_entry_opt + (spot_change * 0.20) - s_decay, 2)))
+                                    peak_opt_price = min(spread_width, max(0.5, round(raw_entry_opt + (high_spot_change * 0.20) - s_decay, 2)))
+                                    trough_opt_price = min(spread_width, max(0.5, round(raw_entry_opt + (low_spot_change * 0.20) - s_decay, 2)))
+                                else:
+                                    delta = 0.52
+                                    cur_opt_price = max(1.0, round(raw_entry_opt + (spot_change * delta) - theta_decay, 2))
+                                    peak_opt_price = max(1.0, round(raw_entry_opt + (high_spot_change * delta) - theta_decay, 2))
+                                    trough_opt_price = max(1.0, round(raw_entry_opt + (low_spot_change * delta) - theta_decay, 2))
+
+                                cur_sl = raw_entry_opt if be_moved else sl_opt
+
+                                # Conservative intrabar conflict resolution:
+                                # If a single bar touches both target and stop, execute stop-loss first (eliminates look-ahead optimism)
+                                both_breached = (peak_opt_price >= target_tp1_price) and (trough_opt_price <= cur_sl)
+                                if both_breached:
+                                    exit_slip = self.slippage_pts_exit * slip_mult
+                                    actual_exit = max(1.0, cur_sl - exit_slip)
+                                    realized_gross += (actual_exit - entry_opt) * remaining_qty
+                                    remaining_qty = 0
+                                    exit_price = actual_exit
+                                    exit_time = f_ts
+                                    exit_reason = "Trailing Breakeven SL (Intra-bar conflict)" if be_moved else f"Hard Stop-Loss (-{int(self.initial_sl_pct*100)}%)"
+                                    break
 
                                 # Take Target 1 profit
                                 if peak_opt_price >= target_tp1_price and not partial_sold:
@@ -478,20 +530,20 @@ class BacktestEngine:
 
                                 # Structural Invalidation Check (Failed Breakout Trap Protection):
                                 if fvg.get("source") == "MOMENTUM_ORB":
-                                    is_inval = (trade_type == "BUY_CE" and f_c < (swing_inval - 2.0)) or \
-                                               (trade_type == "BUY_PE" and f_c > (swing_inval + 2.0))
+                                    inval_buf = 12.0 if underlying == "NIFTY" else 35.0
+                                    is_inval = (trade_type == "BUY_CE" and f_c < (swing_inval - inval_buf)) or \
+                                               (trade_type == "BUY_PE" and f_c > (swing_inval + inval_buf))
                                     if is_inval:
                                         exit_slip = self.slippage_pts_exit * slip_mult
                                         actual_exit = max(1.0, cur_opt_price - exit_slip)
                                         exit_price = actual_exit
                                         exit_time = f_ts
-                                        exit_reason = "Structural Invalidation: Failed Breakout Trap"
+                                        exit_reason = f"Structural Invalidation: Failed Breakout Trap ({inval_buf:.0f}pt buffer)"
                                         realized_gross += (exit_price - entry_opt) * remaining_qty
                                         remaining_qty = 0
                                         break
 
                                 # Stop Loss / Breakeven Stop Trigger
-                                cur_sl = raw_entry_opt if be_moved else sl_opt
                                 if trough_opt_price <= cur_sl:
                                     exit_slip = self.slippage_pts_exit * slip_mult
                                     actual_exit = max(1.0, cur_sl - exit_slip)
@@ -615,6 +667,12 @@ class BacktestEngine:
         gross_loss = abs(sum(t["net_pnl"] for t in trades if t["net_pnl"] < 0))
         pf = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 99.0
 
+        avg_win_val = round(sum(t["net_pnl"] for t in wins) / len(wins), 2) if wins else 0.0
+        avg_loss_val = round(sum(t["net_pnl"] for t in losses) / len(losses), 2) if losses else 0.0
+        payoff_ratio = round(avg_win_val / abs(avg_loss_val), 2) if avg_loss_val != 0 else 0.0
+        expectancy_per_trade = round(total_net_pnl / len(trades), 2) if trades else 0.0
+        friction_pct = round((total_fees / total_gross * 100.0), 1) if total_gross > 0 else 0.0
+
         return {
             "summary": {
                 "period": f"{dates[0]} to {dates[-1]} ({len(dates)} Sessions)",
@@ -632,9 +690,12 @@ class BacktestEngine:
                 "losses": len(losses),
                 "breakeven": len(bes),
                 "profit_factor": pf,
+                "payoff_ratio": payoff_ratio,
+                "expectancy_per_trade": expectancy_per_trade,
+                "friction_pct_of_gross": friction_pct,
                 "max_drawdown_pct": round(max_drawdown_pct, 2),
-                "avg_win": round(sum(t["net_pnl"] for t in wins) / len(wins), 2) if wins else 0,
-                "avg_loss": round(sum(t["net_pnl"] for t in losses) / len(losses), 2) if losses else 0,
+                "avg_win": avg_win_val,
+                "avg_loss": avg_loss_val,
                 "risk_reward_ratio": f"1 : {self.tp1_r:.1f}",
                 "risk_per_trade": f"{self.risk_per_trade_pct*100:.1f}%",
                 "dynamic_compounding": self.dynamic_compounding

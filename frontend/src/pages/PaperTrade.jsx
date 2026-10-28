@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Play, Pause, Activity, Cpu, ShieldCheck, Zap, Sparkles, PlusCircle, CheckCircle2, Wallet, Trash2, RotateCcw, Target } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Play, Pause, Activity, Cpu, ShieldCheck, Zap, Sparkles, PlusCircle, CheckCircle2, Wallet, Trash2, RotateCcw, Target, Layers, Sliders } from 'lucide-react';
 import { formatINR } from '../components/MetricsHud';
 import PositionsTable from '../components/PositionsTable';
 import PnLCalendar from '../components/PnLCalendar';
@@ -22,6 +22,62 @@ export default function PaperTrade({
   const [customCapital, setCustomCapital] = useState('');
   const [isUpdating, setIsUpdating] = useState(false);
   const [successMsg, setSuccessMsg] = useState('');
+
+  const [paperStrategies, setPaperStrategies] = useState(['NAKED', 'DEBIT_SPREAD']);
+  const [isUpdatingStrategies, setIsUpdatingStrategies] = useState(false);
+  const [strategyMsg, setStrategyMsg] = useState('');
+
+  useEffect(() => {
+    fetch('/api/settings')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.strategy && data.strategy.paper_execution_strategies) {
+          setPaperStrategies(data.strategy.paper_execution_strategies);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleUpdatePaperStrategies = async (newStrats) => {
+    if (!newStrats || newStrats.length === 0) return;
+    setIsUpdatingStrategies(true);
+    setStrategyMsg('');
+    try {
+      const res = await fetch('/api/strategy/paper_mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ strategies: newStrats })
+      });
+      if (res.ok) {
+        setPaperStrategies(newStrats);
+        const label = newStrats.length === 2 ? 'Both Naked & Debit Spread (Simultaneous)' : (newStrats[0] === 'DEBIT_SPREAD' ? 'Debit Spread Only' : 'Naked Buying Only');
+        setStrategyMsg(`Paper execution mode updated to: ${label}!`);
+        setTimeout(() => setStrategyMsg(''), 4000);
+      }
+    } catch (e) {
+      alert('Failed to update paper mode strategies: ' + e);
+    } finally {
+      setIsUpdatingStrategies(false);
+    }
+  };
+
+  const togglePaperStrategy = (strat) => {
+    let next;
+    if (paperStrategies.includes(strat)) {
+      if (paperStrategies.length === 1) {
+        alert('You must have at least one execution strategy selected (Naked or Debit Spread).');
+        return;
+      }
+      next = paperStrategies.filter((s) => s !== strat);
+    } else {
+      next = [...paperStrategies, strat];
+    }
+    handleUpdatePaperStrategies(next);
+  };
+
+  const handleRunBothWays = () => {
+    handleUpdatePaperStrategies(['NAKED', 'DEBIT_SPREAD']);
+  };
 
   const getStrikeDisplay = (tr) => {
     let strike = tr.strike_price || 0;
@@ -209,6 +265,82 @@ export default function PaperTrade({
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--accent-emerald)', fontSize: '0.75rem', marginTop: '0.5rem' }}>
             <CheckCircle2 size={13} />
             <span>{successMsg}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Paper Strategy Mode Selector: Checkboxes + Run Both Ways */}
+      <div className="hud-card" style={{ borderLeft: '3px solid var(--accent-emerald)' }}>
+        <div className="card-header-line">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <Layers size={15} color="var(--accent-emerald)" />
+            <span>Paper Execution Mode (Compare Naked vs. Debit Spread)</span>
+          </div>
+          <span className="mono text-muted">
+            Running: <strong style={{ color: paperStrategies.length === 2 ? 'var(--accent-emerald)' : '#38bdf8' }}>
+              {paperStrategies.includes('NAKED') && paperStrategies.includes('DEBIT_SPREAD')
+                ? 'BOTH SIMULTANEOUSLY (SIDE-BY-SIDE COMPARISON)'
+                : paperStrategies.includes('DEBIT_SPREAD')
+                ? 'DEBIT SPREAD ONLY'
+                : 'NAKED BUYING ONLY'}
+            </strong>
+          </span>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '1rem', marginTop: '0.75rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem', flexWrap: 'wrap' }}>
+            {/* Checkbox 1: Naked Buying */}
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.82rem', color: '#fff' }}>
+              <input
+                type="checkbox"
+                checked={paperStrategies.includes('NAKED')}
+                onChange={() => togglePaperStrategy('NAKED')}
+                disabled={isUpdatingStrategies}
+                style={{ cursor: 'pointer', width: '16px', height: '16px', accentColor: 'var(--accent-orange)' }}
+              />
+              <span>Naked Options Buying (ATM)</span>
+            </label>
+
+            {/* Checkbox 2: Debit Spread */}
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.82rem', color: '#fff' }}>
+              <input
+                type="checkbox"
+                checked={paperStrategies.includes('DEBIT_SPREAD')}
+                onChange={() => togglePaperStrategy('DEBIT_SPREAD')}
+                disabled={isUpdatingStrategies}
+                style={{ cursor: 'pointer', width: '16px', height: '16px', accentColor: 'var(--accent-emerald)' }}
+              />
+              <span>Debit Spread (Buy ATM + Sell OTM)</span>
+            </label>
+
+            {/* Quick Button: Run Both Ways */}
+            <button
+              className="btn-secondary"
+              style={{
+                fontSize: '0.74rem',
+                padding: '0.3rem 0.75rem',
+                borderColor: paperStrategies.length === 2 ? 'var(--accent-emerald)' : 'var(--border-light)',
+                color: paperStrategies.length === 2 ? 'var(--accent-emerald)' : 'var(--text-muted)',
+                background: paperStrategies.length === 2 ? 'rgba(16, 185, 129, 0.12)' : 'transparent',
+                fontWeight: 600,
+                cursor: 'pointer'
+              }}
+              onClick={handleRunBothWays}
+              disabled={isUpdatingStrategies}
+            >
+              ⚡ Run Both Ways Simultaneously
+            </button>
+          </div>
+
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', maxWidth: '420px', lineHeight: '1.4' }}>
+            When running both ways simultaneously, every signal places both a Naked trade and a Debit Spread trade in paper trading. Their P&L and win rate are logged separately so you can see which is more profitable.
+          </div>
+        </div>
+
+        {strategyMsg && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--accent-emerald)', fontSize: '0.75rem', marginTop: '0.5rem' }}>
+            <CheckCircle2 size={13} />
+            <span>{strategyMsg}</span>
           </div>
         )}
       </div>

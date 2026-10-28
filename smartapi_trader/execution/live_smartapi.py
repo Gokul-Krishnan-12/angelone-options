@@ -1,7 +1,7 @@
 import asyncio
 import time
 import aiohttp
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from smartapi_trader.execution.base_engine import ExecutionEngine
 from smartapi_trader.core.events import OrderEvent, FillEvent, EventType
 from smartapi_trader.core.event_bus import EventBus
@@ -218,3 +218,79 @@ class LiveSmartAPIExecutionEngine(ExecutionEngine):
         except Exception as e:
             logger.error(f"[LIVE_SMARTAPI] Exception getting RMS balance: {e}")
             return {"status": False, "message": str(e)}
+
+    async def get_order_book(self) -> Dict[str, Any]:
+        """Fetches Angel One order book to inspect broker-side statuses of placed orders."""
+        await self.rate_limiter.acquire()
+        session = await self._get_session()
+        url = f"{self.base_url}/rest/secure/angelbroking/order/v1/getOrderBook"
+        try:
+            async with session.get(url, headers=self._get_headers(), timeout=10) as resp:
+                return await resp.json()
+        except Exception as e:
+            logger.error(f"[LIVE_SMARTAPI] Exception getting order book: {e}")
+            return {"status": False, "message": str(e)}
+
+    async def get_trade_book(self) -> Dict[str, Any]:
+        """Fetches Angel One trade book with exact executed fill prices and timestamps."""
+        await self.rate_limiter.acquire()
+        session = await self._get_session()
+        url = f"{self.base_url}/rest/secure/angelbroking/order/v1/getTradeBook"
+        try:
+            async with session.get(url, headers=self._get_headers(), timeout=10) as resp:
+                return await resp.json()
+        except Exception as e:
+            logger.error(f"[LIVE_SMARTAPI] Exception getting trade book: {e}")
+            return {"status": False, "message": str(e)}
+
+    async def reconcile_orders(self) -> List[Dict[str, Any]]:
+        """
+        Actively reconciles internal open/pending orders against Angel One's true broker order book.
+        Dispatches FILL, CANCEL, or REJECT events when broker status changes.
+        """
+        res = await self.get_order_book()
+        if not res.get("status") or not isinstance(res.get("data"), list):
+            return []
+        
+        updated = []
+        broker_orders = {str(o.get("orderid")): o for o in res["data"]}
+        
+        for ord_id, local_ord in list(self.state_mgr.orders.items()):
+            if local_ord.status in ["OPEN", "PENDING", "TRIGGER_PENDING"]:
+                b_ord = broker_orders.get(str(ord_id))
+                if not b_ord and local_ord.client_order_id:
+                    b_ord = broker_orders.get(str(local_ord.client_order_id))
+                
+                if b_ord:
+                    b_status = str(b_ord.get("orderstatus", "")).upper()
+                    fill_qty = int(b_ord.get("filledshares", 0))
+                    avg_price = float(b_ord.get("averageprice", 0.0) or b_ord.get("price", 0.0))
+                    
+                    if b_status == "COMPLETE" and local_ord.status != "FILLED":
+                        local_ord.status = "FILLED"
+                        local_ord.filled_quantity = fill_qty
+                        local_ord.average_price = avg_price
+                        fill_event = FillEvent(
+                            fill_id=f"LIVE_FILL_{ord_id}",
+                            order_id=ord_id,
+                            symbol=local_ord.symbol,
+                            token=local_ord.token,
+                            transaction_type=local_ord.transaction_type,
+                            quantity=fill_qty,
+                            price=avg_price,
+                            slippage=round(abs(avg_price - local_ord.price), 2),
+                            execution_venue="LIVE"
+                        )
+                        await self.bus.publish(fill_event)
+                        await self.bus.publish(local_ord)
+                        updated.append({"order_id": ord_id, "new_status": "FILLED", "avg_price": avg_price})
+                        logger.info(f"[LIVE_SMARTAPI] 🔄 Reconciled Order {ord_id} -> FILLED @ ₹{avg_price} (Qty: {fill_qty})")
+                    elif b_status in ["REJECTED", "CANCELLED"] and local_ord.status != b_status:
+                        local_ord.status = b_status
+                        local_ord.rejection_reason = b_ord.get("text", "Broker rejected/cancelled")
+                        await self.bus.publish(local_ord)
+                        updated.append({"order_id": ord_id, "new_status": b_status})
+                        logger.warning(f"[LIVE_SMARTAPI] 🔄 Reconciled Order {ord_id} -> {b_status}: {local_ord.rejection_reason}")
+                        
+        return updated
+

@@ -80,6 +80,13 @@ class SignalEvent(BaseEvent):
     swing_invalidation_level: float = 0.0  # 3m swing break level for structural breakeven confirmation
     strategy_name: str = "ILSME_Sniper"     # "ILSME_REVERSAL", "MOMENTUM_ORB", "TREND_PULLBACK"
     reason: str = ""
+    execution_strategy: str = "NAKED"       # "NAKED" or "DEBIT_SPREAD"
+    hedge_tradingsymbol: str = ""
+    hedge_symboltoken: str = ""
+    hedge_strike: float = 0.0
+    hedge_entry_price: float = 0.0
+    net_debit: float = 0.0
+    spread_width: float = 0.0
 
 @dataclass
 class OrderEvent(BaseEvent):
@@ -147,6 +154,14 @@ class PositionEvent(BaseEvent):
     is_paper: bool = True
     execution_mode: str = "PAPER"
     strategy_name: str = "ILSME_Sniper"
+    execution_strategy: str = "NAKED"       # "NAKED" or "DEBIT_SPREAD"
+    hedge_tradingsymbol: str = ""
+    hedge_symboltoken: str = ""
+    hedge_strike: float = 0.0
+    hedge_entry_price: float = 0.0
+    hedge_current_ltp: float = 0.0
+    net_debit: float = 0.0
+    spread_width: float = 0.0
 
 @dataclass
 class RiskAlertEvent(BaseEvent):

@@ -223,7 +223,8 @@ class StateManager:
                         "total_charges": total_fee,
                         "net_pnl": net_pnl,
                         "is_paper": 1 if is_paper else 0,
-                        "exit_reason": exit_reason
+                        "exit_reason": exit_reason,
+                        "execution_strategy": "DEBIT_SPREAD" if "[SPREAD]" in symbol else "NAKED"
                     }
 
                     self.storage.save_trade(trade_record)
@@ -610,12 +611,32 @@ class StateManager:
         # If tick matches any active open position, update unrealized P&L
         updated = False
         for symbol, pos in list(self.positions.items()):
-            if pos.token == event.token and pos.is_open:
-                pos.current_ltp = event.ltp
-                price_diff = event.ltp - pos.entry_price
-                pos.unrealized_pnl = round(price_diff * pos.quantity, 2)
-                pos.unrealized_pnl_pct = round((price_diff / pos.entry_price) * 100, 2) if pos.entry_price > 0 else 0.0
-                updated = True
+            if not pos.is_open:
+                continue
+            if getattr(pos, "execution_strategy", "NAKED") == "DEBIT_SPREAD":
+                pos_updated = False
+                if pos.token == event.token:
+                    pos.current_ltp = event.ltp
+                    pos_updated = True
+                elif getattr(pos, "hedge_symboltoken", "") == event.token:
+                    pos.hedge_current_ltp = event.ltp
+                    pos_updated = True
+                
+                if pos_updated:
+                    long_p = pos.current_ltp if pos.current_ltp > 0 else pos.entry_price
+                    short_p = pos.hedge_current_ltp if pos.hedge_current_ltp > 0 else getattr(pos, "hedge_entry_price", 0.0)
+                    spread_val = max(0.0, round(long_p - short_p, 2))
+                    net_deb = getattr(pos, "net_debit", pos.entry_price)
+                    pos.unrealized_pnl = round((spread_val - net_deb) * pos.quantity, 2)
+                    pos.unrealized_pnl_pct = round(((spread_val - net_deb) / net_deb) * 100, 2) if net_deb > 0 else 0.0
+                    updated = True
+            else:
+                if pos.token == event.token:
+                    pos.current_ltp = event.ltp
+                    price_diff = event.ltp - pos.entry_price
+                    pos.unrealized_pnl = round(price_diff * pos.quantity, 2)
+                    pos.unrealized_pnl_pct = round((price_diff / pos.entry_price) * 100, 2) if pos.entry_price > 0 else 0.0
+                    updated = True
         
         if updated:
             self._recalculate_portfolio()
@@ -724,9 +745,10 @@ class StateManager:
         if resolved_strike > 100000:
             resolved_strike = resolved_strike % 100000
 
-        # Retrieve strategy name from position if not provided
+        # Retrieve strategy name and execution structure from position if not provided
         pos = self.positions.get(symbol)
         resolved_strat = strategy_name or (getattr(pos, "strategy_name", "ILSME_Sniper") if pos else "ILSME_Sniper")
+        exec_strat = getattr(pos, "execution_strategy", None) or ("DEBIT_SPREAD" if "[SPREAD]" in (symbol or "") else "NAKED")
 
         trade_num = len(self.completed_trades) + len(self.paper_completed_trades) + 1
         is_paper_trade = bool(is_paper or self.execution_mode == "PAPER")
@@ -748,7 +770,8 @@ class StateManager:
             "is_paper": 1 if is_paper_trade else 0,
             "exit_reason": exit_reason,
             "is_partial": 1 if is_partial else 0,
-            "strategy_name": resolved_strat
+            "strategy_name": resolved_strat,
+            "execution_strategy": exec_strat
         }
 
         if is_paper_trade:

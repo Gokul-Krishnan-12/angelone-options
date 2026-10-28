@@ -290,3 +290,56 @@ class InstrumentLoader:
         
         logger.warning(f"[INSTRUMENTS] Could not resolve ATM option for {underlying} @ {spot_price}")
         return None
+
+    def get_otm_option(
+        self,
+        underlying: str,
+        spot_price: float,
+        option_type: str,
+        strikes_otm: int = 1,
+        expiry_index: int = 0
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Resolves the Out-Of-The-Money (OTM) hedge option strike for Debit Spreads.
+        - For CE (Bull Call): Higher strike than ATM (strike > atm_strike)
+        - For PE (Bear Put): Lower strike than ATM (strike < atm_strike)
+        """
+        atm = self.get_atm_option(underlying, spot_price, option_type, expiry_index)
+        if not atm:
+            return None
+
+        atm_strike = float(atm["strike"])
+        target_expiry = str(atm["expiry"])
+        cursor = self.conn.cursor()
+
+        if option_type == "CE":
+            cursor.execute("""
+                SELECT * FROM instruments
+                WHERE name = ? AND expiry = ? AND symbol LIKE '%CE' AND strike > ?
+                ORDER BY strike ASC
+                LIMIT ?
+            """, (underlying, target_expiry, atm_strike, max(1, strikes_otm)))
+        else:
+            cursor.execute("""
+                SELECT * FROM instruments
+                WHERE name = ? AND expiry = ? AND symbol LIKE '%PE' AND strike < ?
+                ORDER BY strike DESC
+                LIMIT ?
+            """, (underlying, target_expiry, atm_strike, max(1, strikes_otm)))
+
+        rows = cursor.fetchall()
+        if rows:
+            best_otm = rows[-1]  # Take the Nth strike OTM
+            return {
+                "symboltoken": str(best_otm["token"]),
+                "tradingsymbol": str(best_otm["symbol"]),
+                "name": str(best_otm["name"]),
+                "strike": float(best_otm["strike"]),
+                "expiry": str(best_otm["expiry"]),
+                "lotsize": int(best_otm["lotsize"]),
+                "exchange": str(best_otm["exch_seg"]),
+                "tick_size": float(best_otm["tick_size"]),
+            }
+
+        logger.warning(f"[INSTRUMENTS] Could not resolve {strikes_otm}-strike OTM {option_type} option for {underlying} @ {spot_price}")
+        return None

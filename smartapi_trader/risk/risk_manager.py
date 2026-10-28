@@ -43,7 +43,7 @@ class RiskManager:
         self.max_drawdown_pct = self.cfg.get("max_daily_drawdown_pct", 0.03) # 3.0%
         self.max_trades = self.cfg.get("max_trades_per_day", 2)
         self.consecutive_loss_limit = self.cfg.get("consecutive_loss_limit", 2)
-        self.be_trigger_r = self.cfg.get("breakeven_trigger_r", 0.7)
+        self.be_trigger_r = self.cfg.get("breakeven_trigger_r", 1.5)
         self.tp1_r = self.cfg.get("partial_exit_r", 2.0)
         self.tp2_r = self.cfg.get("target_2_r", 3.0)                    # Target 2 (Full exit for runner at +3.0R)
         self.tp1_qty_pct = self.cfg.get("partial_exit_qty_pct", 0.50)
@@ -228,25 +228,13 @@ class RiskManager:
 
         # Construct and submit validated order
         strat_name = getattr(signal, "strategy_name", "ILSME_Sniper")
-        order_event = OrderEvent(
-            order_id=f"ORD_{signal.underlying}_{int(datetime.now().timestamp() * 1000)}",
-            symbol=signal.tradingsymbol,
-            token=signal.symboltoken,
-            exchange=signal.exchange,
-            transaction_type="BUY",
-            order_type="LIMIT",
-            product_type="INTRADAY",
-            quantity=total_quantity,
-            price=signal.entry_price,
-            trigger_price=0.0,
-            status="PENDING",
-            variety="NORMAL",
-            strategy_name=strat_name
-        )
-        
+        is_spread = (getattr(signal, "execution_strategy", "NAKED") == "DEBIT_SPREAD")
+        pos_symbol = f"{signal.tradingsymbol}[SPREAD]" if is_spread else signal.tradingsymbol
+        entry_cost = signal.net_debit if is_spread else signal.entry_price
+
         # Save position expectation metadata for multi-stage bracket tracking
         pos_event = PositionEvent(
-            symbol=signal.tradingsymbol,
+            symbol=pos_symbol,
             token=signal.symboltoken,
             underlying=signal.underlying,
             option_type=signal.option_type,
@@ -254,8 +242,8 @@ class RiskManager:
             quantity=total_quantity,
             lot_size=signal.lot_size,
             lots=lots,
-            entry_price=signal.entry_price,
-            current_ltp=signal.entry_price,
+            entry_price=entry_cost,
+            current_ltp=entry_cost,
             stop_loss=signal.stop_loss,
             target_1=signal.target_1,
             exchange=signal.exchange,
@@ -263,13 +251,75 @@ class RiskManager:
             is_open=True,
             is_paper=(self.state_mgr.execution_mode == "PAPER"),
             execution_mode=self.state_mgr.execution_mode,
-            strategy_name=strat_name
+            strategy_name=strat_name,
+            execution_strategy="DEBIT_SPREAD" if is_spread else "NAKED",
+            hedge_tradingsymbol=getattr(signal, "hedge_tradingsymbol", ""),
+            hedge_symboltoken=getattr(signal, "hedge_symboltoken", ""),
+            hedge_strike=getattr(signal, "hedge_strike", 0.0),
+            hedge_entry_price=getattr(signal, "hedge_entry_price", 0.0),
+            hedge_current_ltp=getattr(signal, "hedge_entry_price", 0.0),
+            net_debit=getattr(signal, "net_debit", 0.0),
+            spread_width=getattr(signal, "spread_width", 0.0)
         )
         await self.bus.publish(pos_event)
-        await self.bus.publish(order_event)
 
-        # Immediately place protective Native Exchange Stop-Loss Limit order on broker
-        await self._place_exchange_stop_loss(pos_event)
+        if is_spread:
+            # Order 1: Buy Long ATM leg
+            order_long = OrderEvent(
+                order_id=f"ORD_SPD_L_{signal.underlying}_{int(datetime.now().timestamp() * 1000)}",
+                symbol=signal.tradingsymbol,
+                token=signal.symboltoken,
+                exchange=signal.exchange,
+                transaction_type="BUY",
+                order_type="LIMIT",
+                product_type="INTRADAY",
+                quantity=total_quantity,
+                price=signal.entry_price,
+                trigger_price=0.0,
+                status="PENDING",
+                variety="NORMAL",
+                strategy_name=strat_name,
+                is_paper=(self.state_mgr.execution_mode == "PAPER")
+            )
+            # Order 2: Sell Short OTM hedge leg
+            order_short = OrderEvent(
+                order_id=f"ORD_SPD_S_{signal.underlying}_{int(datetime.now().timestamp() * 1000)}",
+                symbol=signal.hedge_tradingsymbol,
+                token=signal.hedge_symboltoken,
+                exchange=signal.exchange,
+                transaction_type="SELL",
+                order_type="LIMIT",
+                product_type="INTRADAY",
+                quantity=total_quantity,
+                price=signal.hedge_entry_price,
+                trigger_price=0.0,
+                status="PENDING",
+                variety="NORMAL",
+                strategy_name=strat_name,
+                is_paper=(self.state_mgr.execution_mode == "PAPER")
+            )
+            await self.bus.publish(order_long)
+            await self.bus.publish(order_short)
+        else:
+            order_event = OrderEvent(
+                order_id=f"ORD_{signal.underlying}_{int(datetime.now().timestamp() * 1000)}",
+                symbol=signal.tradingsymbol,
+                token=signal.symboltoken,
+                exchange=signal.exchange,
+                transaction_type="BUY",
+                order_type="LIMIT",
+                product_type="INTRADAY",
+                quantity=total_quantity,
+                price=signal.entry_price,
+                trigger_price=0.0,
+                status="PENDING",
+                variety="NORMAL",
+                strategy_name=strat_name,
+                is_paper=(self.state_mgr.execution_mode == "PAPER")
+            )
+            await self.bus.publish(order_event)
+            # Immediately place protective Native Exchange Stop-Loss Limit order on broker
+            await self._place_exchange_stop_loss(pos_event)
 
         if self.notifier:
             self.notifier.notify_trade_entry({
@@ -383,31 +433,32 @@ class RiskManager:
             if swing_level > 0 and "Breakout" in strat_name:
                 spot = self.state_mgr.spot_levels.get(pos.underlying, {}).get("spot", 0.0)
                 if spot > 0:
+                    inval_buf = max(10.0, float(self.cfg.get("invalidation_buffer_pts", 12.0)))
                     is_invalidated = False
-                    if pos.option_type == "CE" and spot < (swing_level - 2.0):
+                    if pos.option_type == "CE" and spot < (swing_level - inval_buf):
                         is_invalidated = True
-                    elif pos.option_type == "PE" and spot > (swing_level + 2.0):
+                    elif pos.option_type == "PE" and spot > (swing_level + inval_buf):
                         is_invalidated = True
                     if is_invalidated:
                         logger.warning(
                             f"[RISK] ⚠️ STRUCTURAL BREAKOUT INVALIDATION for {symbol} ({pos.underlying}): "
-                            f"Spot ₹{spot:.2f} failed breakout and broke back across invalidation boundary ₹{swing_level:.2f}. "
-                            f"Liquidating position immediately to prevent trap stop-out."
+                            f"Spot ₹{spot:.2f} failed breakout and broke back across invalidation boundary ₹{swing_level:.2f} by >{inval_buf:.1f} pts. "
+                            f"Liquidating position to prevent deeper trap loss."
                         )
-                        await self._exit_position(pos, ltp, "Structural Invalidation: Failed Breakout Trap")
+                        await self._exit_position(pos, ltp, f"Structural Invalidation: Breakout Boundary Breached ({inval_buf:.0f}pt)")
                         continue
 
-            # Stagnation / Time-Decay Exit (Mandatory 15-min check):
-            # If open position fails to displace to at least +0.5R within 15 mins (5x 3m candles), trigger market exit
+            # Stagnation / Time-Decay Exit:
+            # If open position is held in negative/flat territory past timeout, exit to prevent severe theta burn
             entry_ts = getattr(pos, "created_at_ts", None)
             if entry_ts is None:
                 pos.created_at_ts = datetime.now().timestamp()
                 entry_ts = pos.created_at_ts
             
             elapsed_mins = (datetime.now().timestamp() - entry_ts) / 60.0
-            stagnation_limit_mins = float(self.cfg.get("stagnation_timeout_mins", 25))
-            if elapsed_mins >= stagnation_limit_mins and profit_points < (unit_risk * 0.5):
-                logger.warning(f"[RISK] ⏳ STAGNATION EXIT TRIGGERED for {symbol}: Position held {elapsed_mins:.1f}m without reaching +0.5R displacement. Liquidating to eliminate theta decay.")
+            stagnation_limit_mins = float(self.cfg.get("stagnation_timeout_mins", 40))
+            if elapsed_mins >= stagnation_limit_mins and profit_points <= 0.0:
+                logger.warning(f"[RISK] ⏳ STAGNATION EXIT TRIGGERED for {symbol}: Position held {elapsed_mins:.1f}m in negative/flat territory. Liquidating to eliminate severe theta decay.")
                 await self._exit_position(pos, ltp, f"Stagnation / Time-Decay Exit ({stagnation_limit_mins:.0f}m)")
                 continue
 
@@ -592,19 +643,59 @@ class RiskManager:
         self.state_mgr.persist_position(pos)
         await self.bus.publish(pos)
         
-        exit_order = OrderEvent(
-            order_id=f"ORD_EXIT_FULL_{int(datetime.now().timestamp() * 1000)}",
-            symbol=pos.symbol,
-            token=pos.token,
-            exchange=getattr(pos, 'exchange', 'NFO'),
-            transaction_type="SELL",
-            order_type="MARKET",
-            quantity=pos.quantity,
-            price=price,
-            status="PENDING",
-            variety="NORMAL",
-            is_paper=(self.state_mgr.execution_mode == "PAPER")
-        )
+        if getattr(pos, "execution_strategy", "NAKED") == "DEBIT_SPREAD":
+            # For debit spread exit:
+            # 1. Buy back the short hedge leg
+            hedge_sym = getattr(pos, "hedge_tradingsymbol", "")
+            hedge_tok = getattr(pos, "hedge_symboltoken", "")
+            hedge_ltp = getattr(pos, "hedge_current_ltp", getattr(pos, "hedge_entry_price", 0.0))
+            if hedge_sym:
+                exit_short_leg = OrderEvent(
+                    order_id=f"ORD_EXIT_SPD_SHORT_{int(datetime.now().timestamp() * 1000)}",
+                    symbol=hedge_sym,
+                    token=hedge_tok,
+                    exchange=getattr(pos, 'exchange', 'NFO'),
+                    transaction_type="BUY",
+                    order_type="MARKET",
+                    quantity=pos.quantity,
+                    price=hedge_ltp,
+                    status="PENDING",
+                    variety="NORMAL",
+                    is_paper=(self.state_mgr.execution_mode == "PAPER")
+                )
+                await self.bus.publish(exit_short_leg)
+
+            # 2. Sell the long ATM leg
+            long_sym = pos.symbol.replace("[SPREAD]", "")
+            exit_long_leg = OrderEvent(
+                order_id=f"ORD_EXIT_SPD_LONG_{int(datetime.now().timestamp() * 1000)}",
+                symbol=long_sym,
+                token=pos.token,
+                exchange=getattr(pos, 'exchange', 'NFO'),
+                transaction_type="SELL",
+                order_type="MARKET",
+                quantity=pos.quantity,
+                price=pos.current_ltp,
+                status="PENDING",
+                variety="NORMAL",
+                is_paper=(self.state_mgr.execution_mode == "PAPER")
+            )
+            await self.bus.publish(exit_long_leg)
+        else:
+            exit_order = OrderEvent(
+                order_id=f"ORD_EXIT_FULL_{int(datetime.now().timestamp() * 1000)}",
+                symbol=pos.symbol,
+                token=pos.token,
+                exchange=getattr(pos, 'exchange', 'NFO'),
+                transaction_type="SELL",
+                order_type="MARKET",
+                quantity=pos.quantity,
+                price=price,
+                status="PENDING",
+                variety="NORMAL",
+                is_paper=(self.state_mgr.execution_mode == "PAPER")
+            )
+            await self.bus.publish(exit_order)
         self.state_mgr.record_completed_trade(
             pnl=pnl,
             entry_price=pos.entry_price,

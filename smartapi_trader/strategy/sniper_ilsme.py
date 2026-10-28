@@ -1038,34 +1038,119 @@ class SniperILSMEStrategy(BaseStrategy):
             strat_label = "ILSME Reversal"
             reason_text = f"Institutional Liquidity Sweep [{fvg.get('bottom', 0):.1f}-{fvg.get('top', 0):.1f}] with 3m MSS across VWAP"
 
-        signal = SignalEvent(
-            signal_id=f"SIG_{underlying}_{int(datetime.now().timestamp())}",
-            underlying=underlying,
-            signal_type=signal_type,
-            strike=option_contract["strike"],
-            option_type=opt_type,
-            expiry=option_contract["expiry"],
-            symboltoken=option_contract["symboltoken"],
-            tradingsymbol=option_contract["tradingsymbol"],
-            exchange=option_contract["exchange"],
-            lot_size=option_contract["lotsize"],
-            entry_price=entry_price,
-            stop_loss=stop_loss,
-            target_1=target_1,
-            fvg_top=fvg.get("top", 0.0),
-            fvg_bottom=fvg.get("bottom", 0.0),
-            sweep_level=st.get("sweep_price", 0.0),
-            swing_invalidation_level=swing_inval,
-            strategy_name=strat_label,
-            reason=reason_text
-        )
+        # Determine execution strategies to run:
+        is_paper = (self.state_mgr.execution_mode == "PAPER")
+        if is_paper:
+            paper_strats = self.cfg.get("paper_execution_strategies", ["NAKED", "DEBIT_SPREAD"])
+            if isinstance(paper_strats, str):
+                paper_strats = [paper_strats]
+            target_strategies = paper_strats if paper_strats else ["NAKED"]
+        else:
+            real_strat = self.cfg.get("real_execution_strategy", "NAKED")
+            target_strategies = [real_strat]
+
+        # 1. Dispatch Naked Signal if selected
+        if "NAKED" in target_strategies:
+            signal_naked = SignalEvent(
+                signal_id=f"SIG_{underlying}_{int(datetime.now().timestamp())}",
+                underlying=underlying,
+                signal_type=signal_type,
+                strike=option_contract["strike"],
+                option_type=opt_type,
+                expiry=option_contract["expiry"],
+                symboltoken=option_contract["symboltoken"],
+                tradingsymbol=option_contract["tradingsymbol"],
+                exchange=option_contract["exchange"],
+                lot_size=option_contract["lotsize"],
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                target_1=target_1,
+                fvg_top=fvg.get("top", 0.0),
+                fvg_bottom=fvg.get("bottom", 0.0),
+                sweep_level=st.get("sweep_price", 0.0),
+                swing_invalidation_level=swing_inval,
+                strategy_name=f"{strat_label} (Naked)",
+                reason=reason_text,
+                execution_strategy="NAKED"
+            )
+            logger.info(f"[STRATEGY] ===> DISPATCHING NAKED SIGNAL [{strat_label}]: {signal_naked.signal_type} {signal_naked.tradingsymbol} Entry=₹{entry_price} SL=₹{stop_loss} T1=₹{target_1} (Structural Level: {swing_inval})")
+            await self.bus.publish(signal_naked)
+
+        # 2. Dispatch Debit Spread Signal if selected
+        if "DEBIT_SPREAD" in target_strategies:
+            strikes_otm = int(self.cfg.get("debit_spread_strikes_otm", 1))
+            hedge_contract = self.loader.get_otm_option(
+                underlying=underlying,
+                spot_price=spot,
+                option_type=opt_type,
+                strikes_otm=strikes_otm,
+                expiry_index=expiry_idx
+            )
+            if hedge_contract:
+                hedge_strike = float(hedge_contract["strike"])
+                if opt_type == "PE":
+                    h_intrinsic = max(0.0, hedge_strike - spot)
+                else:
+                    h_intrinsic = max(0.0, spot - hedge_strike)
+                h_dist = abs(spot - hedge_strike)
+                h_decay = max(0.10, 1.0 - (h_dist / max(100.0, hedge_strike * 0.03)))
+                h_base_premium = max(10.0, round(h_intrinsic + (atm_extrinsic * h_decay * 0.65), 2))
+
+                live_h_ltp = None
+                if self.auth_mgr:
+                    h_exch = hedge_contract.get("exchange") or ("BFO" if underlying == "SENSEX" else "NFO")
+                    h_liq = self.auth_mgr.get_option_liquidity_metrics(
+                        exchange=h_exch,
+                        token=hedge_contract.get("symboltoken", ""),
+                        tradingsymbol=hedge_contract.get("tradingsymbol", "")
+                    )
+                    live_h_ltp = h_liq.get("ltp")
+
+                hedge_entry = round(live_h_ltp, 2) if (live_h_ltp and live_h_ltp > 0) else round(h_base_premium, 2)
+                spread_w = abs(hedge_strike - strike_val)
+                net_deb = max(5.0, round(entry_price - hedge_entry, 2))
+                max_spread_profit = max(5.0, round(spread_w - net_deb, 2))
+
+                spread_tp1_pct = float(self.cfg.get("debit_spread_take_profit_pct", 0.50))
+                spread_sl_pct = float(self.cfg.get("debit_spread_stop_loss_pct", 0.40))
+
+                spread_t1 = round(net_deb + (max_spread_profit * spread_tp1_pct), 2)
+                spread_sl = round(max(1.0, net_deb * (1.0 - spread_sl_pct)), 2)
+
+                signal_spread = SignalEvent(
+                    signal_id=f"SIG_SPD_{underlying}_{int(datetime.now().timestamp())}",
+                    underlying=underlying,
+                    signal_type=signal_type,
+                    strike=option_contract["strike"],
+                    option_type=opt_type,
+                    expiry=option_contract["expiry"],
+                    symboltoken=option_contract["symboltoken"],
+                    tradingsymbol=option_contract["tradingsymbol"],
+                    exchange=option_contract["exchange"],
+                    lot_size=option_contract["lotsize"],
+                    entry_price=entry_price,
+                    stop_loss=spread_sl,
+                    target_1=spread_t1,
+                    fvg_top=fvg.get("top", 0.0),
+                    fvg_bottom=fvg.get("bottom", 0.0),
+                    sweep_level=st.get("sweep_price", 0.0),
+                    swing_invalidation_level=swing_inval,
+                    strategy_name=f"{strat_label} (Debit Spread)",
+                    reason=f"{reason_text} [Debit Spread: Buy {option_contract['strike']} / Sell {hedge_contract['strike']}]",
+                    execution_strategy="DEBIT_SPREAD",
+                    hedge_tradingsymbol=hedge_contract["tradingsymbol"],
+                    hedge_symboltoken=hedge_contract["symboltoken"],
+                    hedge_strike=hedge_strike,
+                    hedge_entry_price=hedge_entry,
+                    net_debit=net_deb,
+                    spread_width=spread_w
+                )
+                logger.info(f"[STRATEGY] ===> DISPATCHING DEBIT SPREAD SIGNAL [{strat_label}]: Buy {signal_spread.tradingsymbol} @ ₹{entry_price} / Sell {hedge_contract['tradingsymbol']} @ ₹{hedge_entry} (Net Debit: ₹{net_deb}, Max Profit: ₹{max_spread_profit})")
+                await self.bus.publish(signal_spread)
 
         self.state[underlying]["in_trade"] = True
         self.state[underlying]["last_signal_time"] = ist_time()
-        self.state_mgr.set_strategy_status(f"Dispatching Signal ({strat_label}): {option_contract['tradingsymbol']}")
-        logger.info(f"[STRATEGY] ===> DISPATCHING SNIPER SIGNAL [{strat_label}]: {signal.signal_type} {signal.tradingsymbol} Entry={entry_price} SL={stop_loss} T1={target_1} (Structural Swing Level: {swing_inval})")
-        
-        await self.bus.publish(signal)
+        self.state_mgr.set_strategy_status(f"Dispatched Signals ({strat_label}): {option_contract['tradingsymbol']}")
 
     async def trigger_test_signal(self, underlying: str = "NIFTY", signal_type: str = "BUY_CE"):
         """Manual test trigger for dashboard interactive testing."""

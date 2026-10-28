@@ -1,5 +1,5 @@
 import React from 'react';
-import { Zap, Pause, Play, ShieldAlert, CheckCircle2, AlertTriangle, Wallet, Lock, Key, ArrowRight, ShieldCheck, AlertCircle } from 'lucide-react';
+import { Zap, Pause, Play, ShieldAlert, CheckCircle2, AlertTriangle, Wallet, Lock, Key, ArrowRight, ShieldCheck, AlertCircle, Sliders, Layers } from 'lucide-react';
 import { formatINR } from '../components/MetricsHud';
 import PositionsTable from '../components/PositionsTable';
 
@@ -16,6 +16,44 @@ export default function AgentControl({
   const isRunning = state.real_agent_status === 'RUNNING';
   const rms = state.broker_rms || {};
   const isLiveSynced = Boolean(rms.is_live_synced);
+
+  const [realStrategy, setRealStrategy] = React.useState(
+    state.real_execution_strategy || (state.strategy && state.strategy.real_execution_strategy) || 'NAKED'
+  );
+  const [isUpdatingStrategy, setIsUpdatingStrategy] = React.useState(false);
+  const [strategyMsg, setStrategyMsg] = React.useState('');
+
+  React.useEffect(() => {
+    fetch('/api/settings')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.strategy && data.strategy.real_execution_strategy) {
+          setRealStrategy(data.strategy.real_execution_strategy);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleSetRealStrategy = async (strat) => {
+    setIsUpdatingStrategy(true);
+    setStrategyMsg('');
+    try {
+      const res = await fetch('/api/strategy/real_mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ strategy: strat })
+      });
+      if (res.ok) {
+        setRealStrategy(strat);
+        setStrategyMsg(`Real execution venue switched to ${strat === 'DEBIT_SPREAD' ? 'Debit Spread (Hedged)' : 'Naked Options Buying'}!`);
+        setTimeout(() => setStrategyMsg(''), 4000);
+      }
+    } catch (e) {
+      alert('Failed to update real strategy mode: ' + e);
+    } finally {
+      setIsUpdatingStrategy(false);
+    }
+  };
 
   // Risk Management Capital Requirement Calculation:
   // - Fixed Risk per Trade: 1.5% (0.015)
@@ -101,6 +139,72 @@ export default function AgentControl({
             </span>
           </button>
         </div>
+      </div>
+
+      {/* Execution Structure Mode Selector (Toggle for Real Agent) */}
+      <div className="hud-card" style={{ borderLeft: '3px solid var(--accent-orange)' }}>
+        <div className="card-header-line">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <Sliders size={15} color="var(--accent-orange)" />
+            <span>Execution Structure Mode (Real Agent)</span>
+          </div>
+          <span className="mono text-muted">
+            Active: <strong style={{ color: realStrategy === 'DEBIT_SPREAD' ? 'var(--accent-emerald)' : 'var(--accent-orange)' }}>
+              {realStrategy === 'DEBIT_SPREAD' ? 'DEBIT SPREAD (HEDGED)' : 'NAKED BUYING (ATM DIRECTIONAL)'}
+            </strong>
+          </span>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '1rem', marginTop: '0.75rem' }}>
+          <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+            <button
+              className="btn-secondary"
+              style={{
+                borderColor: realStrategy === 'NAKED' ? 'var(--accent-orange)' : 'var(--border-light)',
+                background: realStrategy === 'NAKED' ? 'rgba(237, 76, 34, 0.15)' : 'var(--bg-surface-elevated)',
+                color: realStrategy === 'NAKED' ? 'var(--accent-orange)' : 'var(--text-muted)',
+                fontWeight: 600,
+                padding: '0.45rem 1rem',
+                fontSize: '0.8rem',
+                cursor: 'pointer'
+              }}
+              onClick={() => handleSetRealStrategy('NAKED')}
+              disabled={isUpdatingStrategy}
+            >
+              ● Naked Options Buying (ATM)
+            </button>
+
+            <button
+              className="btn-secondary"
+              style={{
+                borderColor: realStrategy === 'DEBIT_SPREAD' ? 'var(--accent-emerald)' : 'var(--border-light)',
+                background: realStrategy === 'DEBIT_SPREAD' ? 'rgba(16, 185, 129, 0.15)' : 'var(--bg-surface-elevated)',
+                color: realStrategy === 'DEBIT_SPREAD' ? 'var(--accent-emerald)' : 'var(--text-muted)',
+                fontWeight: 600,
+                padding: '0.45rem 1rem',
+                fontSize: '0.8rem',
+                cursor: 'pointer'
+              }}
+              onClick={() => handleSetRealStrategy('DEBIT_SPREAD')}
+              disabled={isUpdatingStrategy}
+            >
+              🛡️ Debit Spread (Buy ATM + Sell OTM)
+            </button>
+          </div>
+
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', maxWidth: '440px', lineHeight: '1.4' }}>
+            {realStrategy === 'DEBIT_SPREAD'
+              ? 'Debit Spread hedges downside risk by selling a 1-strike OTM contract against the long ATM contract, offsetting up to 60% of intraday theta decay.'
+              : 'Naked buying captures full delta convexity on explosive directional breakout moves, but absorbs 100% of intraday theta decay.'}
+          </div>
+        </div>
+
+        {strategyMsg && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--accent-emerald)', fontSize: '0.75rem', marginTop: '0.5rem' }}>
+            <CheckCircle2 size={13} />
+            <span>{strategyMsg}</span>
+          </div>
+        )}
       </div>
 
       {/* 2. Capital Adequacy & Risk Gate Card (x Requirement) */}
