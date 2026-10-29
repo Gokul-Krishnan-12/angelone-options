@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Activity,
   Play,
@@ -113,6 +113,11 @@ export default function StockOptionsPaperTrading() {
   const [showResetModal, setShowResetModal] = useState(false);
   const [notification, setNotification] = useState(null);
 
+  const showConfigModalRef = useRef(false);
+  useEffect(() => {
+    showConfigModalRef.current = showConfigModal;
+  }, [showConfigModal]);
+
   useEffect(() => {
     fetchPaperData();
     const interval = setInterval(fetchPaperData, 4000);
@@ -132,9 +137,11 @@ export default function StockOptionsPaperTrading() {
       if (stRes.ok) {
         const stData = await stRes.json();
         setPaperStatus(stData);
-        setVirtualCapitalInput(String(stData.virtual_capital || '500000'));
-        setSlippageInput(String(stData.slippage_pct || '0.35'));
-        setRiskPctInput(String(stData.risk_per_trade_pct || '2.0'));
+        if (!showConfigModalRef.current) {
+          setVirtualCapitalInput(String(stData.virtual_capital || '500000'));
+          setSlippageInput(String(stData.slippage_pct || '0.35'));
+          setRiskPctInput(String(stData.risk_per_trade_pct || '2.0'));
+        }
       }
       if (posRes.ok) setPositions(await posRes.json());
       if (ordRes.ok) setOrders(await ordRes.json());
@@ -177,21 +184,47 @@ export default function StockOptionsPaperTrading() {
     }
   };
 
+  const handleOpenConfigModal = () => {
+    if (paperStatus) {
+      setVirtualCapitalInput(String(paperStatus.virtual_capital || '500000'));
+      setSlippageInput(String(paperStatus.slippage_pct || '0.35'));
+      setRiskPctInput(String(paperStatus.risk_per_trade_pct || '2.0'));
+    }
+    showConfigModalRef.current = true;
+    setShowConfigModal(true);
+  };
+
+  const handleCloseConfigModal = () => {
+    showConfigModalRef.current = false;
+    setShowConfigModal(false);
+  };
+
   const handleSavePaperConfig = async () => {
     try {
+      const vCap = parseFloat(virtualCapitalInput);
+      const sPct = parseFloat(slippageInput);
+      const rPct = parseFloat(riskPctInput);
+      if (isNaN(vCap) || vCap <= 0) {
+        showNotice('Please enter a valid virtual capital amount.', true);
+        return;
+      }
       const res = await authFetch('/api/stock-options/paper/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          virtual_capital: parseFloat(virtualCapitalInput),
-          slippage_pct: parseFloat(slippageInput),
-          risk_per_trade_pct: parseFloat(riskPctInput)
+          virtual_capital: vCap,
+          slippage_pct: isNaN(sPct) ? 0.35 : sPct,
+          risk_per_trade_pct: isNaN(rPct) ? 2.0 : rPct
         })
       });
       if (res.ok) {
         showNotice('Independent paper trading configuration updated.');
+        showConfigModalRef.current = false;
         setShowConfigModal(false);
         fetchPaperData();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showNotice(err.detail || 'Failed to update paper settings.', true);
       }
     } catch (e) {
       showNotice('Failed to update paper settings.', true);
@@ -200,7 +233,7 @@ export default function StockOptionsPaperTrading() {
 
   const handleResetPaper = async () => {
     try {
-      const cap = parseFloat(virtualCapitalInput) || 500000;
+      const cap = parseFloat(paperStatus?.virtual_capital) || 500000;
       const res = await authFetch(`/api/stock-options/paper/reset?capital=${cap}`, { method: 'POST' });
       if (res.ok) {
         showNotice(`Virtual paper ledger reset to ${formatINR(cap)}.`);
@@ -442,7 +475,7 @@ export default function StockOptionsPaperTrading() {
 
           <button
             className="btn-secondary"
-            onClick={() => setShowConfigModal(true)}
+            onClick={handleOpenConfigModal}
             style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', fontSize: '0.78rem', padding: '0.45rem 0.85rem' }}
           >
             <Settings size={13} />
@@ -1542,7 +1575,7 @@ export default function StockOptionsPaperTrading() {
             </div>
 
             <div className="modal-btn-row" style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginTop: '1.25rem' }}>
-              <button className="btn-secondary" onClick={() => setShowConfigModal(false)}>
+              <button className="btn-secondary" onClick={handleCloseConfigModal}>
                 Cancel
               </button>
               <button className="btn-primary" onClick={handleSavePaperConfig}>
