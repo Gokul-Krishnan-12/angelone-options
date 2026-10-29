@@ -582,7 +582,7 @@ export default function OvernightAiPlanner() {
                 ) : (
                   <>
                     <option value="gemini-3-flash-preview">gemini-3-flash (Low Latency / Recommended)</option>
-                    <option value="gemini-3.1-flash-lite-preview">gemini-3.1-flash-lite (Fastest)</option>
+                    <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (Ultra-Fast / High Availability)</option>
                     <option value="gemini-3.1-pro-preview">gemini-3.1-pro (Deep Reasoning)</option>
                   </>
                 )}

@@ -5,6 +5,7 @@ Implements structured JSON generation via Gemini REST API.
 
 import time
 import json
+import asyncio
 import aiohttp
 from datetime import datetime
 from typing import Dict, Any, List, Optional
@@ -87,12 +88,13 @@ class GeminiProvider(AIProvider):
         run_id = f"GEM_{int(time.time() * 1000)}"
         start_time = time.time()
         timestamp_str = datetime.now().isoformat()
+
         # Map legacy/deprecated model names to modern active 2026 Gemini models
-        model_name = self.model_name or "gemini-3-flash-preview"
-        if model_name in ("gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.5-flash", "default"):
-            model_name = "gemini-3-flash-preview"
-        elif model_name in ("gemini-1.5-pro", "gemini-2.0-pro"):
-            model_name = "gemini-3.1-pro-preview"
+        primary_model = self.model_name or "gemini-3-flash-preview"
+        if primary_model in ("gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite", "default"):
+            primary_model = "gemini-3-flash-preview"
+        elif primary_model in ("gemini-1.5-pro", "gemini-2.0-pro", "gemini-2.5-pro"):
+            primary_model = "gemini-3.1-pro-preview"
 
         if not self.api_key or self.api_key.strip() in ("", "YOUR_GEMINI_API_KEY", "dummy"):
             return self._build_offline_response(
@@ -104,8 +106,6 @@ class GeminiProvider(AIProvider):
                 clamped_max=clamped_max,
                 warning="Google Gemini API key not configured. Candidate scanning is paused."
             )
-
-        endpoint = f"{self.BASE_URL.format(model=model_name)}?key={self.api_key.strip()}"
 
         user_content = json.dumps({
             "run_type": run_type,
@@ -132,61 +132,103 @@ class GeminiProvider(AIProvider):
             }
         }
 
+        # Resilient model fallback cascade: try preferred model first, then tested high-availability flash fallbacks
+        models_to_try = [primary_model]
+        for fallback in ["gemini-3-flash-preview", "gemini-3.1-flash-lite", "gemini-3.1-flash-lite-preview", "gemini-3.5-flash"]:
+            if fallback not in models_to_try:
+                models_to_try.append(fallback)
+
+        last_error_msg = "Unknown Gemini error."
+        last_model_used = primary_model
+
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    endpoint,
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=self.timeout_seconds)
-                ) as resp:
-                    latency = round((time.time() - start_time) * 1000, 2)
-                    if resp.status == 200:
-                        raw = await resp.json()
-                        candidates_parts = raw.get("candidates", [])
-                        if not candidates_parts:
-                            return self._build_error_response(run_id, run_type, timestamp_str, intended_date, latency, "Empty response from Gemini.")
+                for current_model in models_to_try:
+                    last_model_used = current_model
+                    endpoint = f"{self.BASE_URL.format(model=current_model)}?key={self.api_key.strip()}"
 
-                        content_text = candidates_parts[0]["content"]["parts"][0]["text"]
-                        clean_text = content_text.strip()
-                        if clean_text.startswith("```"):
-                            parts = clean_text.split("```")
-                            clean_text = parts[1] if len(parts) > 1 else clean_text
-                            if clean_text.startswith("json"):
-                                clean_text = clean_text[4:]
-                            clean_text = clean_text.strip()
-                        if clean_text.endswith("```"):
-                            clean_text = clean_text[:-3].strip()
+                    # Up to 2 attempts per model for transient demand spikes (503) or rate limits (429)
+                    for attempt in range(1, 3):
+                        try:
+                            async with session.post(
+                                endpoint,
+                                json=payload,
+                                timeout=aiohttp.ClientTimeout(total=self.timeout_seconds)
+                            ) as resp:
+                                latency = round((time.time() - start_time) * 1000, 2)
+                                if resp.status == 200:
+                                    raw = await resp.json()
+                                    candidates_parts = raw.get("candidates", [])
+                                    if not candidates_parts:
+                                        last_error_msg = f"Empty response from Gemini ({current_model})."
+                                        break
 
-                        parsed = json.loads(clean_text)
-                        return self._parse_json_result(
-                            parsed=parsed,
-                            run_id=run_id,
-                            run_type=run_type,
-                            intended_date=intended_date,
-                            timestamp=timestamp_str,
-                            latency=latency,
-                            clamped_max=clamped_max,
-                            total_evaluated=len(stock_data)
-                        )
-                    elif resp.status == 429:
-                        logger.warning("[AI_GEMINI] Gemini rate limit exceeded (HTTP 429).")
-                        return self._build_error_response(run_id, run_type, timestamp_str, intended_date, latency, "Gemini rate limit exceeded. Retrying shortly.")
-                    elif resp.status in (400, 403):
-                        logger.error(f"[AI_GEMINI] Gemini API key or request error (HTTP {resp.status}).")
-                        return self._build_error_response(run_id, run_type, timestamp_str, intended_date, latency, "Invalid Gemini API key or request rejected.")
-                    else:
-                        err_text = await resp.text()
-                        logger.error(f"[AI_GEMINI] Error HTTP {resp.status}: {err_text}")
-                        return self._build_error_response(run_id, run_type, timestamp_str, intended_date, latency, f"Gemini error {resp.status}")
+                                    content_text = candidates_parts[0]["content"]["parts"][0]["text"]
+                                    clean_text = content_text.strip()
+                                    if clean_text.startswith("```"):
+                                        parts = clean_text.split("```")
+                                        clean_text = parts[1] if len(parts) > 1 else clean_text
+                                        if clean_text.startswith("json"):
+                                            clean_text = clean_text[4:]
+                                        clean_text = clean_text.strip()
+                                    if clean_text.endswith("```"):
+                                        clean_text = clean_text[:-3].strip()
 
-        except aiohttp.ClientConnectorError as e:
-            latency = round((time.time() - start_time) * 1000, 2)
-            logger.error(f"[AI_GEMINI] Network connection error: {e}")
-            return self._build_error_response(run_id, run_type, timestamp_str, intended_date, latency, f"Network error: {e}")
+                                    parsed = json.loads(clean_text)
+                                    return self._parse_json_result(
+                                        parsed=parsed,
+                                        run_id=run_id,
+                                        run_type=run_type,
+                                        intended_date=intended_date,
+                                        timestamp=timestamp_str,
+                                        latency=latency,
+                                        clamped_max=clamped_max,
+                                        total_evaluated=len(stock_data),
+                                        model_name=current_model
+                                    )
+                                elif resp.status in (400, 403):
+                                    logger.error(f"[AI_GEMINI] Gemini API key or request error (HTTP {resp.status}).")
+                                    return self._build_error_response(run_id, run_type, timestamp_str, intended_date, latency, "Invalid Gemini API key or request rejected.", current_model)
+                                elif resp.status in (429, 503):
+                                    err_text = await resp.text()
+                                    reason = "high demand (HTTP 503)" if resp.status == 503 else "rate limit (HTTP 429)"
+                                    logger.warning(f"[AI_GEMINI] Model {current_model} returned {reason} on attempt {attempt}/2.")
+                                    last_error_msg = f"Gemini {current_model} {reason}."
+                                    if attempt < 2:
+                                        await asyncio.sleep(1.5)
+                                        continue
+                                    else:
+                                        logger.info(f"[AI_GEMINI] Falling back from {current_model} to next model in chain...")
+                                        break
+                                elif resp.status == 404:
+                                    logger.warning(f"[AI_GEMINI] Model {current_model} not found (HTTP 404). Falling back...")
+                                    last_error_msg = f"Model {current_model} unavailable."
+                                    break
+                                else:
+                                    err_text = await resp.text()
+                                    logger.error(f"[AI_GEMINI] Error HTTP {resp.status} on {current_model}: {err_text}")
+                                    last_error_msg = f"Gemini error {resp.status}"
+                                    break
+
+                        except asyncio.TimeoutError:
+                            logger.warning(f"[AI_GEMINI] Timeout on {current_model} (attempt {attempt}/2).")
+                            last_error_msg = f"Timeout on {current_model}"
+                            if attempt < 2:
+                                await asyncio.sleep(1.0)
+                                continue
+                            break
+                        except aiohttp.ClientConnectorError as e:
+                            logger.error(f"[AI_GEMINI] Network connection error on {current_model}: {e}")
+                            last_error_msg = f"Network connection error: {e}"
+                            break
+
         except Exception as e:
             latency = round((time.time() - start_time) * 1000, 2)
             logger.error(f"[AI_GEMINI] Exception during Gemini analysis: {e}")
-            return self._build_error_response(run_id, run_type, timestamp_str, intended_date, latency, f"Gemini exception: {str(e)}")
+            return self._build_error_response(run_id, run_type, timestamp_str, intended_date, latency, f"Gemini exception: {str(e)}", last_model_used)
+
+        latency = round((time.time() - start_time) * 1000, 2)
+        return self._build_error_response(run_id, run_type, timestamp_str, intended_date, latency, last_error_msg, last_model_used)
 
     def _parse_json_result(
         self,
@@ -197,7 +239,8 @@ class GeminiProvider(AIProvider):
         timestamp: str,
         latency: float,
         clamped_max: int,
-        total_evaluated: int
+        total_evaluated: int,
+        model_name: Optional[str] = None
     ) -> AIAnalysisResponse:
         warnings = []
         raw_candidates: List[Any] = []
@@ -246,7 +289,7 @@ class GeminiProvider(AIProvider):
             timestamp=timestamp,
             intended_trading_date=intended_date,
             provider="Google Gemini",
-            model=self.model_name or "gemini-3-flash-preview",
+            model=model_name or self.model_name or "gemini-3-flash-preview",
             market_summary=market_summary,
             total_evaluated=total_evaluated,
             total_shortlisted=len(valid_candidates),
@@ -256,14 +299,14 @@ class GeminiProvider(AIProvider):
             validation_warnings=warnings
         )
 
-    def _build_error_response(self, run_id, run_type, timestamp, intended_date, latency, error_msg) -> AIAnalysisResponse:
+    def _build_error_response(self, run_id, run_type, timestamp, intended_date, latency, error_msg, model_name: Optional[str] = None) -> AIAnalysisResponse:
         return AIAnalysisResponse(
             run_id=run_id,
             run_type=run_type,
             timestamp=timestamp,
             intended_trading_date=intended_date,
             provider="Google Gemini",
-            model=self.model_name or "gemini-1.5-flash",
+            model=model_name or self.model_name or "gemini-3-flash-preview",
             market_summary=f"Analysis aborted due to error: {error_msg}",
             total_evaluated=0,
             total_shortlisted=0,
@@ -291,7 +334,7 @@ class GeminiProvider(AIProvider):
             timestamp=timestamp,
             intended_trading_date=intended_date,
             provider="Google Gemini",
-            model=self.model_name or "gemini-1.5-flash",
+            model=self.model_name or "gemini-3-flash-preview",
             market_summary="Google Gemini is not connected. Real-time scanning and trade candidate generation are paused until a valid API key is entered.",
             total_evaluated=len(stock_data),
             total_shortlisted=0,

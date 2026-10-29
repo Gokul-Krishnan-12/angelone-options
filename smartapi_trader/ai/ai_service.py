@@ -86,7 +86,7 @@ class AIService:
         if prov == "GEMINI" or "GEMINI" in prov:
             return GeminiProvider(
                 api_key=self.gemini_key,
-                model_name=mod or "gemini-1.5-flash",
+                model_name=mod or "gemini-3-flash-preview",
                 timeout_seconds=self.timeout_seconds
             )
         else:
