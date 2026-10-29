@@ -17,8 +17,9 @@ import sys
 import time
 import asyncio
 import unittest
-from datetime import datetime
+from datetime import datetime, time as dtime
 from typing import Dict, Any
+from unittest.mock import patch
 
 # Add project root to sys.path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -40,6 +41,8 @@ class TestMarketDynamicsAndScenarios(unittest.IsolatedAsyncioTestCase):
     """Verifies strategy and risk behaviors across real-world market scenarios."""
 
     async def asyncSetUp(self):
+        self.time_patcher = patch("smartapi_trader.risk.risk_manager.ist_time", return_value=dtime(10, 0))
+        self.time_patcher.start()
         self.bus = EventBus()
         self.bus.start()
         self.temp_db = "data/test_market_scenarios.db"
@@ -77,6 +80,7 @@ class TestMarketDynamicsAndScenarios(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await self.bus.stop()
+        self.time_patcher.stop()
         if os.path.exists(self.temp_db):
             os.remove(self.temp_db)
 

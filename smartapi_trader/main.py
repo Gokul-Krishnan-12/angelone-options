@@ -137,6 +137,40 @@ class TradingOrchestrator:
         ctx.notifier = self.notifier
         ctx.telegram_bot = self.telegram_bot
 
+        # AI Stock Options Subsystem (Overnight Planner, Intraday Scanner, Live & Paper Agents)
+        from smartapi_trader.ai.ai_service import AIService
+        from smartapi_trader.stock_options.universe import StockUniverseManager
+        from smartapi_trader.stock_options.market_data_service import StockMarketDataService
+        from smartapi_trader.stock_options.storage import StockOptionsStorage
+        from smartapi_trader.stock_options.validator import StockOptionsValidator
+        from smartapi_trader.stock_options.planner import OvernightAIPlanner
+        from smartapi_trader.stock_options.scanner import IntradayAIScanner
+        from smartapi_trader.stock_options.live_agent import StockOptionsLiveAgent
+        from smartapi_trader.stock_options.paper_agent import StockOptionsPaperAgent
+        from smartapi_trader.stock_options.routes import so_ctx
+
+        self.stock_storage = StockOptionsStorage()
+        self.stock_universe = StockUniverseManager()
+        self.stock_market_data = StockMarketDataService(self.stock_universe, self.smart_api)
+        self.ai_service = AIService(self.settings.get("ai", {}))
+        self.stock_validator = StockOptionsValidator(self.stock_universe)
+        self.overnight_planner = OvernightAIPlanner(self.ai_service, self.stock_market_data, self.stock_storage, self.notifier)
+        self.intraday_scanner = IntradayAIScanner(self.ai_service, self.stock_market_data, self.stock_storage, default_interval_mins=5, notifier=self.notifier)
+        self.stock_live_agent = StockOptionsLiveAgent(self.event_bus, self.risk_manager, self.live_engine, self.stock_storage, self.stock_validator, self.notifier)
+        self.stock_paper_agent = StockOptionsPaperAgent(self.stock_storage, self.stock_validator, initial_capital=500000.0, notifier=self.notifier)
+
+        so_ctx.ai_service = self.ai_service
+        so_ctx.market_data = self.stock_market_data
+        so_ctx.storage = self.stock_storage
+        so_ctx.planner = self.overnight_planner
+        so_ctx.scanner = self.intraday_scanner
+        so_ctx.live_agent = self.stock_live_agent
+        so_ctx.paper_agent = self.stock_paper_agent
+        so_ctx.universe_mgr = self.stock_universe
+        from smartapi_trader.stock_options.routes import bind_dispatch_callbacks
+        bind_dispatch_callbacks()
+
+
     async def _on_position_update(self, event: Any):
         """Dynamically registers WebSocket feed subscription for any opened options contract."""
         if getattr(event, 'is_open', False) and getattr(event, 'token', None):

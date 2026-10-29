@@ -644,6 +644,32 @@ body {
   border-color: var(--border-medium);
 }
 
+.btn-primary.danger {
+  background: var(--accent-red);
+}
+.btn-primary.danger:hover {
+  background: #e11d48;
+}
+
+.btn-secondary.active,
+.btn-secondary.active-tab {
+  border-color: var(--accent-orange);
+  background: rgba(237, 76, 34, 0.15);
+  color: var(--accent-orange);
+  font-weight: 600;
+}
+
+.btn-secondary.danger {
+  border-color: rgba(244, 63, 94, 0.35);
+  background: rgba(244, 63, 94, 0.1);
+  color: #fda4af;
+}
+.btn-secondary.danger:hover {
+  background: var(--accent-red);
+  color: #fff;
+  border-color: var(--accent-red);
+}
+
 /* Bottom Status Bar */
 .bottom-status-bar {
   display: flex;

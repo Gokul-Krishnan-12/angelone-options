@@ -10,7 +10,11 @@ import AgentControl from './pages/AgentControl';
 import Settings from './pages/Settings';
 import ActivityLog from './pages/ActivityLog';
 import SystemWorkflow from './pages/SystemWorkflow';
+import OvernightAiPlanner from './pages/OvernightAiPlanner';
+import StockOptionsTrading from './pages/StockOptionsTrading';
+import StockOptionsPaperTrading from './pages/StockOptionsPaperTrading';
 import ApiKeysModal from './components/ApiKeysModal';
+
 import { PanicModal } from './components/Modals';
 import Login from './components/Login';
 
@@ -602,7 +606,20 @@ export default function App() {
               }
             />
             <Route
+              path="/overnight-ai-planner"
+              element={<OvernightAiPlanner />}
+            />
+            <Route
+              path="/stock-options-trading"
+              element={<StockOptionsTrading state={state} onOpenPanic={() => setIsPanicModalOpen(true)} />}
+            />
+            <Route
+              path="/stock-options-paper-trading"
+              element={<StockOptionsPaperTrading />}
+            />
+            <Route
               path="/paper"
+
               element={
                 <PaperTrade
                   state={state}

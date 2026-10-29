@@ -10,7 +10,8 @@ import json
 import time
 import asyncio
 import unittest
-from datetime import datetime
+from unittest.mock import patch
+from datetime import datetime, time as dtime
 
 # Add root directory to sys.path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -540,7 +541,8 @@ class Test11BrokerReconciliationAndHardenedControls(unittest.IsolatedAsyncioTest
         self.assertEqual(local_order.status, "FILLED")
         self.assertEqual(local_order.average_price, 151.2)
 
-    async def test_structural_invalidation_buffer(self):
+    @patch("smartapi_trader.risk.risk_manager.ist_time", return_value=dtime(10, 0))
+    async def test_structural_invalidation_buffer(self, mock_time):
         from smartapi_trader.risk.risk_manager import RiskManager
         cfg = {
             "risk": {
@@ -593,7 +595,8 @@ class Test11BrokerReconciliationAndHardenedControls(unittest.IsolatedAsyncioTest
         self.assertIn("friction_pct_of_gross", s)
         self.assertEqual(engine.be_trigger_r, 1.5)
 
-    async def test_debit_spread_order_generation_and_execution(self):
+    @patch("smartapi_trader.risk.risk_manager.ist_time", return_value=dtime(10, 0))
+    async def test_debit_spread_order_generation_and_execution(self, mock_time):
         from smartapi_trader.risk.risk_manager import RiskManager
         from smartapi_trader.core.events import EventType
 

@@ -78,10 +78,11 @@ class RiskManager:
             self._raise_alert("WARNING", "Panic/Halted", "Order rejected: System is in PANIC or HALT mode.")
             return
 
-        # 1b. Active Indices Filter Guard
+        # 1b. Active Indices Filter Guard (applies to index options only)
+        index_names = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"}
         active_indices = self.raw_config.get("strategy", {}).get("active_indices", ["NIFTY", "BANKNIFTY", "SENSEX"])
         underlying = getattr(signal, "underlying", "").upper()
-        if underlying and underlying not in [idx.upper() for idx in active_indices]:
+        if underlying in index_names and underlying not in [idx.upper() for idx in active_indices]:
             self._raise_alert("WARNING", "DisabledIndex", f"Order rejected: {underlying} is disabled in active_indices settings.")
             return
 

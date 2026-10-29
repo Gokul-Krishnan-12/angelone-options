@@ -42,6 +42,11 @@ app.mount("/assets", StaticFiles(directory=REACT_ASSETS), name="react_assets")
 
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
+# Mount AI Stock Options Subsystem Router
+from smartapi_trader.stock_options.routes import router as stock_options_router, so_ctx
+app.include_router(stock_options_router)
+
+
 # Global references injected on startup
 class WebContext:
     event_bus: Optional[EventBus] = None
@@ -390,10 +395,21 @@ async def trigger_panic():
                 exit_reason="Emergency Panic Liquidation"
             )
 
+    # Liquidate stock options positions & pause live agent as part of common kill switch
+    try:
+        from smartapi_trader.stock_options.routes import so_ctx
+        if so_ctx.live_agent:
+            await so_ctx.live_agent.emergency_kill_switch()
+            logger.critical("[PANIC] Stock options live positions liquidated via unified emergency kill switch.")
+        if so_ctx.paper_agent:
+            so_ctx.paper_agent.pause()
+    except Exception as e:
+        logger.error(f"[PANIC] Error liquidating stock options in common panic: {e}")
+
     logger.critical("[OPERATOR] GLOBAL PANIC SWITCH ACTIVATED! Liquidating all positions.")
     await ws_manager.broadcast({
         "type": "PANIC_TRIGGERED",
-        "message": "Emergency liquidation and engine halt executed."
+        "message": "Emergency liquidation and engine halt executed across Index & Stock Options."
     })
     return {"status": "panic_activated"}
 

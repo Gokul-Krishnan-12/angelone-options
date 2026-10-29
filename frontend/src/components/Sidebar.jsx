@@ -9,20 +9,28 @@ import {
   Settings,
   BookOpen,
   Flame,
-  X
+  X,
+  Moon,
+  Search,
+  Zap,
+  ShieldCheck
 } from 'lucide-react';
 import { formatINR } from './MetricsHud';
 
 export default function Sidebar({ state, isOpen, onClose }) {
   const links = [
     { to: '/', label: 'Overview', icon: Briefcase },
+    { to: '/overnight-ai-planner', label: 'Intraday AI Scanner', icon: Search },
+    { to: '/stock-options-trading', label: 'Stock Options Live', icon: Zap },
+    { to: '/stock-options-paper-trading', label: 'Stock Options Paper', icon: ShieldCheck },
     { to: '/orders', label: 'Orders & Positions', icon: FileText },
-    { to: '/paper', label: 'Paper Agent', icon: Activity },
-    { to: '/agent', label: 'Real Trade Agent', icon: PlayCircle },
+    { to: '/paper', label: 'Index Paper Agent', icon: Activity },
+    { to: '/agent', label: 'Index Real Agent', icon: PlayCircle },
     { to: '/workflow', label: 'Trading Logic & Guide', icon: BookOpen },
     { to: '/logs', label: 'Activity Logs', icon: Clock },
     { to: '/settings', label: 'Settings & Broker', icon: Settings },
   ];
+
 
   const rmsNet = state.broker_rms?.net ?? 0;
   const isLiveSynced = Boolean(state.broker_rms?.is_live_synced);

@@ -97,6 +97,17 @@ class TelegramNotifier:
             self.send_message_sync, text, parse_mode, bot_token, chat_id
         )
 
+    def send_message(
+        self,
+        text: str,
+        parse_mode: str = "HTML",
+        bot_token: Optional[str] = None,
+        chat_id: Optional[str] = None,
+    ):
+        """Standard alias for send_message_async."""
+        return self.send_message_async(text, parse_mode, bot_token, chat_id)
+
+
     def notify_trade_entry(self, trade: Dict[str, Any]):
         """Notifies when a new options contract position is entered."""
         if not self.enabled or not self.config.get("notify_on_trade_entry", True):
@@ -648,13 +659,25 @@ class TelegramBotController:
         bnf_spot = spots.get("BANKNIFTY", {}).get("spot", 0.0)
         indices_line = f"📈 <b>Live Spots:</b> NIFTY: <code>{nifty_spot:,.2f}</code> | BNF: <code>{bnf_spot:,.2f}</code>\n"
 
+        so_status_line = ""
+        if self.orchestrator:
+            so_live = getattr(self.orchestrator, "stock_live_agent", None)
+            so_paper = getattr(self.orchestrator, "stock_paper_agent", None)
+            so_scanner = getattr(self.orchestrator, "intraday_scanner", None)
+            if so_live or so_paper:
+                so_live_st = getattr(so_live, "status", "IDLE") if so_live else "N/A"
+                so_paper_st = getattr(so_paper, "status", "IDLE") if so_paper else "N/A"
+                so_scanner_st = "RUNNING" if getattr(so_scanner, "is_active", False) else "IDLE"
+                so_status_line = f"🎯 <b>Stock Options:</b> Live={so_live_st} | Paper={so_paper_st} | Radar={so_scanner_st}\n"
+
         return (
             f"🤖 <b>OPTIONS SNIPER ENGINE STATUS</b>\n\n"
             f"🏷 <b>Execution Mode:</b> <code>{mode}</code>\n"
             f"🚦 <b>System State:</b> {status_flag}\n"
             f"{indices_line}"
-            f"📝 <b>Paper Agent:</b> {paper_status}\n"
-            f"⚡ <b>Real Live Agent:</b> {real_status}\n\n"
+            f"📝 <b>Index Paper Agent:</b> {paper_status}\n"
+            f"⚡ <b>Index Live Agent:</b> {real_status}\n"
+            f"{so_status_line}\n"
             f"💼 <b>Active Capital:</b> ₹{cap:,.2f}\n"
             f"💳 <b>Available Margin:</b> ₹{avail:,.2f}\n"
             f"🏦 <b>Live Angel One Cash:</b> {live_cap_badge}\n"
@@ -680,6 +703,37 @@ class TelegramBotController:
                 f"   SL: ₹{p.stop_loss:.2f} | TP1: ₹{p.target_1:.2f}\n"
                 f"   Unrealized P&L: <code>₹{pnl:+,.2f}</code>\n"
             )
+
+        # Include Stock Options positions
+        if self.orchestrator and hasattr(self.orchestrator, "stock_storage") and self.orchestrator.stock_storage:
+            try:
+                live_so = self.orchestrator.stock_storage.get_positions(is_paper=False, open_only=True)
+                if live_so:
+                    lines.append("\n⚡ <b>STOCK OPTIONS (LIVE):</b>")
+                    for sp in live_so:
+                        pnl = float(sp.get("unrealized_pnl", 0.0))
+                        icon = "🟢" if pnl >= 0 else "🔴"
+                        lines.append(
+                            f"{icon} <b>{sp.get('symbol')}</b> ({sp.get('option_type')})\n"
+                            f"   Qty: {sp.get('quantity', 0)} | Entry: ₹{float(sp.get('entry_price', 0)):.2f} | LTP: ₹{float(sp.get('current_ltp', 0)):.2f}\n"
+                            f"   SL: ₹{float(sp.get('stop_loss', 0)):.2f} | T1: ₹{float(sp.get('target_1', 0)):.2f}\n"
+                            f"   Unrealized P&L: <code>₹{pnl:+,.2f}</code>\n"
+                        )
+                paper_so = self.orchestrator.stock_storage.get_positions(is_paper=True, open_only=True)
+                if paper_so:
+                    lines.append("\n📝 <b>STOCK OPTIONS (PAPER):</b>")
+                    for sp in paper_so:
+                        pnl = float(sp.get("unrealized_pnl", 0.0))
+                        icon = "🟢" if pnl >= 0 else "🔴"
+                        lines.append(
+                            f"{icon} <b>{sp.get('symbol')}</b> ({sp.get('option_type')})\n"
+                            f"   Qty: {sp.get('quantity', 0)} | Entry: ₹{float(sp.get('entry_price', 0)):.2f} | LTP: ₹{float(sp.get('current_ltp', 0)):.2f}\n"
+                            f"   SL: ₹{float(sp.get('stop_loss', 0)):.2f} | T1: ₹{float(sp.get('target_1', 0)):.2f}\n"
+                            f"   Unrealized P&L: <code>₹{pnl:+,.2f}</code>\n"
+                        )
+            except Exception as e:
+                logger.error(f"[TELEGRAM_BOT] Error fetching stock options positions: {e}")
+
         return "\n".join(lines)
 
     def _cmd_trades(self) -> str:
@@ -714,6 +768,37 @@ class TelegramBotController:
                     f"   Gross: ₹{t.get('gross_pnl', 0):+,.2f} | Charges: -₹{t.get('total_charges', 0):.2f}\n"
                     f"   Net P&L: <code>₹{net:+,.2f}</code>"
                 )
+
+        # Include Stock Options Trades
+        if self.orchestrator and hasattr(self.orchestrator, "stock_storage") and self.orchestrator.stock_storage:
+            try:
+                so_live = self.orchestrator.stock_storage.get_trades(is_paper=False, limit=5)
+                if so_live:
+                    lines.append("\n⚡ <b>STOCK OPTIONS (LIVE TRADES):</b>")
+                    for t in so_live:
+                        net = float(t.get("net_pnl", 0.0))
+                        icon = "🟢" if net >= 0 else "🔴"
+                        lines.append(
+                            f"{icon} <b>{t.get('symbol')}</b>\n"
+                            f"   Entry: ₹{float(t.get('entry_price', 0)):.2f} ➔ Exit: ₹{float(t.get('exit_price', 0)):.2f} (Qty: {t.get('quantity', 0)})\n"
+                            f"   Net P&L: <code>₹{net:+,.2f}</code> ({t.get('exit_reason', 'Closed')})"
+                        )
+                so_paper = self.orchestrator.stock_storage.get_trades(is_paper=True, limit=5)
+                if so_paper:
+                    lines.append("\n📝 <b>STOCK OPTIONS (PAPER TRADES):</b>")
+                    for t in so_paper:
+                        net = float(t.get("net_pnl", 0.0))
+                        icon = "🟢" if net >= 0 else "🔴"
+                        lines.append(
+                            f"{icon} <b>{t.get('symbol')}</b>\n"
+                            f"   Entry: ₹{float(t.get('entry_price', 0)):.2f} ➔ Exit: ₹{float(t.get('exit_price', 0)):.2f} (Qty: {t.get('quantity', 0)})\n"
+                            f"   Net P&L: <code>₹{net:+,.2f}</code> ({t.get('exit_reason', 'Closed')})"
+                        )
+            except Exception as e:
+                logger.error(f"[TELEGRAM_BOT] Error fetching stock options trades: {e}")
+
+        if not lines:
+            return "📝 <b>No trades completed yet today (Neither Index nor Stock Options).</b>"
 
         return "\n".join(lines)
 
@@ -797,7 +882,7 @@ class TelegramBotController:
 
     def _cmd_squareoff(self) -> str:
         self.state_mgr.trigger_panic()
-        # Square off open positions
+        # Square off open index positions
         for p in list(self.state_mgr.positions.values()):
             if p.is_open:
                 p.is_open = False
@@ -809,7 +894,23 @@ class TelegramBotController:
                     symbol=p.symbol,
                     is_paper=(self.state_mgr.execution_mode == "PAPER")
                 )
-        return "🚨 <b>EMERGENCY SQUARE-OFF COMPLETE!</b> All positions liquidated and engine halted."
+
+        # Also square off Stock Options live positions
+        so_positions = 0
+        if self.orchestrator and hasattr(self.orchestrator, "stock_live_agent") and self.orchestrator.stock_live_agent:
+            try:
+                res = self.orchestrator.stock_live_agent.emergency_kill_switch()
+                so_positions = res.get("closed_positions", 0)
+                if hasattr(self.orchestrator, "stock_paper_agent") and self.orchestrator.stock_paper_agent:
+                    self.orchestrator.stock_paper_agent.is_running = False
+            except Exception as e:
+                logger.error(f"[TELEGRAM_BOT] Stock options emergency kill error: {e}")
+
+        return (
+            f"🚨 <b>EMERGENCY SQUARE-OFF COMPLETE!</b>\n"
+            f"All Index and Stock Options positions liquidated and engines halted.\n"
+            f"Stock Options positions closed: {so_positions}"
+        )
 
     def _cmd_help(self) -> str:
         return (
