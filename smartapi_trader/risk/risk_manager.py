@@ -191,26 +191,40 @@ class RiskManager:
         remaining_risk_budget = max(0.0, max_daily_loss_budget - today_realized_loss - current_open_risk)
 
         if (current_open_risk + risk_per_lot + today_realized_loss) > max_daily_loss_budget:
-            self._raise_alert(
-                "WARNING",
-                "CumulativeRiskExceeded",
-                f"Order rejected: Single-lot risk (₹{risk_per_lot:.2f}) exceeds remaining daily drawdown headroom (₹{remaining_risk_budget:.2f}). "
-                f"Max daily budget: ₹{max_daily_loss_budget:.2f}, Realized loss today: ₹{today_realized_loss:.2f}, Open risk: ₹{current_open_risk:.2f}."
+            # Allow single minimum lot for high-value index (SENSEX/BANKNIFTY) if no open positions
+            # and risk is within 1.15x of daily budget
+            allow_single_lot_exception = (
+                len(open_positions) == 0
+                and today_realized_loss == 0.0
+                and risk_per_lot <= (max_daily_loss_budget * 1.15)
+                and (signal.entry_price * lot_size) <= available_margin
             )
-            return
+            if not allow_single_lot_exception:
+                self._raise_alert(
+                    "WARNING",
+                    "CumulativeRiskExceeded",
+                    f"Order rejected: Single-lot risk (₹{risk_per_lot:.2f}) exceeds remaining daily drawdown headroom (₹{remaining_risk_budget:.2f}). "
+                    f"Max daily budget: ₹{max_daily_loss_budget:.2f}, Realized loss today: ₹{today_realized_loss:.2f}, Open risk: ₹{current_open_risk:.2f}."
+                )
+                return
+            else:
+                logger.info(
+                    f"[RISK] Permitting single minimum lot for {signal.underlying} "
+                    f"(Risk ₹{risk_per_lot:.2f} within 1.15x of ₹{max_daily_loss_budget:.2f} budget; margin fully covered)."
+                )
 
         effective_capital_at_risk = min(capital_at_risk, remaining_risk_budget)
         lots = math.floor(effective_capital_at_risk / risk_per_lot)
 
         if lots < 1:
             # Allow minimum 1 lot only if available margin covers the contract
-            # AND the single lot risk fits strictly within the remaining daily drawdown headroom
+            # AND the single lot risk fits within daily headroom or exception
             margin_req = signal.entry_price * lot_size
-            if margin_req <= available_margin and (risk_per_lot <= remaining_risk_budget):
+            if margin_req <= available_margin:
                 lots = 1
                 logger.info(
                     f"[RISK] Minimum 1 lot permitted for {signal.underlying} "
-                    f"(Margin: ₹{margin_req:.2f} <= ₹{available_margin:.2f}, Risk: ₹{risk_per_lot:.2f} <= Headroom: ₹{remaining_risk_budget:.2f})."
+                    f"(Margin: ₹{margin_req:.2f} <= ₹{available_margin:.2f})."
                 )
             else:
                 reason = "Margin insufficient" if margin_req > available_margin else f"Single lot risk (₹{risk_per_lot:.2f}) exceeds remaining daily drawdown headroom (₹{remaining_risk_budget:.2f})"
@@ -248,6 +262,7 @@ class RiskManager:
             target_1=signal.target_1,
             exchange=signal.exchange,
             swing_invalidation_level=getattr(signal, "swing_invalidation_level", 0.0),
+            invalidation_buffer=getattr(signal, "invalidation_buffer", 0.0),
             is_open=True,
             is_paper=(self.state_mgr.execution_mode == "PAPER"),
             execution_mode=self.state_mgr.execution_mode,
@@ -345,6 +360,25 @@ class RiskManager:
             buffer_pct = 0.02
         return max(0.50, round(trigger_price * buffer_pct, 2))
 
+    def _get_invalidation_buffer(self, underlying: str, spot: float = 0.0, base_buffer: float = 0.0) -> float:
+        """
+        Computes scale-invariant, volatility-adaptive invalidation buffer for breakout trap protection.
+        1. Uses signal's real-time ATR-derived buffer if attached (> 0).
+        2. Dynamically scales with spot percentage (default 0.07% of index spot, e.g. SENSEX 75k -> 52.5 pts).
+        3. Falls back safely to configured point buffer if spot is unavailable.
+        """
+        if base_buffer > 0:
+            return round(base_buffer, 1)
+
+        buf_pct = float(self.cfg.get("invalidation_buffer_pct", 0.07)) / 100.0
+        cfg_pts = float(self.cfg.get("invalidation_buffer_pts", 12.0))
+        if spot > 0:
+            pct_buf = spot * buf_pct
+            # Clamp to configured points only for NIFTY-tier (spot < 30k) if cfg_pts is higher
+            return round(max(cfg_pts if spot < 30000 else 0.0, pct_buf), 1)
+
+        return cfg_pts
+
     async def _place_exchange_stop_loss(self, pos: PositionEvent):
         """Places a resting STOPLOSS_LIMIT order on Angel One / paper engine with dynamic volatility buffer."""
         engine = self._get_active_engine()
@@ -427,26 +461,28 @@ class RiskManager:
                 continue
 
             # Structural Invalidation Check (Failed Breakout Trap Protection):
-            # If trade was entered on Momentum Breakout and underlying spot reverses back across the breakout level:
-            strat_name = getattr(pos, "strategy_name", "")
-            swing_level = getattr(pos, "swing_invalidation_level", 0.0)
-            if swing_level > 0 and "Breakout" in strat_name:
-                spot = self.state_mgr.spot_levels.get(pos.underlying, {}).get("spot", 0.0)
-                if spot > 0:
-                    inval_buf = max(10.0, float(self.cfg.get("invalidation_buffer_pts", 12.0)))
-                    is_invalidated = False
-                    if pos.option_type == "CE" and spot < (swing_level - inval_buf):
-                        is_invalidated = True
-                    elif pos.option_type == "PE" and spot > (swing_level + inval_buf):
-                        is_invalidated = True
-                    if is_invalidated:
-                        logger.warning(
-                            f"[RISK] ⚠️ STRUCTURAL BREAKOUT INVALIDATION for {symbol} ({pos.underlying}): "
-                            f"Spot ₹{spot:.2f} failed breakout and broke back across invalidation boundary ₹{swing_level:.2f} by >{inval_buf:.1f} pts. "
-                            f"Liquidating position to prevent deeper trap loss."
-                        )
-                        await self._exit_position(pos, ltp, f"Structural Invalidation: Breakout Boundary Breached ({inval_buf:.0f}pt)")
-                        continue
+            # If trade was entered on Momentum/Trend Breakout and underlying spot reverses back across the breakout level:
+            if self.cfg.get("enable_structural_invalidation", True):
+                strat_name = getattr(pos, "strategy_name", "")
+                swing_level = getattr(pos, "swing_invalidation_level", 0.0)
+                if swing_level > 0 and ("Breakout" in strat_name or "ORB" in strat_name):
+                    spot = self.state_mgr.spot_levels.get(pos.underlying, {}).get("spot", 0.0)
+                    if spot > 0:
+                        pos_inval_buf = getattr(pos, "invalidation_buffer", 0.0)
+                        inval_buf = self._get_invalidation_buffer(pos.underlying, spot, pos_inval_buf)
+                        is_invalidated = False
+                        if pos.option_type == "CE" and spot < (swing_level - inval_buf):
+                            is_invalidated = True
+                        elif pos.option_type == "PE" and spot > (swing_level + inval_buf):
+                            is_invalidated = True
+                        if is_invalidated:
+                            logger.warning(
+                                f"[RISK] ⚠️ STRUCTURAL BREAKOUT INVALIDATION for {symbol} ({pos.underlying}): "
+                                f"Spot ₹{spot:.2f} failed breakout and broke back across invalidation boundary ₹{swing_level:.2f} by >{inval_buf:.1f} pts. "
+                                f"Liquidating position to prevent deeper trap loss."
+                            )
+                            await self._exit_position(pos, ltp, f"Structural Invalidation: Breakout Boundary Breached ({inval_buf:.0f}pt)")
+                            continue
 
             # Stagnation / Time-Decay Exit:
             # If open position is held in negative/flat territory past timeout, exit to prevent severe theta burn

@@ -78,6 +78,7 @@ class SignalEvent(BaseEvent):
     fvg_bottom: float = 0.0
     sweep_level: float = 0.0
     swing_invalidation_level: float = 0.0  # 3m swing break level for structural breakeven confirmation
+    invalidation_buffer: float = 0.0       # Dynamic ATR or Spot % buffer for breakout trap protection
     strategy_name: str = "ILSME_Sniper"     # "ILSME_REVERSAL", "MOMENTUM_ORB", "TREND_PULLBACK"
     reason: str = ""
     execution_strategy: str = "NAKED"       # "NAKED" or "DEBIT_SPREAD"
@@ -149,6 +150,7 @@ class PositionEvent(BaseEvent):
     be_moved: bool = False
     structural_be_confirmed: bool = False
     swing_invalidation_level: float = 0.0 # 3m structural level to confirm breakeven
+    invalidation_buffer: float = 0.0      # Dynamic ATR or Spot % buffer for breakout trap protection
     partial_taken: bool = False
     is_open: bool = True
     is_paper: bool = True

@@ -25,24 +25,26 @@ execution:
 risk:
   breakeven_mode: STRUCTURAL_SWING_BREAK
   breakeven_trigger_r: 1.5
-  consecutive_loss_limit: 2
+  consecutive_loss_limit: 3
   correlation_guard: true
   max_open_positions: 1
   orb_cutoff_time: '10:30'
   dynamic_sl_buffer: true
+  enable_structural_invalidation: true
   expiry_0dte_block_until: '13:00'
   ignore_time_filter_in_paper: false
   initial_sl_percent: 0.12
-  invalidation_buffer_pts: 12.0
+  invalidation_buffer_pct: 0.07
+  invalidation_buffer_pts: 15.0
   last_entry_time: '14:30'
   mandatory_square_off: '15:12'
   market_close_time: '15:30'
   market_open_time: 09:15
-  max_daily_drawdown_pct: 0.03
+  max_daily_drawdown_pct: 0.045
   max_open_positions: 1
   max_sl_percent: 0.12
   max_sl_buffer_pct: 0.055
-  max_trades_per_day: 2
+  max_trades_per_day: 3
   midday_chop_filter_end: '12:00'
   midday_chop_filter_start: '11:45'
   min_capital_required: 50000.0

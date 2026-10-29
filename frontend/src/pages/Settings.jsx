@@ -35,9 +35,12 @@ export default function Settings({ state, onRefreshBalance }) {
   const [riskPerTrade, setRiskPerTrade] = useState(1.8);
   const [maxDrawdown, setMaxDrawdown] = useState(3.0);
   const [maxTrades, setMaxTrades] = useState(2);
+  const [consecutiveLossLimit, setConsecutiveLossLimit] = useState(2);
   const [target1R, setTarget1R] = useState(2.2);
   const [target2R, setTarget2R] = useState(3.0);
   const [breakevenTriggerR, setBreakevenTriggerR] = useState(0.8);
+  const [enableStructuralInval, setEnableStructuralInval] = useState(true);
+  const [invalBufferPct, setInvalBufferPct] = useState(0.07);
 
   // Strategy Engines & Active Instruments
   const [enableIlsmeSweep, setEnableIlsmeSweep] = useState(true);
@@ -77,9 +80,12 @@ export default function Settings({ state, onRefreshBalance }) {
         if (r.risk_per_trade_pct) setRiskPerTrade(r.risk_per_trade_pct * 100);
         if (r.max_daily_drawdown_pct) setMaxDrawdown(r.max_daily_drawdown_pct * 100);
         if (r.max_trades_per_day) setMaxTrades(r.max_trades_per_day);
+        if (r.consecutive_loss_limit !== undefined) setConsecutiveLossLimit(r.consecutive_loss_limit);
         if (r.partial_exit_r) setTarget1R(r.partial_exit_r);
         if (r.target_2_r) setTarget2R(r.target_2_r);
         if (r.breakeven_trigger_r) setBreakevenTriggerR(r.breakeven_trigger_r);
+        if (r.enable_structural_invalidation !== undefined) setEnableStructuralInval(r.enable_structural_invalidation);
+        if (r.invalidation_buffer_pct !== undefined) setInvalBufferPct(r.invalidation_buffer_pct);
 
         const strat = data.strategy || {};
         if (strat.enable_ilsme_sweep !== undefined) setEnableIlsmeSweep(strat.enable_ilsme_sweep);
@@ -152,9 +158,12 @@ export default function Settings({ state, onRefreshBalance }) {
       risk_per_trade_pct: parseFloat(riskPerTrade) / 100,
       max_daily_drawdown_pct: parseFloat(maxDrawdown) / 100,
       max_trades_per_day: parseInt(maxTrades),
+      consecutive_loss_limit: parseInt(consecutiveLossLimit) || 2,
       partial_exit_r: parseFloat(target1R),
       target_2_r: parseFloat(target2R),
       breakeven_trigger_r: parseFloat(breakevenTriggerR),
+      enable_structural_invalidation: enableStructuralInval,
+      invalidation_buffer_pct: parseFloat(invalBufferPct) || 0.07,
       telegram_enabled: telegramEnabled,
       telegram_bot_token: telegramBotToken,
       telegram_chat_id: telegramChatId,
@@ -412,16 +421,57 @@ export default function Settings({ state, onRefreshBalance }) {
               <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>Optimal: 3.0% daily circuit breaker (halts engine)</span>
             </div>
 
-            <div className="form-group">
-              <label className="form-label">Max Trades Per Day</label>
-              <input
-                type="number"
-                className="form-input mono"
-                value={maxTrades}
-                onChange={(e) => setMaxTrades(e.target.value)}
-              />
-              <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>Default: 2 completed setups</span>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+              <div className="form-group" style={{ margin: 0 }}>
+                <label className="form-label">Max Trades Per Day</label>
+                <input
+                  type="number"
+                  className="form-input mono"
+                  value={maxTrades}
+                  onChange={(e) => setMaxTrades(e.target.value)}
+                />
+                <span style={{ fontSize: '0.68rem', color: 'var(--text-dim)' }}>Daily ceiling (e.g. 2–4)</span>
+              </div>
+              <div className="form-group" style={{ margin: 0 }}>
+                <label className="form-label">Consecutive Loss Lock</label>
+                <input
+                  type="number"
+                  className="form-input mono"
+                  value={consecutiveLossLimit}
+                  onChange={(e) => setConsecutiveLossLimit(e.target.value)}
+                />
+                <span style={{ fontSize: '0.68rem', color: 'var(--text-dim)' }}>Lockout after N losses</span>
+              </div>
             </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '0.75rem', paddingTop: '0.75rem', borderTop: '1px solid var(--border-subtle)' }}>
+              <div>
+                <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-main)' }}>Breakout Trap Invalidation</div>
+                <div style={{ fontSize: '0.68rem', color: 'var(--text-dim)' }}>Adaptive ATR & Spot % failed breakout protection</div>
+              </div>
+              <input
+                type="checkbox"
+                checked={enableStructuralInval}
+                onChange={(e) => setEnableStructuralInval(e.target.checked)}
+                style={{ width: '1.1rem', height: '1.1rem', accentColor: 'var(--accent-orange)', cursor: 'pointer' }}
+              />
+            </div>
+
+            {enableStructuralInval && (
+              <div className="form-group" style={{ marginTop: '0.75rem', marginBottom: '0.25rem' }}>
+                <label className="form-label">Dynamic Invalidation Buffer (% of Spot / ATR Blended)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  className="form-input mono"
+                  value={invalBufferPct}
+                  onChange={(e) => setInvalBufferPct(e.target.value)}
+                />
+                <span style={{ fontSize: '0.68rem', color: 'var(--text-dim)' }}>
+                  Default 0.07% (~52pt Sensex, ~36pt BankNifty, ~17pt Nifty). Auto-expands on higher ATR volatility.
+                </span>
+              </div>
+            )}
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginTop: '0.5rem', paddingTop: '0.5rem', borderTop: '1px solid var(--border-subtle)' }}>
               <div className="form-group" style={{ margin: 0 }}>

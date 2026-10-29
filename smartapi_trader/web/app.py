@@ -736,6 +736,10 @@ class SettingsUpdateRequest(BaseModel):
     debit_spread_strikes_otm: Optional[int] = None
     debit_spread_take_profit_pct: Optional[float] = None
     debit_spread_stop_loss_pct: Optional[float] = None
+    consecutive_loss_limit: Optional[int] = None
+    enable_structural_invalidation: Optional[bool] = None
+    invalidation_buffer_pts: Optional[float] = None
+    invalidation_buffer_pct: Optional[float] = None
 
 
 @app.get("/api/settings")
@@ -847,6 +851,36 @@ async def update_settings(req: SettingsUpdateRequest):
             cfg.setdefault("risk", {})["max_open_positions"] = new_max_pos
             rm = ctx.risk_manager or getattr(ctx.orchestrator, "risk_manager", None)
             if rm: rm.max_open_positions = new_max_pos
+
+        if req.consecutive_loss_limit is not None:
+            new_cl = int(req.consecutive_loss_limit)
+            cfg.setdefault("risk", {})["consecutive_loss_limit"] = new_cl
+            rm = ctx.risk_manager or getattr(ctx.orchestrator, "risk_manager", None)
+            if rm: rm.consecutive_loss_limit = new_cl
+            if ctx.strategy and hasattr(ctx.strategy, "consecutive_loss_limit"):
+                ctx.strategy.consecutive_loss_limit = new_cl
+
+        if req.enable_structural_invalidation is not None:
+            cfg.setdefault("risk", {})["enable_structural_invalidation"] = req.enable_structural_invalidation
+            rm = ctx.risk_manager or getattr(ctx.orchestrator, "risk_manager", None)
+            if rm and hasattr(rm, "cfg"):
+                rm.cfg["enable_structural_invalidation"] = req.enable_structural_invalidation
+
+        if req.invalidation_buffer_pts is not None:
+            new_ib = float(req.invalidation_buffer_pts)
+            cfg.setdefault("risk", {})["invalidation_buffer_pts"] = new_ib
+            rm = ctx.risk_manager or getattr(ctx.orchestrator, "risk_manager", None)
+            if rm and hasattr(rm, "cfg"):
+                rm.cfg["invalidation_buffer_pts"] = new_ib
+
+        if req.invalidation_buffer_pct is not None:
+            new_ib_pct = float(req.invalidation_buffer_pct)
+            cfg.setdefault("risk", {})["invalidation_buffer_pct"] = new_ib_pct
+            rm = ctx.risk_manager or getattr(ctx.orchestrator, "risk_manager", None)
+            if rm and hasattr(rm, "cfg"):
+                rm.cfg["invalidation_buffer_pct"] = new_ib_pct
+            if ctx.strategy and hasattr(ctx.strategy, "risk_cfg"):
+                ctx.strategy.risk_cfg["invalidation_buffer_pct"] = new_ib_pct
 
         if req.orb_cutoff_time is not None:
             cfg.setdefault("risk", {})["orb_cutoff_time"] = req.orb_cutoff_time.strip()

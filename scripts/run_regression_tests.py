@@ -561,6 +561,7 @@ class Test11BrokerReconciliationAndHardenedControls(unittest.IsolatedAsyncioTest
             stop_loss=88.0,
             target_1=130.0,
             swing_invalidation_level=24800.0,
+            invalidation_buffer=12.0,
             strategy_name="Momentum Breakout",
             is_open=True
         )
@@ -571,6 +572,10 @@ class Test11BrokerReconciliationAndHardenedControls(unittest.IsolatedAsyncioTest
         tick_normal = TickEvent(token="123", ltp=98.0)
         await rm._on_tick(tick_normal)
         self.assertTrue(pos.is_open, "Position should NOT be invalidated by a 1-point retest dip!")
+
+        # Dynamic Spot % scaling test: SENSEX @ 75k should produce ~52.5pt buffer
+        sensex_buf = rm._get_invalidation_buffer("SENSEX", 75000.0)
+        self.assertAlmostEqual(sensex_buf, 52.5, places=1)
 
         # Test spot at 24785.0 (15 points below 24800 swing level, exceeds 12pt buffer) -> MUST invalidate
         self.state_mgr.spot_levels["NIFTY"] = {"spot": 24785.0}

@@ -44,6 +44,7 @@ class SniperILSMEStrategy(BaseStrategy):
         self.max_vwap_atr_mult = float(self.cfg.get("max_vwap_atr_multiplier", 1.6))
         self.donchian_lookback_bars = int(self.cfg.get("donchian_lookback_bars", 15))
         self.donchian_require_or_break = bool(self.cfg.get("donchian_require_or_break", True))
+        self.consecutive_loss_limit = int(self.risk_cfg.get("consecutive_loss_limit", 2))
         self.state: Dict[str, Dict[str, Any]] = {}
         for idx in self.active_indices:
             self._init_index_state(idx)
@@ -671,6 +672,7 @@ class SniperILSMEStrategy(BaseStrategy):
                         "bottom": max(or_h, bar.low),
                         "displacement_low": or_h,
                         "displacement_high": bar.high,
+                        "breakout_boundary": or_h,
                         "underlying": underlying
                     }
                     status_msg = f"🚀 Momentum ORB Formed ({underlying} Call): Fresh Breakout above OR High ₹{or_h:.2f} (+{bar.close - or_h:.1f} pts, Vol: {bar.volume})"
@@ -708,6 +710,7 @@ class SniperILSMEStrategy(BaseStrategy):
                         "bottom": bar.low,
                         "displacement_high": or_l,
                         "displacement_low": bar.low,
+                        "breakout_boundary": or_l,
                         "underlying": underlying
                     }
                     status_msg = f"🚀 Momentum ORB Formed ({underlying} Put): Fresh Breakdown below OR Low ₹{or_l:.2f} (-{or_l - bar.close:.1f} pts, Vol: {bar.volume})"
@@ -804,6 +807,7 @@ class SniperILSMEStrategy(BaseStrategy):
                                 "bottom": curr_bar.low,
                                 "displacement_high": d_high,
                                 "displacement_low": curr_bar.low,
+                                "breakout_boundary": d_low,
                                 "swing_pts": swing_pts,
                                 "underlying": underlying
                             }
@@ -834,6 +838,7 @@ class SniperILSMEStrategy(BaseStrategy):
                                 "bottom": curr_bar.low,
                                 "displacement_low": d_low,
                                 "displacement_high": curr_bar.high,
+                                "breakout_boundary": d_high,
                                 "swing_pts": swing_pts,
                                 "underlying": underlying
                             }
@@ -867,7 +872,7 @@ class SniperILSMEStrategy(BaseStrategy):
         # Check if trade already active or daily limit reached
         is_paper = (self.state_mgr.execution_mode == "PAPER")
         current_trades = self.state_mgr.paper_trades_taken if is_paper else self.state_mgr.trades_taken_today
-        if self._is_in_trade(underlying) or current_trades >= self.state_mgr.max_trades_allowed or self.state_mgr.consecutive_losses >= 2 or self.state_mgr.is_panic_active or self.state_mgr.is_halted:
+        if self._is_in_trade(underlying) or current_trades >= self.state_mgr.max_trades_allowed or self.state_mgr.consecutive_losses >= self.consecutive_loss_limit or self.state_mgr.is_panic_active or self.state_mgr.is_halted:
             return
 
         triggered = False
@@ -915,8 +920,8 @@ class SniperILSMEStrategy(BaseStrategy):
             logger.warning(f"[STRATEGY] Blocked signal dispatch for {underlying}: Daily trade limit reached ({current_trades}/{self.state_mgr.max_trades_allowed}).")
             return
 
-        if self.state_mgr.consecutive_losses >= 2:
-            logger.warning(f"[STRATEGY] Blocked signal dispatch for {underlying}: Consecutive loss circuit tripped ({self.state_mgr.consecutive_losses} losses).")
+        if self.state_mgr.consecutive_losses >= self.consecutive_loss_limit:
+            logger.warning(f"[STRATEGY] Blocked signal dispatch for {underlying}: Consecutive loss circuit tripped ({self.state_mgr.consecutive_losses} losses >= {self.consecutive_loss_limit} limit).")
             return
 
         if self.state_mgr.is_panic_active or self.state_mgr.is_halted:
@@ -1020,12 +1025,30 @@ class SniperILSMEStrategy(BaseStrategy):
         target_1 = round(entry_price + (unit_risk * target_r), 2)
 
         # Structural Invalidation Level:
-        # For ORB setups: drop back below OR High (for CE) or rise back above OR Low (for PE) is invalidation.
-        # For Donchian & ILSME: displacement swing level.
+        # Invalidation level represents the structural support/resistance boundary that,
+        # if violated by spot, indicates the breakout or reversal momentum has failed.
+        # For BUY_CE: boundary is below spot (OR High, Donchian High, or displacement low).
+        # For BUY_PE: boundary is above spot (OR Low, Donchian Low, or displacement high).
         if strat_source == "MOMENTUM_ORB":
-            swing_inval = fvg.get("displacement_low" if signal_type == "BUY_CE" else "displacement_high", 0.0)
+            swing_inval = fvg.get("breakout_boundary", fvg.get("displacement_low" if signal_type == "BUY_CE" else "displacement_high", 0.0))
+        elif strat_source == "TREND_PULLBACK":
+            swing_inval = fvg.get("breakout_boundary", fvg.get("displacement_low" if signal_type == "BUY_CE" else "displacement_high", 0.0))
         else:
-            swing_inval = fvg.get("displacement_high" if signal_type == "BUY_CE" else "displacement_low", 0.0)
+            swing_inval = fvg.get("displacement_low" if signal_type == "BUY_CE" else "displacement_high", 0.0)
+
+        # Scale-Invariant & Volatility-Adaptive Invalidation Buffer:
+        # 1. Calculates rolling 14-period 3m ATR for the underlying.
+        # 2. Computes baseline spot-proportional percentage (default 0.07% of spot).
+        # 3. Blends 0.40x ATR with spot percentage so high volatility expands buffer,
+        #    low volatility contracts buffer, and price level differences (SENSEX vs NIFTY) are handled naturally.
+        idx_token = self.index_tokens.get(underlying, "")
+        atr_cur = self._calculate_atr(idx_token, period=14) if idx_token else 0.0
+        buf_pct = float(self.risk_cfg.get("invalidation_buffer_pct", 0.07)) / 100.0
+        spot_pct_buf = round(spot * buf_pct, 1) if spot > 0 else float(self.risk_cfg.get("invalidation_buffer_pts", 15.0))
+        if atr_cur > 1.0:
+            dyn_inval_buf = round(max(atr_cur * 0.40, spot_pct_buf), 1)
+        else:
+            dyn_inval_buf = spot_pct_buf
 
         # Human readable reason & strat name
         if strat_source == "TREND_PULLBACK":
@@ -1069,11 +1092,12 @@ class SniperILSMEStrategy(BaseStrategy):
                 fvg_bottom=fvg.get("bottom", 0.0),
                 sweep_level=st.get("sweep_price", 0.0),
                 swing_invalidation_level=swing_inval,
+                invalidation_buffer=dyn_inval_buf,
                 strategy_name=f"{strat_label} (Naked)",
                 reason=reason_text,
                 execution_strategy="NAKED"
             )
-            logger.info(f"[STRATEGY] ===> DISPATCHING NAKED SIGNAL [{strat_label}]: {signal_naked.signal_type} {signal_naked.tradingsymbol} Entry=₹{entry_price} SL=₹{stop_loss} T1=₹{target_1} (Structural Level: {swing_inval})")
+            logger.info(f"[STRATEGY] ===> DISPATCHING NAKED SIGNAL [{strat_label}]: {signal_naked.signal_type} {signal_naked.tradingsymbol} Entry=₹{entry_price} SL=₹{stop_loss} T1=₹{target_1} (Structural Level: {swing_inval}, Buffer: {dyn_inval_buf}pt)")
             await self.bus.publish(signal_naked)
 
         # 2. Dispatch Debit Spread Signal if selected
@@ -1135,6 +1159,7 @@ class SniperILSMEStrategy(BaseStrategy):
                     fvg_bottom=fvg.get("bottom", 0.0),
                     sweep_level=st.get("sweep_price", 0.0),
                     swing_invalidation_level=swing_inval,
+                    invalidation_buffer=dyn_inval_buf,
                     strategy_name=f"{strat_label} (Debit Spread)",
                     reason=f"{reason_text} [Debit Spread: Buy {option_contract['strike']} / Sell {hedge_contract['strike']}]",
                     execution_strategy="DEBIT_SPREAD",
