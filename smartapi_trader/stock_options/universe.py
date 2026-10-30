@@ -813,3 +813,18 @@ class StockUniverseManager:
             "tick_size": stock_meta["tick_size"],
             "sector": stock_meta["sector"]
         }
+
+    def get_contract_by_symbol(self, tradingsymbol: str) -> Optional[Dict[str, Any]]:
+        """Finds instrument metadata from local SQLite index by tradingsymbol."""
+        if not tradingsymbol:
+            return None
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM instruments WHERE symbol = ? LIMIT 1", (tradingsymbol.strip(),))
+                row = cursor.fetchone()
+                if row:
+                    return dict(row)
+        except Exception as e:
+            logger.debug(f"[STOCK_UNIVERSE] Error looking up contract by symbol {tradingsymbol}: {e}")
+        return None

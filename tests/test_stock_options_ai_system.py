@@ -334,6 +334,67 @@ class TestStockOptionsAISystem(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("1234567890abcdef", cfg["openai_key_preview"])
         self.assertTrue(cfg["openai_key_preview"].startswith("sk-p..."))
 
+    # 13. Autonomous Position Real-Time LTP & Bracket Triggers
+    async def test_13_autonomous_position_ltp_and_bracket_triggers(self):
+        """Verifies real-time LTP update, floating PnL calculation, and auto-bracket exits."""
+        # 1. Open a paper position
+        candidate = {
+            "symbol": "TATASTEEL",
+            "setup_type": "Breakout",
+            "primary_contract": {
+                "strike": 165.0,
+                "option_type": "CE",
+                "expiry": "26NOV2026",
+                "indicative_premium": 5.0
+            },
+            "technical": {
+                "reference_price": 165.0
+            },
+            "trade_management": {
+                "stop_loss": 3.5,
+                "target_1": 8.0
+            }
+        }
+        res = await self.paper_agent.execute_simulated_trade(candidate)
+        self.assertEqual(res["status"], "success")
+        pos = self.storage.get_positions(is_paper=True, open_only=True)[0]
+        sym = pos["symbol"]
+        qty = pos["quantity"]
+
+        # Mock market data service to return custom LTP
+        mock_market_data = MagicMock()
+        self.paper_agent.market_data = mock_market_data
+
+        # Test Case A: Price rises to ₹6.50 (Floating Profit)
+        mock_market_data.get_option_ltp.return_value = 6.50
+        updated = await self.paper_agent.update_open_positions_ltp()
+        self.assertEqual(len(updated), 1)
+        self.assertEqual(updated[0]["current_ltp"], 6.50)
+        self.assertGreater(updated[0]["unrealized_pnl"], 0.0)
+
+        # Verify DB updated
+        db_pos = self.storage.get_positions(is_paper=True, open_only=True)[0]
+        self.assertEqual(db_pos["current_ltp"], 6.50)
+        self.assertGreater(db_pos["unrealized_pnl"], 0.0)
+
+        # Test Case B: Price hits Target 1 (₹8.50 >= target_1 of 8.0) -> Auto TP
+        mock_market_data.get_option_ltp.return_value = 8.50
+        await self.paper_agent.update_open_positions_ltp()
+
+        # Position should now be auto-closed
+        open_pos = self.storage.get_positions(is_paper=True, open_only=True)
+        self.assertEqual(len(open_pos), 0)
+
+        # Trade should be recorded with Target 1 Hit
+        trades = self.storage.get_trades(is_paper=True)
+        self.assertEqual(len(trades), 1)
+        self.assertIn("Target 1 Hit", trades[0]["exit_reason"])
+        self.assertGreater(trades[0]["gross_pnl"], 0.0)
+
+        # Clean up
+        self.paper_agent.stop()
+
 
 if __name__ == "__main__":
     unittest.main()
+

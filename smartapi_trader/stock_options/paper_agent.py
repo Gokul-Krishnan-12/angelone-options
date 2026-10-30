@@ -69,16 +69,21 @@ class StockOptionsPaperAgent:
         storage: StockOptionsStorage,
         validator: Optional[StockOptionsValidator] = None,
         initial_capital: float = 500000.0,
-        notifier: Optional[Any] = None
+        notifier: Optional[Any] = None,
+        market_data: Optional[Any] = None,
+        event_bus: Optional[Any] = None
     ):
         self.storage = storage
         self.validator = validator or StockOptionsValidator()
         self.simulation_engine = StockOptionsPaperEngine(initial_capital=initial_capital)
         self.notifier = notifier
+        self.market_data = market_data
+        self.event_bus = event_bus
 
         self.status = "RUNNING"  # "RUNNING", "PAUSED", "STOPPED"
-        self.auto_execute = False
+        self.auto_execute = True
         self._lock = asyncio.Lock()
+        self._monitor_task: Optional[asyncio.Task] = None
 
         # Load persisted settings or initialize defaults
         self.virtual_capital = float(self.storage.get_setting("paper_stock_opt_capital", initial_capital))
@@ -89,15 +94,143 @@ class StockOptionsPaperAgent:
 
     def start(self):
         self.status = "RUNNING"
-        logger.info("[PAPER_AGENT] Stock Options Paper Agent STARTED. Independent simulation active.")
+        self._ensure_monitor_task()
+        logger.info("[PAPER_AGENT] Stock Options Paper Agent STARTED. Autonomous live bracket & PnL monitoring active.")
 
     def pause(self):
         self.status = "PAUSED"
+        if self._monitor_task and not self._monitor_task.done():
+            self._monitor_task.cancel()
+            self._monitor_task = None
         logger.info("[PAPER_AGENT] Stock Options Paper Agent PAUSED.")
 
     def stop(self):
         self.status = "STOPPED"
+        if self._monitor_task and not self._monitor_task.done():
+            self._monitor_task.cancel()
+            self._monitor_task = None
         logger.info("[PAPER_AGENT] Stock Options Paper Agent STOPPED.")
+
+    def _ensure_monitor_task(self):
+        """Ensures the background position monitor task is running."""
+        if self.status == "RUNNING" and (self._monitor_task is None or self._monitor_task.done()):
+            try:
+                loop = asyncio.get_running_loop()
+                self._monitor_task = loop.create_task(self._position_monitor_loop())
+            except RuntimeError:
+                pass
+
+    async def _position_monitor_loop(self):
+        """
+        Autonomous Position Monitor:
+        Runs in background every 3 seconds to poll live market prices, update
+        unrealized P&L in real time, and automatically execute Stop-Loss,
+        Target 1 take-profit, or 15:15 IST EOD square-offs.
+        """
+        logger.info("[PAPER_AGENT] 🚀 Autonomous real-time position & bracket monitor loop started.")
+        while self.status == "RUNNING":
+            try:
+                await self.update_open_positions_ltp()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[PAPER_AGENT] Error in position monitor loop: {e}")
+            await asyncio.sleep(3.0)
+
+    async def update_open_positions_ltp(self) -> List[Dict[str, Any]]:
+        """
+        Fetches live option prices from exchange for all open simulated positions,
+        updates floating PnL, and autonomously triggers bracket exits (SL, TP, EOD).
+        Returns the updated positions list.
+        """
+        positions = self.storage.get_positions(is_paper=True, open_only=True)
+        if not positions:
+            return []
+
+        from datetime import time as dt_time
+        cur_ist = datetime.now()
+        is_eod_time = (cur_ist.time() >= dt_time(15, 15))
+
+        updated_list = []
+        for pos in positions:
+            sym = pos["symbol"]
+            qty = int(pos.get("quantity") or 0)
+            entry_p = float(pos.get("entry_price") or 0.0)
+            sl = float(pos.get("stop_loss") or 0.0)
+            t1 = float(pos.get("target_1") or 0.0)
+            underlying = pos.get("underlying") or ""
+            tok = pos.get("token") or ""
+            opt_type = pos.get("option_type") or ("CE" if "CE" in sym else "PE")
+            strike = float(pos.get("strike") or 0.0)
+
+            # 1. Fetch current live option LTP
+            current_ltp = 0.0
+            if self.market_data:
+                try:
+                    current_ltp = self.market_data.get_option_ltp(
+                        symbol=sym,
+                        underlying=underlying,
+                        token=tok,
+                        strike=strike,
+                        option_type=opt_type
+                    )
+                except Exception as e:
+                    logger.debug(f"[PAPER_AGENT] Failed to fetch LTP for {sym}: {e}")
+
+            if current_ltp <= 0:
+                current_ltp = float(pos.get("current_ltp") or entry_p)
+
+            # 2. Compute Floating Real-time PnL
+            unrealized_pnl = round((current_ltp - entry_p) * qty, 2)
+            unrealized_pnl_pct = round(((current_ltp - entry_p) / entry_p) * 100.0, 2) if entry_p > 0 else 0.0
+
+            # 3. Persist updated live price and PnL
+            self.storage.update_position_ltp(
+                symbol=sym,
+                is_paper=True,
+                current_ltp=current_ltp,
+                unrealized_pnl=unrealized_pnl
+            )
+
+            pos["current_ltp"] = current_ltp
+            pos["unrealized_pnl"] = unrealized_pnl
+            pos["unrealized_pnl_pct"] = unrealized_pnl_pct
+
+            # 4. Autonomous Bracket Triggers
+            # Stop Loss (LTP <= Stop Loss for option buyers)
+            if sl > 0 and current_ltp <= sl:
+                logger.warning(f"[PAPER_AGENT] 🛑 AUTO STOP-LOSS TRIGGERED: {sym} LTP ₹{current_ltp} <= SL ₹{sl}. Auto-liquidating virtual position.")
+                self.close_simulated_position(
+                    symbol=sym,
+                    exit_nominal_price=current_ltp,
+                    reason=f"Auto Stop-Loss Hit (SL: ₹{sl}, Exit: ₹{current_ltp})"
+                )
+                continue
+
+            # Target 1 (LTP >= Target 1 for option buyers)
+            if t1 > 0 and current_ltp >= t1:
+                logger.info(f"[PAPER_AGENT] 🎯 AUTO TARGET TRIGGERED: {sym} LTP ₹{current_ltp} >= Target ₹{t1}. Auto-liquidating virtual position for profit.")
+                self.close_simulated_position(
+                    symbol=sym,
+                    exit_nominal_price=current_ltp,
+                    reason=f"Auto Target 1 Hit (T1: ₹{t1}, Exit: ₹{current_ltp})"
+                )
+                continue
+
+            # EOD Auto Square-off at 15:15 IST
+            if is_eod_time:
+                logger.info(f"[PAPER_AGENT] ⏰ AUTO EOD SQUARE-OFF (15:15 IST): Liquidating {sym} @ ₹{current_ltp}.")
+                self.close_simulated_position(
+                    symbol=sym,
+                    exit_nominal_price=current_ltp,
+                    reason="EOD Auto Square-off (15:15 IST)"
+                )
+                continue
+
+            updated_list.append(pos)
+
+        return updated_list
+
 
     def update_settings(
         self,
@@ -212,6 +345,7 @@ class StockOptionsPaperAgent:
             pos_record = {
                 "symbol": params["symbol"],
                 "underlying": params["underlying"],
+                "token": params.get("token", ""),
                 "option_type": params["option_type"],
                 "strike": params["strike"],
                 "expiry": params["expiry"],
@@ -227,6 +361,7 @@ class StockOptionsPaperAgent:
                 "execution_mode": "PAPER"
             }
             self.storage.save_position(pos_record)
+            self._ensure_monitor_task()
 
             logger.info(
                 f"[PAPER_AGENT] ✅ Virtual trade executed: {params['symbol']} Qty={qty} "

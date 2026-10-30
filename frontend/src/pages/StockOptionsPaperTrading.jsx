@@ -712,6 +712,9 @@ export default function StockOptionsPaperTrading() {
                   {filteredPositions.map((pos) => {
                     const pnl = parseFloat(pos.unrealized_pnl) || 0;
                     const isProfit = pnl >= 0;
+                    const entryP = parseFloat(pos.entry_price) || 0;
+                    const curLtp = parseFloat(pos.current_ltp) || entryP;
+                    const pnlPct = entryP > 0 ? (((curLtp - entryP) / entryP) * 100).toFixed(2) : '0.00';
                     return (
                       <div
                         key={pos.symbol}
@@ -724,8 +727,9 @@ export default function StockOptionsPaperTrading() {
                       >
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.5rem' }}>
                           <div>
-                            <div className="mono" style={{ fontSize: '1rem', fontWeight: 700, color: '#fff' }}>
-                              {pos.symbol}
+                            <div className="mono" style={{ fontSize: '1rem', fontWeight: 700, color: '#fff', display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                              <span>{pos.symbol}</span>
+                              <span className="live-pulse-dot" style={{ width: 7, height: 7 }} title="Live Market Price Stream Active" />
                             </div>
                             <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>
                               Underlying: <strong style={{ color: '#fff' }}>{pos.underlying}</strong> • Qty: {pos.quantity} ({pos.lots} Lot)
@@ -738,12 +742,22 @@ export default function StockOptionsPaperTrading() {
                               style={{
                                 fontSize: '1.15rem',
                                 fontWeight: 800,
-                                color: isProfit ? 'var(--accent-emerald)' : 'var(--accent-red)'
+                                color: isProfit ? 'var(--accent-emerald)' : 'var(--accent-red)',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'flex-end',
+                                gap: '0.35rem'
                               }}
                             >
-                              {isProfit ? `+${formatINR(pnl)}` : formatINR(pnl)}
+                              <span>{isProfit ? `+${formatINR(pnl)}` : formatINR(pnl)}</span>
+                              <span style={{ fontSize: '0.78rem', fontWeight: 600 }}>
+                                ({isProfit ? `+${pnlPct}%` : `${pnlPct}%`})
+                              </span>
                             </div>
-                            <div style={{ fontSize: '0.68rem', color: 'var(--text-dim)' }}>Floating Unrealized</div>
+                            <div style={{ fontSize: '0.68rem', color: 'var(--text-dim)', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '0.25rem' }}>
+                              <span className="live-pulse-dot" style={{ width: 5, height: 5 }} />
+                              <span>Live Floating P&L</span>
+                            </div>
                           </div>
                         </div>
 
@@ -761,7 +775,7 @@ export default function StockOptionsPaperTrading() {
                           }}
                         >
                           <div>Entry: <span className="mono" style={{ color: '#fff' }}>₹{pos.entry_price}</span></div>
-                          <div>Current: <span className="mono" style={{ color: 'var(--accent-blue)', fontWeight: 600 }}>₹{pos.current_ltp}</span></div>
+                          <div>Current LTP: <span className="mono" style={{ color: 'var(--accent-blue)', fontWeight: 700 }}>₹{pos.current_ltp}</span></div>
                           <div>Stop Loss: <span className="mono" style={{ color: 'var(--accent-red)' }}>₹{pos.stop_loss}</span></div>
                           <div>Target 1: <span className="mono" style={{ color: 'var(--accent-emerald)' }}>₹{pos.target_1}</span></div>
                         </div>
@@ -772,15 +786,20 @@ export default function StockOptionsPaperTrading() {
                             style={{
                               background: 'rgba(56, 189, 248, 0.12)',
                               color: 'var(--accent-blue)',
-                              fontSize: '0.7rem'
+                              fontSize: '0.7rem',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '0.35rem'
                             }}
                           >
-                            Simulated Bracket Active
+                            <Zap size={11} />
+                            <span>Auto-Bracket Active (SL ₹{pos.stop_loss} / T1 ₹{pos.target_1})</span>
                           </span>
                           <button
                             className="btn-secondary danger"
                             style={{ padding: '0.35rem 0.75rem', fontSize: '0.74rem' }}
                             onClick={() => handleClosePosition(pos.symbol, pos.current_ltp)}
+                            title="Manually liquidate immediately before automatic SL/TP"
                           >
                             Simulate Square-off
                           </button>

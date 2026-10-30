@@ -111,6 +111,7 @@ class StockOptionsStorage:
                     realized_pnl REAL DEFAULT 0.0,
                     stop_loss REAL,
                     target_1 REAL,
+                    token TEXT DEFAULT '',
                     is_open INTEGER DEFAULT 1,
                     is_paper INTEGER DEFAULT 0,
                     execution_mode TEXT DEFAULT 'PAPER',
@@ -118,6 +119,12 @@ class StockOptionsStorage:
                     updated_at TEXT
                 );
             """)
+
+            # Ensure token column exists in existing DBs
+            try:
+                conn.execute("ALTER TABLE stock_options_positions ADD COLUMN token TEXT DEFAULT ''")
+            except Exception:
+                pass
 
             # 5. Persistent Settings Table
             conn.execute("""
@@ -267,8 +274,8 @@ class StockOptionsStorage:
             now = datetime.now().isoformat()
             conn.execute("""
                 INSERT OR REPLACE INTO stock_options_positions
-                (symbol, underlying, option_type, strike, expiry, quantity, lot_size, lots, entry_price, current_ltp, unrealized_pnl, realized_pnl, stop_loss, target_1, is_open, is_paper, execution_mode, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (symbol, underlying, option_type, strike, expiry, quantity, lot_size, lots, entry_price, current_ltp, unrealized_pnl, realized_pnl, stop_loss, target_1, token, is_open, is_paper, execution_mode, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 pos["symbol"],
                 pos.get("underlying", ""),
@@ -284,12 +291,23 @@ class StockOptionsStorage:
                 float(pos.get("realized_pnl", 0.0)),
                 float(pos.get("stop_loss", 0.0)),
                 float(pos.get("target_1", 0.0)),
+                str(pos.get("token", "")),
                 1 if pos.get("is_open", True) else 0,
                 1 if pos.get("is_paper", False) else 0,
                 pos.get("execution_mode", "PAPER"),
                 pos.get("created_at", now),
                 now
             ))
+
+    def update_position_ltp(self, symbol: str, is_paper: bool, current_ltp: float, unrealized_pnl: float):
+        """Updates live LTP and floating unrealized PnL for an open stock options position."""
+        with self._get_connection() as conn:
+            now = datetime.now().isoformat()
+            conn.execute("""
+                UPDATE stock_options_positions
+                SET current_ltp = ?, unrealized_pnl = ?, updated_at = ?
+                WHERE symbol = ? AND is_paper = ? AND is_open = 1
+            """, (float(current_ltp), float(unrealized_pnl), now, symbol, 1 if is_paper else 0))
 
     def get_positions(self, is_paper: bool, open_only: bool = True) -> List[Dict[str, Any]]:
         with self._get_connection() as conn:

@@ -157,7 +157,14 @@ class TradingOrchestrator:
         self.overnight_planner = OvernightAIPlanner(self.ai_service, self.stock_market_data, self.stock_storage, self.notifier)
         self.intraday_scanner = IntradayAIScanner(self.ai_service, self.stock_market_data, self.stock_storage, default_interval_mins=5, notifier=self.notifier)
         self.stock_live_agent = StockOptionsLiveAgent(self.event_bus, self.risk_manager, self.live_engine, self.stock_storage, self.stock_validator, self.notifier)
-        self.stock_paper_agent = StockOptionsPaperAgent(self.stock_storage, self.stock_validator, initial_capital=500000.0, notifier=self.notifier)
+        self.stock_paper_agent = StockOptionsPaperAgent(
+            storage=self.stock_storage,
+            validator=self.stock_validator,
+            initial_capital=500000.0,
+            notifier=self.notifier,
+            market_data=self.stock_market_data,
+            event_bus=self.event_bus
+        )
 
         so_ctx.ai_service = self.ai_service
         so_ctx.market_data = self.stock_market_data
@@ -386,13 +393,27 @@ class TradingOrchestrator:
                 self.telegram_bot.start()
             self._eod_task = asyncio.create_task(self._eod_monitor_loop())
             self._watchdog_task = asyncio.create_task(self._market_health_watchdog_loop())
-            logger.info("[ORCHESTRATOR] Telegram 2-way bot, EOD scheduler & market health watchdog active.")
+        # Start Stock Options Autonomous Monitor and Scanner
+        self.stock_paper_agent.start()
+        if self.stock_storage.get_setting("scanner_is_active", False):
+            try:
+                await self.intraday_scanner.start()
+                logger.info("[ORCHESTRATOR] 🎯 Resumed autonomous intraday stock options scanner on boot.")
+            except Exception as e:
+                logger.warning(f"[ORCHESTRATOR] Could not auto-resume scanner: {e}")
 
         logger.info(f"[ORCHESTRATOR] System ready! Active Execution Mode: {self.mode}")
 
     async def shutdown(self):
         """Gracefully halts all components and flushes event buffers."""
         logger.warning("[ORCHESTRATOR] Initiating graceful shutdown...")
+        if hasattr(self, "stock_paper_agent") and self.stock_paper_agent:
+            self.stock_paper_agent.stop()
+        if hasattr(self, "intraday_scanner") and self.intraday_scanner:
+            try:
+                await self.intraday_scanner.stop()
+            except Exception:
+                pass
         if self._eod_task:
             self._eod_task.cancel()
         if hasattr(self, "_watchdog_task") and self._watchdog_task:

@@ -274,3 +274,75 @@ class StockMarketDataService:
                     break
 
         return diversified
+
+    def get_spot_ltp(self, symbol: str) -> float:
+        """Returns underlying stock spot price from SmartAPI or universe base price."""
+        sym = symbol.upper().strip()
+        meta = NSE_FO_STOCKS.get(sym, {})
+        base_p = meta.get("base_price", 1000.0)
+        if self.smart_api and meta.get("token_nse"):
+            try:
+                res = self.smart_api.ltpData(
+                    exchange="NSE",
+                    tradingsymbol=f"{sym}-EQ",
+                    symboltoken=str(meta["token_nse"])
+                )
+                if res and isinstance(res, dict) and res.get("status") and res.get("data"):
+                    ltp = float(res["data"].get("ltp") or 0.0)
+                    if ltp > 0:
+                        return round(ltp, 2)
+            except Exception as e:
+                logger.debug(f"[MARKET_DATA] Live spot query for {sym} failed: {e}")
+        return base_p
+
+    def get_option_ltp(
+        self,
+        symbol: str,
+        underlying: str,
+        token: Optional[str] = None,
+        strike: Optional[float] = None,
+        option_type: Optional[str] = None
+    ) -> float:
+        """
+        Retrieves real-time or modeled market LTP for a stock option contract.
+        1. Queries Angel One SmartAPI ltpData directly (if connected).
+        2. If broker quote is unavailable, calculates dynamic option premium using
+           underlying spot price + intrinsic/extrinsic time decay model.
+        """
+        symbol = str(symbol).strip()
+        underlying = str(underlying).upper().strip()
+        opt_type = str(option_type).upper().strip() if option_type else ("CE" if "CE" in symbol else "PE")
+        strike_val = float(strike) if strike else 0.0
+
+        if not strike_val or not token:
+            try:
+                contract_meta = self.universe_mgr.get_contract_by_symbol(symbol)
+                if contract_meta:
+                    if not strike_val:
+                        strike_val = float(contract_meta.get("strike", 0.0))
+                    if not token:
+                        token = str(contract_meta.get("token", ""))
+            except Exception:
+                pass
+
+        # 1. Try real broker quote from Angel One
+        if self.smart_api and token:
+            try:
+                res = self.smart_api.ltpData(exchange="NFO", tradingsymbol=symbol, symboltoken=str(token))
+                if res and isinstance(res, dict) and res.get("status") and res.get("data"):
+                    live_ltp = float(res["data"].get("ltp") or 0.0)
+                    if live_ltp > 0:
+                        return round(live_ltp, 2)
+            except Exception as e:
+                logger.debug(f"[MARKET_DATA] Broker ltpData query for {symbol} ({token}) failed: {e}")
+
+        # 2. Dynamic spot-anchored pricing model
+        spot = self.get_spot_ltp(underlying)
+        if strike_val <= 0:
+            strike_val = spot
+
+        intrinsic = max(0.0, spot - strike_val) if opt_type == "CE" else max(0.0, strike_val - spot)
+        dist_pct = abs(spot - strike_val) / max(1.0, spot)
+        base_time_val = spot * 0.02
+        time_val = max(0.25, round(base_time_val * math.exp(-dist_pct * 7.5), 2))
+        return round(max(0.10, intrinsic + time_val), 2)

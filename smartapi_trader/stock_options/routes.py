@@ -63,7 +63,11 @@ def ensure_stock_options_initialized():
     if so_ctx.paper_agent is None:
         from smartapi_trader.stock_options.paper_agent import StockOptionsPaperAgent
         from smartapi_trader.stock_options.validator import StockOptionsValidator
-        so_ctx.paper_agent = StockOptionsPaperAgent(so_ctx.storage, StockOptionsValidator(so_ctx.universe_mgr))
+        so_ctx.paper_agent = StockOptionsPaperAgent(
+            storage=so_ctx.storage,
+            validator=StockOptionsValidator(so_ctx.universe_mgr),
+            market_data=so_ctx.market_data
+        )
 
     bind_dispatch_callbacks()
 
@@ -528,6 +532,11 @@ async def reset_paper_agent(capital: Optional[float] = 500000.0):
 async def get_paper_positions():
     if not so_ctx.storage:
         raise HTTPException(status_code=503, detail="Storage not initialized.")
+    if so_ctx.paper_agent:
+        try:
+            return await so_ctx.paper_agent.update_open_positions_ltp()
+        except Exception as e:
+            logger.debug(f"[PAPER_ROUTES] Live positions LTP update error: {e}")
     return so_ctx.storage.get_positions(is_paper=True, open_only=True)
 
 @router.get("/paper/orders")
