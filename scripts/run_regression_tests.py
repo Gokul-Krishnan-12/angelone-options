@@ -682,6 +682,96 @@ class Test11BrokerReconciliationAndHardenedControls(unittest.IsolatedAsyncioTest
         self.assertIn("trades", res)
 
 
+class Test12SniperStrategySignalDispatch(unittest.IsolatedAsyncioTestCase):
+    """Verifies that SniperILSMEStrategy correctly resolves index_tokens and dispatches signals without attribute errors."""
+
+    async def asyncSetUp(self):
+        self.bus = EventBus()
+        self.bus.start()
+        self.temp_db = "data/test_reg_strat.db"
+        if os.path.exists(self.temp_db):
+            os.remove(self.temp_db)
+        self.storage = TradeStorage(self.temp_db)
+        self.state_mgr = StateManager(self.bus, execution_mode="PAPER", initial_capital=100000.0, storage=self.storage)
+
+    async def asyncTearDown(self):
+        await self.bus.stop()
+        if os.path.exists(self.temp_db):
+            try:
+                os.remove(self.temp_db)
+            except OSError:
+                pass
+
+    async def test_signal_generation_with_index_tokens(self):
+        symbols_cfg = {
+            "indices": {
+                "NIFTY": {"spot_token": "99926000", "lot_size": 65},
+                "SENSEX": {"spot_token": "99919000", "lot_size": 20}
+            }
+        }
+        strat_cfg = {
+            "strategy": {
+                "active_indices": ["NIFTY", "SENSEX"],
+                "paper_execution_strategies": ["NAKED"]
+            },
+            "risk": {
+                "invalidation_buffer_pct": 0.07,
+                "invalidation_buffer_pts": 15.0
+            }
+        }
+
+        # Mock instrument loader
+        class MockLoader:
+            def get_atm_option(self, underlying, spot_price, option_type, expiry_index=0):
+                return {
+                    "strike": 23000.0,
+                    "expiry": "05NOV2026",
+                    "symboltoken": "12345",
+                    "tradingsymbol": f"{underlying}05NOV2623000CE",
+                    "exchange": "NFO",
+                    "lotsize": 65
+                }
+            def get_otm_option(self, **kwargs):
+                return None
+
+        strat = SniperILSMEStrategy(
+            event_bus=self.bus,
+            state_manager=self.state_mgr,
+            instrument_loader=MockLoader(),
+            config=strat_cfg,
+            symbols_config=symbols_cfg
+        )
+
+        # Verify index_tokens attribute is properly populated
+        self.assertTrue(hasattr(strat, "index_tokens"), "SniperILSMEStrategy must have index_tokens")
+        self.assertEqual(strat.index_tokens.get("NIFTY"), "99926000")
+        self.assertEqual(strat.index_tokens.get("SENSEX"), "99919000")
+
+        dispatched_signals = []
+        async def on_signal(evt):
+            dispatched_signals.append(evt)
+
+        self.bus.subscribe(EventType.SIGNAL, on_signal)
+
+        # Trigger signal generation for NIFTY
+        fvg = {
+            "top": 23010.0,
+            "bottom": 22990.0,
+            "displacement_low": 22980.0,
+            "displacement_high": 23020.0,
+            "breakout_boundary": 22980.0,
+            "source": "TREND_PULLBACK"
+        }
+        await strat._generate_sniper_signal("NIFTY", "BUY_CE", 23005.0, fvg)
+        await asyncio.sleep(0.05)
+
+        self.assertEqual(len(dispatched_signals), 1)
+        sig = dispatched_signals[0]
+        self.assertEqual(sig.underlying, "NIFTY")
+        self.assertEqual(sig.signal_type, "BUY_CE")
+        self.assertGreater(sig.invalidation_buffer, 0.0)
+
+
 def run_all_tests():
     print("=" * 70)
     print("🚀 ANGEL ONE OPTIONS SNIPER - FULL REGRESSION TEST RUNNER")
@@ -700,6 +790,7 @@ def run_all_tests():
     suite.addTests(loader.loadTestsFromTestCase(Test9TelegramBotAndCommands))
     suite.addTests(loader.loadTestsFromTestCase(Test10WebEndpointsAndAuthFlow))
     suite.addTests(loader.loadTestsFromTestCase(Test11BrokerReconciliationAndHardenedControls))
+    suite.addTests(loader.loadTestsFromTestCase(Test12SniperStrategySignalDispatch))
 
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)

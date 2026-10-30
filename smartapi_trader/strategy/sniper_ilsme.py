@@ -36,6 +36,7 @@ class SniperILSMEStrategy(BaseStrategy):
         self.cfg = config.get("strategy", {})
         self.risk_cfg = config.get("risk", {})
         self.symbols_cfg = symbols_config.get("indices", {})
+        self.index_tokens = {k: str(v.get("spot_token", "")) for k, v in self.symbols_cfg.items()}
         
         # State tracking per underlying: "NIFTY", "BANKNIFTY", "SENSEX"
         self.active_indices = self.cfg.get("active_indices", ["NIFTY", "BANKNIFTY", "SENSEX"])
