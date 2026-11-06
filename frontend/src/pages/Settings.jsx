@@ -32,9 +32,21 @@ export default function Settings({ state, onRefreshBalance }) {
   const [isEodTesting, setIsEodTesting] = useState(false);
 
   // Risk parameters
-  const [riskPerTrade, setRiskPerTrade] = useState(1.5);
+  const [riskPerTrade, setRiskPerTrade] = useState(1.8);
   const [maxDrawdown, setMaxDrawdown] = useState(3.0);
   const [maxTrades, setMaxTrades] = useState(2);
+  const [consecutiveLossLimit, setConsecutiveLossLimit] = useState(2);
+  const [target1R, setTarget1R] = useState(2.2);
+  const [target2R, setTarget2R] = useState(3.0);
+  const [breakevenTriggerR, setBreakevenTriggerR] = useState(0.8);
+  const [enableStructuralInval, setEnableStructuralInval] = useState(true);
+  const [invalBufferPct, setInvalBufferPct] = useState(0.07);
+
+  // Strategy Engines & Active Instruments
+  const [enableIlsmeSweep, setEnableIlsmeSweep] = useState(true);
+  const [enableMomentumBreakout, setEnableMomentumBreakout] = useState(false);
+  const [enableTrendPullback, setEnableTrendPullback] = useState(true);
+  const [activeIndices, setActiveIndices] = useState(['NIFTY']);
 
   // Status
   const [isSaving, setIsSaving] = useState(false);
@@ -68,6 +80,18 @@ export default function Settings({ state, onRefreshBalance }) {
         if (r.risk_per_trade_pct) setRiskPerTrade(r.risk_per_trade_pct * 100);
         if (r.max_daily_drawdown_pct) setMaxDrawdown(r.max_daily_drawdown_pct * 100);
         if (r.max_trades_per_day) setMaxTrades(r.max_trades_per_day);
+        if (r.consecutive_loss_limit !== undefined) setConsecutiveLossLimit(r.consecutive_loss_limit);
+        if (r.partial_exit_r) setTarget1R(r.partial_exit_r);
+        if (r.target_2_r) setTarget2R(r.target_2_r);
+        if (r.breakeven_trigger_r) setBreakevenTriggerR(r.breakeven_trigger_r);
+        if (r.enable_structural_invalidation !== undefined) setEnableStructuralInval(r.enable_structural_invalidation);
+        if (r.invalidation_buffer_pct !== undefined) setInvalBufferPct(r.invalidation_buffer_pct);
+
+        const strat = data.strategy || {};
+        if (strat.enable_ilsme_sweep !== undefined) setEnableIlsmeSweep(strat.enable_ilsme_sweep);
+        if (strat.enable_momentum_breakout !== undefined) setEnableMomentumBreakout(strat.enable_momentum_breakout);
+        if (strat.enable_trend_pullback !== undefined) setEnableTrendPullback(strat.enable_trend_pullback);
+        if (Array.isArray(strat.active_indices)) setActiveIndices(strat.active_indices);
       } else {
         setServerOffline(true);
       }
@@ -134,10 +158,20 @@ export default function Settings({ state, onRefreshBalance }) {
       risk_per_trade_pct: parseFloat(riskPerTrade) / 100,
       max_daily_drawdown_pct: parseFloat(maxDrawdown) / 100,
       max_trades_per_day: parseInt(maxTrades),
+      consecutive_loss_limit: parseInt(consecutiveLossLimit) || 2,
+      partial_exit_r: parseFloat(target1R),
+      target_2_r: parseFloat(target2R),
+      breakeven_trigger_r: parseFloat(breakevenTriggerR),
+      enable_structural_invalidation: enableStructuralInval,
+      invalidation_buffer_pct: parseFloat(invalBufferPct) || 0.07,
       telegram_enabled: telegramEnabled,
       telegram_bot_token: telegramBotToken,
       telegram_chat_id: telegramChatId,
       telegram_eod_time: telegramEodTime,
+      enable_ilsme_sweep: enableIlsmeSweep,
+      enable_momentum_breakout: enableMomentumBreakout,
+      enable_trend_pullback: enableTrendPullback,
+      active_indices: activeIndices,
     };
 
     if (apiKey) payload.api_key = apiKey;
@@ -356,10 +390,10 @@ export default function Settings({ state, onRefreshBalance }) {
             </div>
           </div>
 
-          {/* Card 2: Risk Limits */}
+          {/* Card 2: Risk Limits & Targets */}
           <div className="hud-card">
             <div className="card-header-line">
-              <span>Capital Preservation & Risk Limits</span>
+              <span>Capital Preservation & Targets</span>
               <Shield size={14} color="var(--accent-emerald)" />
             </div>
 
@@ -372,7 +406,7 @@ export default function Settings({ state, onRefreshBalance }) {
                 value={riskPerTrade}
                 onChange={(e) => setRiskPerTrade(e.target.value)}
               />
-              <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>Default: 1.5% fixed fractional sizing</span>
+              <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>Optimal: 1.8% to 2.0% fixed fractional sizing</span>
             </div>
 
             <div className="form-group">
@@ -384,18 +418,97 @@ export default function Settings({ state, onRefreshBalance }) {
                 value={maxDrawdown}
                 onChange={(e) => setMaxDrawdown(e.target.value)}
               />
-              <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>Default: 3.0% (liquidates and halts engine)</span>
+              <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>Optimal: 3.0% daily circuit breaker (halts engine)</span>
             </div>
 
-            <div className="form-group">
-              <label className="form-label">Max Trades Per Day</label>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
+              <div className="form-group" style={{ margin: 0 }}>
+                <label className="form-label">Max Trades Per Day</label>
+                <input
+                  type="number"
+                  className="form-input mono"
+                  value={maxTrades}
+                  onChange={(e) => setMaxTrades(e.target.value)}
+                />
+                <span style={{ fontSize: '0.68rem', color: 'var(--text-dim)' }}>Daily ceiling (e.g. 2–4)</span>
+              </div>
+              <div className="form-group" style={{ margin: 0 }}>
+                <label className="form-label">Consecutive Loss Lock</label>
+                <input
+                  type="number"
+                  className="form-input mono"
+                  value={consecutiveLossLimit}
+                  onChange={(e) => setConsecutiveLossLimit(e.target.value)}
+                />
+                <span style={{ fontSize: '0.68rem', color: 'var(--text-dim)' }}>Lockout after N losses</span>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '0.75rem', paddingTop: '0.75rem', borderTop: '1px solid var(--border-subtle)' }}>
+              <div>
+                <div style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-main)' }}>Breakout Trap Invalidation</div>
+                <div style={{ fontSize: '0.68rem', color: 'var(--text-dim)' }}>Adaptive ATR & Spot % failed breakout protection</div>
+              </div>
+              <input
+                type="checkbox"
+                checked={enableStructuralInval}
+                onChange={(e) => setEnableStructuralInval(e.target.checked)}
+                style={{ width: '1.1rem', height: '1.1rem', accentColor: 'var(--accent-orange)', cursor: 'pointer' }}
+              />
+            </div>
+
+            {enableStructuralInval && (
+              <div className="form-group" style={{ marginTop: '0.75rem', marginBottom: '0.25rem' }}>
+                <label className="form-label">Dynamic Invalidation Buffer (% of Spot / ATR Blended)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  className="form-input mono"
+                  value={invalBufferPct}
+                  onChange={(e) => setInvalBufferPct(e.target.value)}
+                />
+                <span style={{ fontSize: '0.68rem', color: 'var(--text-dim)' }}>
+                  Default 0.07% (~52pt Sensex, ~36pt BankNifty, ~17pt Nifty). Auto-expands on higher ATR volatility.
+                </span>
+              </div>
+            )}
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginTop: '0.5rem', paddingTop: '0.5rem', borderTop: '1px solid var(--border-subtle)' }}>
+              <div className="form-group" style={{ margin: 0 }}>
+                <label className="form-label">Target 1 (R-Multiple)</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  className="form-input mono"
+                  value={target1R}
+                  onChange={(e) => setTarget1R(e.target.value)}
+                />
+                <span style={{ fontSize: '0.68rem', color: 'var(--text-dim)' }}>Default: 2.2R (50% partial / single-lot full exit)</span>
+              </div>
+
+              <div className="form-group" style={{ margin: 0 }}>
+                <label className="form-label">Target 2 (R-Multiple)</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  className="form-input mono"
+                  value={target2R}
+                  onChange={(e) => setTarget2R(e.target.value)}
+                />
+                <span style={{ fontSize: '0.68rem', color: 'var(--text-dim)' }}>Default: 3.0R (Runner full exit)</span>
+              </div>
+            </div>
+
+            <div className="form-group" style={{ marginTop: '0.75rem' }}>
+              <label className="form-label">Breakeven Shift Trigger (R-Multiple)</label>
               <input
                 type="number"
+                step="0.1"
                 className="form-input mono"
-                value={maxTrades}
-                onChange={(e) => setMaxTrades(e.target.value)}
+                value={breakevenTriggerR}
+                onChange={(e) => setBreakevenTriggerR(e.target.value)}
               />
-              <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>Default: 2 completed setups</span>
+              <span style={{ fontSize: '0.68rem', color: 'var(--text-dim)' }}>Moves Stop-Loss to Entry after +0.8R expansion</span>
             </div>
           </div>
 
@@ -443,7 +556,135 @@ export default function Settings({ state, onRefreshBalance }) {
             </div>
           </div>
 
-          {/* Card 4: Telegram Real-Time Alerts & Remote 2-Way Bot */}
+          {/* Card 4: Strategy Engines (Dual-Mode: Sweep + Momentum Breakout) */}
+          <div className="hud-card">
+            <div className="card-header-line">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <Target size={14} color="var(--accent-orange)" />
+                <span style={{ fontWeight: 700 }}>Dual Quantitative Strategy Engines</span>
+              </div>
+              <span className="badge badge-cyan" style={{ fontSize: '0.68rem' }}>
+                Active Multi-Model
+              </span>
+            </div>
+
+            <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginBottom: '0.75rem' }}>
+              Operates across both Paper and Live Real Trade agents with strict 2-trades/day cap and 2.0% equity risk.
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.6rem', cursor: 'pointer', background: 'rgba(255,255,255,0.02)', padding: '0.6rem 0.8rem', borderRadius: '6px', border: '1px solid var(--border-subtle)' }}>
+                <input
+                  type="checkbox"
+                  checked={enableIlsmeSweep}
+                  onChange={(e) => setEnableIlsmeSweep(e.target.checked)}
+                  style={{ marginTop: '0.2rem', accentColor: 'var(--accent-orange)' }}
+                />
+                <div>
+                  <div style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-main)' }}>
+                    Institutional Liquidity Sweep (ILSME Reversal)
+                  </div>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>
+                    Detects structural liquidity sweeps of PDH / PDL with rejection wicks &ge; 30% and 3m FVG retracement.
+                  </div>
+                </div>
+              </label>
+
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.6rem', cursor: 'pointer', background: 'rgba(255,255,255,0.02)', padding: '0.6rem 0.8rem', borderRadius: '6px', border: '1px solid var(--border-subtle)' }}>
+                <input
+                  type="checkbox"
+                  checked={enableMomentumBreakout}
+                  onChange={(e) => setEnableMomentumBreakout(e.target.checked)}
+                  style={{ marginTop: '0.2rem', accentColor: 'var(--accent-orange)' }}
+                />
+                <div>
+                  <div style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-main)' }}>
+                    Momentum Trend & Opening Range Breakout (ORB)
+                  </div>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>
+                    Captures strong 1-directional trend days (15m OR Breakout + VWAP & 50-EMA trend alignment).
+                  </div>
+                </div>
+              </label>
+
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.6rem', cursor: 'pointer', background: 'rgba(255,255,255,0.02)', padding: '0.6rem 0.8rem', borderRadius: '6px', border: '1px solid var(--border-subtle)' }}>
+                <input
+                  type="checkbox"
+                  checked={enableTrendPullback}
+                  onChange={(e) => setEnableTrendPullback(e.target.checked)}
+                  style={{ marginTop: '0.2rem', accentColor: 'var(--accent-orange)' }}
+                />
+                <div>
+                  <div style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-main)' }}>
+                    Trend Continuation & 9/21 EMA Pullback
+                  </div>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>
+                    Captures high-volume intraday trend extensions on pullbacks to the 9/21 EMA aligned with VWAP.
+                  </div>
+                </div>
+              </label>
+            </div>
+
+            {/* Tradable Indices Checkboxes */}
+            <div style={{ marginTop: '1.25rem', paddingTop: '1rem', borderTop: '1px solid var(--border-light)' }}>
+              <div style={{ fontSize: '0.82rem', fontWeight: 700, color: '#fff', marginBottom: '0.25rem' }}>
+                Active Tradable Indices
+              </div>
+              <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginBottom: '0.75rem' }}>
+                Select indices to scan. NIFTY 50 and SENSEX are optimal for ₹50k capital. Enable BANK NIFTY & MIDCPNIFTY as capital scales.
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '0.5rem' }}>
+                {[
+                  { id: 'NIFTY', label: 'NIFTY 50', desc: 'Lot: 65 | Weekly' },
+                  { id: 'SENSEX', label: 'SENSEX', desc: 'Lot: 20 | Weekly' },
+                  { id: 'BANKNIFTY', label: 'BANK NIFTY', desc: 'Lot: 30 | Monthly' },
+                  { id: 'MIDCPNIFTY', label: 'MIDCPNIFTY', desc: 'Lot: 120 | Monthly' }
+                ].map((item) => {
+                  const isChecked = activeIndices.includes(item.id);
+                  return (
+                    <label
+                      key={item.id}
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '0.2rem',
+                        padding: '0.5rem 0.75rem',
+                        borderRadius: '6px',
+                        background: isChecked ? 'rgba(237, 76, 34, 0.12)' : 'rgba(255,255,255,0.02)',
+                        border: isChecked ? '1px solid var(--accent-orange)' : '1px solid var(--border-subtle)',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setActiveIndices([...activeIndices, item.id]);
+                            } else {
+                              if (activeIndices.length > 1) {
+                                setActiveIndices(activeIndices.filter((x) => x !== item.id));
+                              }
+                            }
+                          }}
+                          style={{ accentColor: 'var(--accent-orange)' }}
+                        />
+                        <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#fff' }}>{item.label}</span>
+                      </div>
+                      <span style={{ fontSize: '0.68rem', color: 'var(--text-dim)', paddingLeft: '1.4rem' }}>
+                        {item.desc}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+
+          {/* Card 5: Telegram Real-Time Alerts & Remote 2-Way Bot */}
           <div className="hud-card">
             <div className="card-header-line">
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -457,7 +698,7 @@ export default function Settings({ state, onRefreshBalance }) {
             </div>
 
             <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginBottom: '0.75rem' }}>
-              Using Angel One Swing keys. Receives real-time trade alerts (entry, TP1 +1.8R, breakeven moved, SL hit) and an automated daily EOD report.
+              Real-time telemetry alerts (entry with signal vs. fill slippage delta, +3.0R target exit, +1.2R breakeven shift, scaling advisories & discard quarantine alerts) plus automated daily EOD reports.
             </div>
 
             <div className="form-group">

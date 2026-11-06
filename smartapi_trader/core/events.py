@@ -73,12 +73,24 @@ class SignalEvent(BaseEvent):
     lot_size: int = 0
     entry_price: float = 0.0
     stop_loss: float = 0.0
+    initial_stop_loss: float = 0.0
+    initial_unit_risk: float = 0.0
+    entry_time: str = ""
     target_1: float = 0.0           # +2.0R (60% partial exit)
     fvg_top: float = 0.0
     fvg_bottom: float = 0.0
     sweep_level: float = 0.0
     swing_invalidation_level: float = 0.0  # 3m swing break level for structural breakeven confirmation
+    invalidation_buffer: float = 0.0       # Dynamic ATR or Spot % buffer for breakout trap protection
+    strategy_name: str = "ILSME_Sniper"     # "ILSME_REVERSAL", "MOMENTUM_ORB", "TREND_PULLBACK"
     reason: str = ""
+    execution_strategy: str = "NAKED"       # "NAKED" or "DEBIT_SPREAD"
+    hedge_tradingsymbol: str = ""
+    hedge_symboltoken: str = ""
+    hedge_strike: float = 0.0
+    hedge_entry_price: float = 0.0
+    net_debit: float = 0.0
+    spread_width: float = 0.0
 
 @dataclass
 class OrderEvent(BaseEvent):
@@ -99,6 +111,8 @@ class OrderEvent(BaseEvent):
     filled_quantity: int = 0
     average_price: float = 0.0
     rejection_reason: str = ""
+    is_paper: bool = True
+    strategy_name: str = "ILSME_Sniper"
 
 @dataclass
 class FillEvent(BaseEvent):
@@ -112,6 +126,7 @@ class FillEvent(BaseEvent):
     price: float = 0.0
     slippage: float = 0.0
     execution_venue: str = "PAPER"  # "PAPER" or "SMARTAPI"
+    strategy_name: str = "ILSME_Sniper"
 
 @dataclass
 class PositionEvent(BaseEvent):
@@ -130,6 +145,9 @@ class PositionEvent(BaseEvent):
     unrealized_pnl_pct: float = 0.0
     realized_pnl: float = 0.0
     stop_loss: float = 0.0
+    initial_stop_loss: float = 0.0
+    initial_unit_risk: float = 0.0
+    entry_time: str = ""
     target_1: float = 0.0
     exchange: str = "NFO"
     sl_order_id: str = ""           # Broker Order ID of resting STOPLOSS_LIMIT order
@@ -138,8 +156,24 @@ class PositionEvent(BaseEvent):
     be_moved: bool = False
     structural_be_confirmed: bool = False
     swing_invalidation_level: float = 0.0 # 3m structural level to confirm breakeven
+    invalidation_buffer: float = 0.0      # Dynamic ATR or Spot % buffer for breakout trap protection
     partial_taken: bool = False
     is_open: bool = True
+    is_paper: bool = True
+    execution_mode: str = "PAPER"
+    strategy_name: str = "ILSME_Sniper"
+    execution_strategy: str = "NAKED"       # "NAKED" or "DEBIT_SPREAD"
+    hedge_tradingsymbol: str = ""
+    hedge_symboltoken: str = ""
+    hedge_strike: float = 0.0
+    hedge_entry_price: float = 0.0
+    hedge_current_ltp: float = 0.0
+    net_debit: float = 0.0
+    spread_width: float = 0.0
+
+    def __post_init__(self):
+        if not self.entry_time:
+            self.entry_time = self.timestamp.replace("T", " ")[:19] if self.timestamp else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 @dataclass
 class RiskAlertEvent(BaseEvent):

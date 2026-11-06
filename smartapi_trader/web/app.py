@@ -1,10 +1,14 @@
 import os
 import json
+import time
+import secrets
 import asyncio
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -13,12 +17,6 @@ from smartapi_trader.core.event_bus import EventBus
 from smartapi_trader.core.state_manager import StateManager
 from smartapi_trader.core.events import EventType, BaseEvent
 from smartapi_trader.utils.logger import logger, add_log_listener, remove_log_listener
-
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
 
 # Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -39,10 +37,15 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-if os.path.exists(REACT_ASSETS):
-    app.mount("/assets", StaticFiles(directory=REACT_ASSETS), name="react_assets")
+os.makedirs(REACT_ASSETS, exist_ok=True)
+app.mount("/assets", StaticFiles(directory=REACT_ASSETS), name="react_assets")
 
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
+
+# Mount AI Stock Options Subsystem Router
+from smartapi_trader.stock_options.routes import router as stock_options_router, so_ctx
+app.include_router(stock_options_router)
+
 
 # Global references injected on startup
 class WebContext:
@@ -119,6 +122,185 @@ async def serve_dashboard(request: Request):
         return FileResponse(react_index)
     snapshot = ctx.state_manager.get_snapshot() if ctx.state_manager else {}
     return templates.TemplateResponse(request=request, name="index.html", context={"snapshot": snapshot})
+
+# ==========================================
+# 2FA TELEGRAM AUTHENTICATION & SESSIONS
+# ==========================================
+AUTH_TOKEN_COOKIE = "sniper_session_token"
+valid_sessions: Dict[str, float] = {}  # token -> expires_at
+otp_store: Dict[str, Any] = {
+    "code": None,
+    "expires_at": 0.0,
+    "last_sent_at": 0.0,
+    "attempts": 0,
+}
+
+def verify_authenticated_request(request: Request) -> bool:
+    auth_header = request.headers.get("Authorization", "")
+    token = None
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:].strip()
+    if not token:
+        token = request.cookies.get(AUTH_TOKEN_COOKIE)
+    if not token:
+        return False
+    exp = valid_sessions.get(token)
+    if not exp or time.time() > exp:
+        valid_sessions.pop(token, None)
+        return False
+    return True
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    # Allow non-API routes (frontend SPA, static assets, templates) and auth routes
+    if not path.startswith("/api/") or path.startswith("/api/auth/"):
+        return await call_next(request)
+    
+    if not verify_authenticated_request(request):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Authentication required. Please verify via Telegram OTP."}
+        )
+    return await call_next(request)
+
+class VerifyOTPRequest(BaseModel):
+    otp: str
+
+@app.get("/api/auth/status")
+async def auth_status(request: Request):
+    """Checks whether the current user is authenticated."""
+    is_auth = verify_authenticated_request(request)
+    return {"authenticated": is_auth}
+
+@app.post("/api/auth/send_otp")
+async def send_login_otp(request: Request):
+    """Generates a secure 6-digit OTP and delivers it via Telegram."""
+    now = time.time()
+    # Rate limit: 25 seconds cooldown between resends
+    if now - otp_store.get("last_sent_at", 0) < 25:
+        remaining = int(25 - (now - otp_store.get("last_sent_at", 0)))
+        raise HTTPException(
+            status_code=429,
+            detail=f"Please wait {remaining} seconds before requesting a new code."
+        )
+
+    code = f"{secrets.randbelow(900000) + 100000}"
+    otp_store["code"] = code
+    otp_store["expires_at"] = now + 300  # 5 minutes
+    otp_store["last_sent_at"] = now
+    otp_store["attempts"] = 0
+
+    client_ip = (request.headers.get("x-forwarded-for") or (request.client.host if request.client else "unknown")).split(",")[0].strip()
+    time_str = datetime.now().strftime("%I:%M:%S %p")
+
+    msg = (
+        f"🔐 <b>Angel One Sniper Web Access</b>\n\n"
+        f"Your One-Time Passcode (OTP):\n"
+        f"👉 <code>{code}</code> 👈\n\n"
+        f"⏱ Valid for: <b>5 minutes</b>\n"
+        f"🌐 IP: <code>{client_ip}</code>\n"
+        f"⏰ Time: <code>{time_str}</code>\n\n"
+        f"<i>Enter this code in your browser to access the control plane.</i>"
+    )
+
+    notifier = ctx.notifier
+    if not notifier:
+        cfg_path = os.path.join(BASE_DIR, "../config/settings.yaml")
+        if os.path.exists(cfg_path):
+            import yaml
+            with open(cfg_path, "r") as f:
+                cfg = yaml.safe_load(f)
+                from smartapi_trader.utils.telegram_notifier import TelegramNotifier
+                notifier = TelegramNotifier(cfg.get("telegram", {}))
+
+    if not notifier or not notifier.bot_token or not notifier.chat_id:
+        raise HTTPException(
+            status_code=500,
+            detail="Telegram notifier is not configured. Please check telegram.bot_token and chat_id in settings.yaml."
+        )
+
+    ok, err = notifier.send_message_sync(msg)
+    if not ok:
+        logger.error(f"[AUTH] Failed to send Telegram OTP: {err}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to deliver code to Telegram: {err}"
+        )
+
+    cid = notifier.chat_id
+    masked_cid = f"...{cid[-4:]}" if len(cid) > 4 else cid
+    return {
+        "status": "success",
+        "message": f"Passcode sent to Telegram (Chat ID ending in {masked_cid})",
+        "expires_in": 300,
+        "cooldown": 25,
+    }
+
+@app.post("/api/auth/verify_otp")
+async def verify_login_otp(req: VerifyOTPRequest, request: Request):
+    """Validates the 6-digit OTP and issues a persistent session token."""
+    now = time.time()
+    if not otp_store.get("code") or now > otp_store.get("expires_at", 0):
+        raise HTTPException(
+            status_code=400,
+            detail="Verification code has expired or was not requested. Please click 'Send Code' again."
+        )
+
+    if otp_store.get("attempts", 0) >= 5:
+        otp_store["code"] = None
+        raise HTTPException(
+            status_code=400,
+            detail="Too many incorrect attempts. Passcode invalidated. Please request a new code."
+        )
+
+    user_code = req.otp.strip()
+    if user_code != otp_store.get("code"):
+        otp_store["attempts"] = otp_store.get("attempts", 0) + 1
+        rem = 5 - otp_store["attempts"]
+        raise HTTPException(
+            status_code=400,
+            detail=f"Incorrect verification code. {rem} attempt(s) remaining."
+        )
+
+    # Valid! Issue session token
+    token = secrets.token_urlsafe(32)
+    valid_sessions[token] = now + (86400 * 30)  # 30 days validity
+    otp_store["code"] = None  # Consume OTP
+
+    client_ip = (request.headers.get("x-forwarded-for") or (request.client.host if request.client else "unknown")).split(",")[0].strip()
+    logger.info(f"[AUTH] Successful operator login from IP {client_ip}.")
+
+    response = JSONResponse(content={
+        "status": "success",
+        "message": "Authentication successful",
+        "token": token
+    })
+    response.set_cookie(
+        key=AUTH_TOKEN_COOKIE,
+        value=token,
+        max_age=86400 * 30,
+        httponly=True,
+        samesite="lax",
+        path="/"
+    )
+    return response
+
+@app.post("/api/auth/logout")
+async def logout(request: Request):
+    """Terminates session and clears credentials."""
+    auth_header = request.headers.get("Authorization", "")
+    token = None
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:].strip()
+    if not token:
+        token = request.cookies.get(AUTH_TOKEN_COOKIE)
+    if token:
+        valid_sessions.pop(token, None)
+
+    response = JSONResponse(content={"status": "success", "message": "Logged out successfully"})
+    response.delete_cookie(key=AUTH_TOKEN_COOKIE, path="/")
+    return response
 
 @app.get("/api/state")
 async def get_state():
@@ -213,10 +395,21 @@ async def trigger_panic():
                 exit_reason="Emergency Panic Liquidation"
             )
 
+    # Liquidate stock options positions & pause live agent as part of common kill switch
+    try:
+        from smartapi_trader.stock_options.routes import so_ctx
+        if so_ctx.live_agent:
+            await so_ctx.live_agent.emergency_kill_switch()
+            logger.critical("[PANIC] Stock options live positions liquidated via unified emergency kill switch.")
+        if so_ctx.paper_agent:
+            so_ctx.paper_agent.pause()
+    except Exception as e:
+        logger.error(f"[PANIC] Error liquidating stock options in common panic: {e}")
+
     logger.critical("[OPERATOR] GLOBAL PANIC SWITCH ACTIVATED! Liquidating all positions.")
     await ws_manager.broadcast({
         "type": "PANIC_TRIGGERED",
-        "message": "Emergency liquidation and engine halt executed."
+        "message": "Emergency liquidation and engine halt executed across Index & Stock Options."
     })
     return {"status": "panic_activated"}
 
@@ -226,6 +419,10 @@ async def reset_panic():
     if not ctx.state_manager:
         raise HTTPException(status_code=503, detail="State manager not initialized")
     ctx.state_manager.reset_panic()
+    if ctx.risk_manager:
+        ctx.risk_manager.reset_daily_limits()
+    elif ctx.orchestrator and hasattr(ctx.orchestrator, "risk_manager") and ctx.orchestrator.risk_manager:
+        ctx.orchestrator.risk_manager.reset_daily_limits()
     await ws_manager.broadcast({
         "type": "PANIC_CLEARED",
         "message": "System operational. Scanner re-armed."
@@ -276,6 +473,38 @@ async def exit_single_position(symbol: str):
     )
     logger.info(f"[OPERATOR] Surgical manual exit executed for position: {symbol}")
     return {"status": "success", "symbol": symbol}
+
+@app.post("/api/positions/refresh_ltp")
+async def refresh_positions_ltp():
+    """Polls real exchange LTP for all active open positions and recalculates unrealized P&L."""
+    if not ctx.state_manager:
+        raise HTTPException(status_code=503, detail="State manager not initialized")
+    
+    updated_count = 0
+    for symbol, pos in list(ctx.state_manager.positions.items()):
+        if not pos.is_open:
+            continue
+        ltp = None
+        if ctx.auth_manager and not ctx.auth_manager.is_simulated and pos.token:
+            exch = pos.exchange or ("BFO" if "SENSEX" in symbol else "NFO")
+            ltp = await asyncio.to_thread(ctx.auth_manager.get_token_ltp, exch, symbol, str(pos.token))
+        
+        if ltp and ltp > 0:
+            pos.current_ltp = float(ltp)
+            diff = pos.current_ltp - pos.entry_price
+            pos.unrealized_pnl = round(diff * pos.quantity, 2)
+            pos.unrealized_pnl_pct = round((diff / pos.entry_price) * 100.0, 2) if pos.entry_price > 0 else 0.0
+            updated_count += 1
+    
+    if updated_count > 0:
+        ctx.state_manager._recalculate_portfolio()
+        ctx.state_manager.broadcast_state()
+    
+    return {
+        "status": "success",
+        "updated": updated_count,
+        "positions": [p.to_dict() for p in ctx.state_manager.positions.values() if p.is_open]
+    }
 
 class TestSignalRequest(BaseModel):
     underlying: str = "NIFTY"
@@ -437,17 +666,36 @@ async def pause_real_agent():
     return {"status": "success", "real_agent": "PAUSED"}
 
 @app.get("/api/orders")
-async def get_all_orders():
+async def get_all_orders(include_paper: bool = False):
     """Returns active positions, recent orders, and trade history for Orders page."""
     if not ctx.state_manager:
         raise HTTPException(status_code=503, detail="State manager not initialized")
     
-    positions = [pos.to_dict() for pos in ctx.state_manager.positions.values() if pos.is_open]
-    orders = [ord.to_dict() for ord in ctx.state_manager.orders.values()]
+    if include_paper:
+        positions = [pos.to_dict() for pos in ctx.state_manager.positions.values() if pos.is_open and pos.quantity > 0]
+        orders = [ord.to_dict() for ord in ctx.state_manager.orders.values()]
+        trade_history = ctx.state_manager.trade_history
+    else:
+        # Strictly Live Angel One broker orders & trades
+        positions = [
+            pos.to_dict() for pos in ctx.state_manager.positions.values() 
+            if pos.is_open and pos.quantity > 0 and not getattr(pos, 'is_paper', False) and getattr(pos, 'execution_mode', '') == 'LIVE'
+        ]
+        
+        # Exclude paper simulated order prefixes and orders flagged as paper
+        paper_prefixes = ("ORD_NIFTY_", "ORD_BANKNIFTY_", "ORD_SENSEX_", "ORD_EXIT_PARTIAL_", "ORD_SL_", "MANUAL_EXIT_")
+        orders = [
+            ord.to_dict() for ord in ctx.state_manager.orders.values()
+            if not getattr(ord, 'is_paper', False) and not any(ord.order_id.startswith(p) for p in paper_prefixes)
+        ]
+        
+        # Trade history: strictly real broker completed trades
+        trade_history = [t for t in ctx.state_manager.trade_history if not t.get('is_paper')]
+
     return {
         "positions": positions,
         "orders": orders,
-        "trade_history": ctx.state_manager.trade_history,
+        "trade_history": trade_history,
         "realized_pnl": ctx.state_manager.realized_pnl,
         "unrealized_pnl": ctx.state_manager.unrealized_pnl
     }
@@ -476,10 +724,39 @@ class SettingsUpdateRequest(BaseModel):
     max_daily_drawdown_pct: Optional[float] = None
     max_trades_per_day: Optional[int] = None
     paper_initial_capital: Optional[float] = None
+    partial_exit_r: Optional[float] = None
+    target_2_r: Optional[float] = None
+    breakeven_trigger_r: Optional[float] = None
+    partial_exit_qty_pct: Optional[float] = None
     telegram_enabled: Optional[bool] = None
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
     telegram_eod_time: Optional[str] = None
+    enable_ilsme_sweep: Optional[bool] = None
+    enable_momentum_breakout: Optional[bool] = None
+    enable_trend_pullback: Optional[bool] = None
+    ema_fast_period: Optional[int] = None
+    ema_slow_period: Optional[int] = None
+    active_indices: Optional[List[str]] = None
+    correlation_guard: Optional[bool] = None
+    max_open_positions: Optional[int] = None
+    orb_cutoff_time: Optional[str] = None
+    sweep_ttl_minutes: Optional[float] = None
+    max_spike_candle_pct: Optional[float] = None
+    fvg_ttl_minutes: Optional[float] = None
+    fvg_bounce_confirmation_pts: Optional[float] = None
+    max_sl_percent: Optional[float] = None
+    require_candle_confirmation: Optional[bool] = None
+    real_execution_strategy: Optional[str] = None
+    paper_execution_strategies: Optional[List[str]] = None
+    debit_spread_strikes_otm: Optional[int] = None
+    debit_spread_take_profit_pct: Optional[float] = None
+    debit_spread_stop_loss_pct: Optional[float] = None
+    consecutive_loss_limit: Optional[int] = None
+    enable_structural_invalidation: Optional[bool] = None
+    invalidation_buffer_pts: Optional[float] = None
+    invalidation_buffer_pct: Optional[float] = None
+
 
 @app.get("/api/settings")
 async def get_settings():
@@ -556,12 +833,175 @@ async def update_settings(req: SettingsUpdateRequest):
             rm = ctx.risk_manager or getattr(ctx.orchestrator, "risk_manager", None)
             if rm: rm.max_trades = new_max
 
+        if req.partial_exit_r is not None:
+            new_t1 = float(req.partial_exit_r)
+            cfg.setdefault("risk", {})["partial_exit_r"] = new_t1
+            rm = ctx.risk_manager or getattr(ctx.orchestrator, "risk_manager", None)
+            if rm: rm.tp1_r = new_t1
+
+        if req.target_2_r is not None:
+            new_t2 = float(req.target_2_r)
+            cfg.setdefault("risk", {})["target_2_r"] = new_t2
+            rm = ctx.risk_manager or getattr(ctx.orchestrator, "risk_manager", None)
+            if rm: rm.tp2_r = new_t2
+
+        if req.breakeven_trigger_r is not None:
+            new_be = float(req.breakeven_trigger_r)
+            cfg.setdefault("risk", {})["breakeven_trigger_r"] = new_be
+            rm = ctx.risk_manager or getattr(ctx.orchestrator, "risk_manager", None)
+            if rm: rm.be_trigger_r = new_be
+
+        if req.partial_exit_qty_pct is not None:
+            new_qty_pct = float(req.partial_exit_qty_pct)
+            cfg.setdefault("risk", {})["partial_exit_qty_pct"] = new_qty_pct
+            rm = ctx.risk_manager or getattr(ctx.orchestrator, "risk_manager", None)
+            if rm: rm.tp1_qty_pct = new_qty_pct
+
+        if req.correlation_guard is not None:
+            cfg.setdefault("risk", {})["correlation_guard"] = req.correlation_guard
+            rm = ctx.risk_manager or getattr(ctx.orchestrator, "risk_manager", None)
+            if rm: rm.correlation_guard = req.correlation_guard
+
+        if req.max_open_positions is not None:
+            new_max_pos = int(req.max_open_positions)
+            cfg.setdefault("risk", {})["max_open_positions"] = new_max_pos
+            rm = ctx.risk_manager or getattr(ctx.orchestrator, "risk_manager", None)
+            if rm: rm.max_open_positions = new_max_pos
+
+        if req.consecutive_loss_limit is not None:
+            new_cl = int(req.consecutive_loss_limit)
+            cfg.setdefault("risk", {})["consecutive_loss_limit"] = new_cl
+            rm = ctx.risk_manager or getattr(ctx.orchestrator, "risk_manager", None)
+            if rm: rm.consecutive_loss_limit = new_cl
+            if ctx.strategy and hasattr(ctx.strategy, "consecutive_loss_limit"):
+                ctx.strategy.consecutive_loss_limit = new_cl
+
+        if req.enable_structural_invalidation is not None:
+            cfg.setdefault("risk", {})["enable_structural_invalidation"] = req.enable_structural_invalidation
+            rm = ctx.risk_manager or getattr(ctx.orchestrator, "risk_manager", None)
+            if rm and hasattr(rm, "cfg"):
+                rm.cfg["enable_structural_invalidation"] = req.enable_structural_invalidation
+
+        if req.invalidation_buffer_pts is not None:
+            new_ib = float(req.invalidation_buffer_pts)
+            cfg.setdefault("risk", {})["invalidation_buffer_pts"] = new_ib
+            rm = ctx.risk_manager or getattr(ctx.orchestrator, "risk_manager", None)
+            if rm and hasattr(rm, "cfg"):
+                rm.cfg["invalidation_buffer_pts"] = new_ib
+
+        if req.invalidation_buffer_pct is not None:
+            new_ib_pct = float(req.invalidation_buffer_pct)
+            cfg.setdefault("risk", {})["invalidation_buffer_pct"] = new_ib_pct
+            rm = ctx.risk_manager or getattr(ctx.orchestrator, "risk_manager", None)
+            if rm and hasattr(rm, "cfg"):
+                rm.cfg["invalidation_buffer_pct"] = new_ib_pct
+            if ctx.strategy and hasattr(ctx.strategy, "risk_cfg"):
+                ctx.strategy.risk_cfg["invalidation_buffer_pct"] = new_ib_pct
+
+        if req.orb_cutoff_time is not None:
+            cfg.setdefault("risk", {})["orb_cutoff_time"] = req.orb_cutoff_time.strip()
+            if ctx.strategy and hasattr(ctx.strategy, "risk_cfg"):
+                ctx.strategy.risk_cfg["orb_cutoff_time"] = req.orb_cutoff_time.strip()
+
         if req.paper_initial_capital is not None: cfg.setdefault("execution", {})["paper_initial_capital"] = req.paper_initial_capital
 
         if req.telegram_enabled is not None: cfg.setdefault("telegram", {})["enabled"] = req.telegram_enabled
         if req.telegram_bot_token: cfg.setdefault("telegram", {})["bot_token"] = req.telegram_bot_token.strip()
         if req.telegram_chat_id: cfg.setdefault("telegram", {})["chat_id"] = req.telegram_chat_id.strip()
         if req.telegram_eod_time: cfg.setdefault("telegram", {})["eod_report_time"] = req.telegram_eod_time.strip()
+
+        if req.enable_ilsme_sweep is not None:
+            cfg.setdefault("strategy", {})["enable_ilsme_sweep"] = req.enable_ilsme_sweep
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["enable_ilsme_sweep"] = req.enable_ilsme_sweep
+
+        if req.enable_momentum_breakout is not None:
+            cfg.setdefault("strategy", {})["enable_momentum_breakout"] = req.enable_momentum_breakout
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["enable_momentum_breakout"] = req.enable_momentum_breakout
+
+        if req.enable_trend_pullback is not None:
+            cfg.setdefault("strategy", {})["enable_trend_pullback"] = req.enable_trend_pullback
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["enable_trend_pullback"] = req.enable_trend_pullback
+
+        if req.ema_fast_period is not None:
+            cfg.setdefault("strategy", {})["ema_fast_period"] = int(req.ema_fast_period)
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["ema_fast_period"] = int(req.ema_fast_period)
+
+        if req.ema_slow_period is not None:
+            cfg.setdefault("strategy", {})["ema_slow_period"] = int(req.ema_slow_period)
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["ema_slow_period"] = int(req.ema_slow_period)
+
+        if req.active_indices is not None:
+            cleaned_indices = [idx.strip().upper() for idx in req.active_indices if idx.strip()]
+            cfg.setdefault("strategy", {})["active_indices"] = cleaned_indices
+            if ctx.strategy and hasattr(ctx.strategy, "active_indices"):
+                ctx.strategy.active_indices = cleaned_indices
+                for idx in cleaned_indices:
+                    if idx not in ctx.strategy.state:
+                        ctx.strategy._init_index_state(idx)
+
+        if req.sweep_ttl_minutes is not None:
+            cfg.setdefault("strategy", {})["sweep_ttl_minutes"] = float(req.sweep_ttl_minutes)
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["sweep_ttl_minutes"] = float(req.sweep_ttl_minutes)
+
+        if req.max_spike_candle_pct is not None:
+            cfg.setdefault("strategy", {})["max_spike_candle_pct"] = float(req.max_spike_candle_pct)
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["max_spike_candle_pct"] = float(req.max_spike_candle_pct)
+
+        if req.require_candle_confirmation is not None:
+            cfg.setdefault("strategy", {})["require_candle_confirmation"] = req.require_candle_confirmation
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["require_candle_confirmation"] = req.require_candle_confirmation
+
+        if req.fvg_ttl_minutes is not None:
+            cfg.setdefault("strategy", {})["fvg_ttl_minutes"] = float(req.fvg_ttl_minutes)
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["fvg_ttl_minutes"] = float(req.fvg_ttl_minutes)
+
+        if req.fvg_bounce_confirmation_pts is not None:
+            cfg.setdefault("strategy", {})["fvg_bounce_confirmation_pts"] = float(req.fvg_bounce_confirmation_pts)
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["fvg_bounce_confirmation_pts"] = float(req.fvg_bounce_confirmation_pts)
+
+        if req.max_sl_percent is not None:
+            cfg.setdefault("risk", {})["max_sl_percent"] = float(req.max_sl_percent)
+            if ctx.risk_manager and hasattr(ctx.risk_manager, "cfg"):
+                ctx.risk_manager.cfg["max_sl_percent"] = float(req.max_sl_percent)
+
+        if req.real_execution_strategy is not None:
+            r_strat = req.real_execution_strategy.strip().upper()
+            if r_strat in ["NAKED", "DEBIT_SPREAD"]:
+                cfg.setdefault("strategy", {})["real_execution_strategy"] = r_strat
+                if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                    ctx.strategy.cfg["real_execution_strategy"] = r_strat
+
+        if req.paper_execution_strategies is not None:
+            p_strats = [s.strip().upper() for s in req.paper_execution_strategies if s.strip().upper() in ["NAKED", "DEBIT_SPREAD"]]
+            if p_strats:
+                cfg.setdefault("strategy", {})["paper_execution_strategies"] = p_strats
+                if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                    ctx.strategy.cfg["paper_execution_strategies"] = p_strats
+
+        if req.debit_spread_strikes_otm is not None:
+            cfg.setdefault("strategy", {})["debit_spread_strikes_otm"] = int(req.debit_spread_strikes_otm)
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["debit_spread_strikes_otm"] = int(req.debit_spread_strikes_otm)
+
+        if req.debit_spread_take_profit_pct is not None:
+            cfg.setdefault("strategy", {})["debit_spread_take_profit_pct"] = float(req.debit_spread_take_profit_pct)
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["debit_spread_take_profit_pct"] = float(req.debit_spread_take_profit_pct)
+
+        if req.debit_spread_stop_loss_pct is not None:
+            cfg.setdefault("strategy", {})["debit_spread_stop_loss_pct"] = float(req.debit_spread_stop_loss_pct)
+            if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+                ctx.strategy.cfg["debit_spread_stop_loss_pct"] = float(req.debit_spread_stop_loss_pct)
 
         with open(config_path, "w") as f:
             yaml.safe_dump(cfg, f, default_flow_style=False)
@@ -606,6 +1046,58 @@ async def update_settings(req: SettingsUpdateRequest):
         return {"status": "success", "message": "Settings updated and saved successfully"}
     except Exception as e:
         logger.error(f"[SETTINGS] Failed to save settings: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+class RealModeStrategyRequest(BaseModel):
+    strategy: str  # "NAKED" or "DEBIT_SPREAD"
+
+class PaperModeStrategyRequest(BaseModel):
+    strategies: List[str]  # e.g. ["NAKED"], ["DEBIT_SPREAD"], or ["NAKED", "DEBIT_SPREAD"]
+
+@app.post("/api/strategy/real_mode")
+async def set_real_strategy_mode(req: RealModeStrategyRequest):
+    """Sets execution structure mode for Real Agent (NAKED or DEBIT_SPREAD)."""
+    import yaml
+    val = req.strategy.strip().upper()
+    if val not in ["NAKED", "DEBIT_SPREAD"]:
+        raise HTTPException(status_code=400, detail="Invalid strategy. Must be NAKED or DEBIT_SPREAD.")
+    config_path = os.path.join(BASE_DIR, "../config/settings.yaml")
+    try:
+        with open(config_path, "r") as f:
+            cfg = yaml.safe_load(f)
+        cfg.setdefault("strategy", {})["real_execution_strategy"] = val
+        with open(config_path, "w") as f:
+            yaml.safe_dump(cfg, f, default_flow_style=False)
+        if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+            ctx.strategy.cfg["real_execution_strategy"] = val
+        if ctx.state_manager:
+            ctx.state_manager.broadcast_state()
+        return {"status": "success", "real_execution_strategy": val}
+    except Exception as e:
+        logger.error(f"[STRATEGY] Error updating real mode strategy: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/strategy/paper_mode")
+async def set_paper_strategy_mode(req: PaperModeStrategyRequest):
+    """Sets execution structure mode(s) for Paper Agent (supports running both simultaneously!)."""
+    import yaml
+    val = [s.strip().upper() for s in req.strategies if s.strip().upper() in ["NAKED", "DEBIT_SPREAD"]]
+    if not val:
+        raise HTTPException(status_code=400, detail="Must select at least one strategy: NAKED or DEBIT_SPREAD.")
+    config_path = os.path.join(BASE_DIR, "../config/settings.yaml")
+    try:
+        with open(config_path, "r") as f:
+            cfg = yaml.safe_load(f)
+        cfg.setdefault("strategy", {})["paper_execution_strategies"] = val
+        with open(config_path, "w") as f:
+            yaml.safe_dump(cfg, f, default_flow_style=False)
+        if ctx.strategy and hasattr(ctx.strategy, "cfg"):
+            ctx.strategy.cfg["paper_execution_strategies"] = val
+        if ctx.state_manager:
+            ctx.state_manager.broadcast_state()
+        return {"status": "success", "paper_execution_strategies": val}
+    except Exception as e:
+        logger.error(f"[STRATEGY] Error updating paper mode strategies: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 class BacktestRunRequest(BaseModel):
@@ -709,6 +1201,11 @@ async def send_telegram_eod():
 @app.websocket("/ws/telemetry")
 async def websocket_telemetry_endpoint(websocket: WebSocket):
     """High-frequency WebSocket channel streaming live telemetry and tick updates to UI."""
+    token = websocket.query_params.get("token") or websocket.cookies.get(AUTH_TOKEN_COOKIE)
+    if not token or token not in valid_sessions or time.time() > valid_sessions[token]:
+        await websocket.close(code=4401)
+        return
+
     await ws_manager.connect(websocket)
     try:
         # Send initial full snapshot on connection
@@ -731,7 +1228,11 @@ async def websocket_telemetry_endpoint(websocket: WebSocket):
 # SPA Client-Side Routing Fallback
 @app.get("/{full_path:path}")
 async def serve_spa_fallback(full_path: str, request: Request):
-    """Fallback route serving React SPA for client-side routing."""
+    """Fallback route serving React SPA for client-side routing, or static assets from dist."""
+    target_file = os.path.join(REACT_DIST, full_path)
+    if os.path.isfile(target_file):
+        return FileResponse(target_file)
+    
     react_index = os.path.join(REACT_DIST, "index.html")
     if os.path.exists(react_index):
         return FileResponse(react_index)

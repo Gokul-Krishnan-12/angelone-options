@@ -1,4 +1,5 @@
 import os
+import asyncio
 import json
 import logging
 import datetime
@@ -9,8 +10,8 @@ import urllib.request
 import urllib.error
 import concurrent.futures
 from typing import Any, Dict, List, Optional, Tuple
-
-logger = logging.getLogger(__name__)
+from smartapi_trader.utils.tz import now_ist
+from smartapi_trader.utils.logger import logger
 
 class TelegramNotifier:
     """
@@ -25,6 +26,9 @@ class TelegramNotifier:
         self.bot_token = str(self.config.get("bot_token", "8834022656:AAGsTEx46GIgP7XBar5Z4URNP2oEvZGfojM")).strip()
         self.chat_id = str(self.config.get("chat_id", "650527213")).strip()
         self.enabled = bool(self.config.get("enabled", True))
+        self._last_panic_alert_time = 0.0
+        self._last_panic_reason = ""
+        self._last_discard_alert_time = 0.0
 
     def update_config(self, config: Dict[str, Any]):
         self.config = config
@@ -94,16 +98,27 @@ class TelegramNotifier:
             self.send_message_sync, text, parse_mode, bot_token, chat_id
         )
 
+    def send_message(
+        self,
+        text: str,
+        parse_mode: str = "HTML",
+        bot_token: Optional[str] = None,
+        chat_id: Optional[str] = None,
+    ):
+        """Standard alias for send_message_async."""
+        return self.send_message_async(text, parse_mode, bot_token, chat_id)
+
+
     def notify_trade_entry(self, trade: Dict[str, Any]):
         """Notifies when a new options contract position is entered."""
         if not self.enabled or not self.config.get("notify_on_trade_entry", True):
             return
 
         symbol = trade.get("symbol", "N/A")
-        underlying = trade.get("underlying", "INDEX")
         opt_type = trade.get("option_type", "CE")
-        strike = trade.get("strike", 0)
         entry_price = float(trade.get("entry_price", 0.0) or 0.0)
+        signal_price = float(trade.get("signal_price", entry_price) or entry_price)
+        slippage = float(trade.get("slippage", round(entry_price - signal_price, 2)) or 0.0)
         stop_loss = float(trade.get("stop_loss", 0.0) or 0.0)
         target_1 = float(trade.get("target_1", 0.0) or 0.0)
         quantity = int(trade.get("quantity", 0) or 0)
@@ -112,25 +127,28 @@ class TelegramNotifier:
 
         risk_pts = max(0.1, entry_price - stop_loss)
         risk_pct = (risk_pts / entry_price * 100.0) if entry_price > 0 else 0.0
-        now_str = datetime.datetime.now().strftime("%H:%M:%S")
+        now_str = now_ist().strftime("%H:%M:%S")
 
         dir_icon = "🟢" if "CE" in opt_type else "🔴"
-        mode_tag = "📝 PAPER SIMULATED" if mode == "PAPER" else "⚡ ANGEL ONE LIVE"
+        mode_tag = "📝 PAPER" if mode == "PAPER" else "⚡ LIVE"
+        strategy_label = trade.get("strategy_name") or trade.get("strategy") or "ILSME_Sniper"
+
+        t1_label = f"₹{target_1:.2f}" if target_1 > 0 else "Dynamic"
+        slip_txt = f" | Slip: {slippage:+.2f}" if abs(slippage) > 0.01 else ""
 
         message = (
             f"⚡ <b>NEW POSITION ENTERED</b>\n\n"
             f"{dir_icon} <b>Instrument:</b> <b>{symbol}</b>\n"
-            f"🏷 <b>Execution Venue:</b> <code>{mode_tag}</code>\n"
-            f"📦 <b>Lots:</b> {lots} ({quantity} qty)\n"
-            f"💵 <b>Entry Price:</b> ₹{entry_price:.2f}\n"
-            f"🛑 <b>Initial SL:</b> ₹{stop_loss:.2f} (-{risk_pct:.1f}%)\n"
-            f"🎯 <b>Target 1 (+1.8R):</b> ₹{target_1:.2f} (60% lock)\n"
-            f"⏱ <b>Time:</b> {now_str} IST"
+            f"🧠 <b>Strategy:</b> <code>{strategy_label}</code>\n"
+            f"📦 <b>Size:</b> {lots} Lot{'s' if lots > 1 else ''} ({quantity} Qty) @ ₹{entry_price:.2f}{slip_txt}\n"
+            f"🛑 <b>Stop-Loss:</b> ₹{stop_loss:.2f} (-{risk_pct:.1f}%)\n"
+            f"🎯 <b>Target 1:</b> {t1_label}\n"
+            f"🏷 <b>Mode:</b> {mode_tag} | ⏱ <b>Time:</b> {now_str} IST"
         )
         self.send_message_async(message)
 
     def notify_partial_tp1(self, trade: Dict[str, Any]):
-        """Notifies when Target 1 (+1.8R) is reached and 60% partial gain is locked."""
+        """Notifies when Target 1 is reached and partial gain is locked."""
         if not self.enabled or not self.config.get("notify_on_tp1", True):
             return
 
@@ -140,16 +158,16 @@ class TelegramNotifier:
         gain_pts = float(trade.get("gain_pts", 0.0) or 0.0)
         pnl = float(trade.get("pnl", 0.0) or 0.0)
         mode = trade.get("mode", "PAPER")
-        now_str = datetime.datetime.now().strftime("%H:%M:%S")
+        strategy_label = trade.get("strategy_name") or "ILSME_Sniper"
+        now_str = now_ist().strftime("%H:%M:%S")
 
         message = (
-            f"🎯 <b>TARGET 1 HIT (+1.8R) — PARTIAL GAINS BOOKED</b>\n\n"
+            f"🎯 <b>TARGET 1 HIT — PARTIAL GAINS BOOKED</b>\n\n"
             f"📈 <b>Instrument:</b> <b>{symbol}</b>\n"
-            f"📦 <b>Booked Quantity:</b> 60% ({booked_qty} units) @ ₹{price:.2f}\n"
-            f"💰 <b>Partial Realized P&L:</b> <code>+₹{pnl:,.2f}</code> (+{gain_pts:.2f} pts)\n"
-            f"🛡 <b>Action:</b> Stop-Loss shifted to BREAKEVEN on remainder!\n"
-            f"🏷 <b>Mode:</b> {mode}\n"
-            f"⏱ <b>Time:</b> {now_str} IST"
+            f"📦 <b>Booked:</b> {booked_qty} units @ ₹{price:.2f}\n"
+            f"💰 <b>Realized Gain:</b> <code>+₹{pnl:,.2f}</code> (+{gain_pts:.2f} pts)\n"
+            f"🛡 <b>Action:</b> Stop-Loss on remaining lot moved to BREAKEVEN\n"
+            f"🏷 <b>Mode:</b> {mode} | ⏱ {now_str} IST"
         )
         self.send_message_async(message)
 
@@ -161,14 +179,14 @@ class TelegramNotifier:
         symbol = trade.get("symbol", "N/A")
         be_price = float(trade.get("entry_price", 0.0) or 0.0)
         current_ltp = float(trade.get("current_ltp", 0.0) or 0.0)
-        now_str = datetime.datetime.now().strftime("%H:%M:%S")
+        now_str = now_ist().strftime("%H:%M:%S")
 
         message = (
-            f"🛡 <b>RISK FREE: STOP-LOSS MOVED TO BREAKEVEN</b>\n\n"
+            f"🛡 <b>RISK FREE: SL MOVED TO BREAKEVEN</b>\n\n"
             f"📊 <b>Instrument:</b> <b>{symbol}</b>\n"
-            f"🛑 <b>New Stop-Loss:</b> ₹{be_price:.2f} (Entry Price)\n"
+            f"🛑 <b>New Exchange SL:</b> ₹{be_price:.2f} (Entry Price)\n"
             f"⚡ <b>Current LTP:</b> ₹{current_ltp:.2f}\n"
-            f"🔒 <b>Capital Risk:</b> 0.0% (Risk-free trade)\n"
+            f"🔒 <b>Downside Risk:</b> 0.0% (Risk Eliminated)\n"
             f"⏱ <b>Time:</b> {now_str} IST"
         )
         self.send_message_async(message)
@@ -185,42 +203,106 @@ class TelegramNotifier:
         gross_pnl = float(trade.get("gross_pnl", 0.0) or trade.get("pnl", 0.0) or 0.0)
         total_charges = float(trade.get("total_charges", 65.0) or 0.0)
         net_pnl = float(trade.get("net_pnl", gross_pnl - total_charges))
-        reason = str(trade.get("reason", "TARGET")).upper()
+        reason = str(trade.get("reason", "Target / Stop-Loss"))
         mode = trade.get("mode", "PAPER")
-        now_str = datetime.datetime.now().strftime("%H:%M:%S")
+        strategy_label = trade.get("strategy_name") or trade.get("strategy") or "ILSME_Sniper"
+        now_str = now_ist().strftime("%H:%M:%S")
 
         is_profit = net_pnl >= 0
-        if is_profit:
-            header = "🎯 <b>TARGET REACHED — PROFIT BOOKED</b>"
-            trend_icon = "🟢"
-            pnl_str = f"+₹{net_pnl:,.2f}"
-        else:
-            header = "🛑 <b>STOP-LOSS HIT — LOSS BOOKED</b>"
-            trend_icon = "🔴"
-            pnl_str = f"-₹{abs(net_pnl):,.2f}"
+        header = "🎯 <b>TRADE CLOSED — PROFIT BOOKED</b>" if is_profit else "🛑 <b>TRADE CLOSED — STOP-LOSS HIT</b>"
+        trend_icon = "🟢" if is_profit else "🔴"
+        pnl_str = f"+₹{net_pnl:,.2f}" if is_profit else f"-₹{abs(net_pnl):,.2f}"
+        gross_str = f"+₹{gross_pnl:,.2f}" if gross_pnl >= 0 else f"-₹{abs(gross_pnl):,.2f}"
+        pct_gain = ((exit_price - entry_price) / entry_price * 100.0) if entry_price > 0 else 0.0
 
-        mode_tag = "📝 PAPER SIMULATED" if mode == "PAPER" else "⚡ ANGEL ONE LIVE"
+        mode_tag = "📝 PAPER" if mode == "PAPER" else "⚡ LIVE"
 
         message = (
             f"{header}\n\n"
             f"{trend_icon} <b>Contract:</b> <b>{symbol}</b>\n"
-            f"🏷 <b>Session:</b> <code>{mode_tag}</code>\n"
-            f"💵 <b>Entry:</b> ₹{entry_price:.2f} | <b>Exit:</b> ₹{exit_price:.2f}\n"
+            f"🧠 <b>Strategy:</b> <code>{strategy_label}</code>\n"
+            f"💵 <b>Entry:</b> ₹{entry_price:.2f} ➜ <b>Exit:</b> ₹{exit_price:.2f} ({pct_gain:+.1f}%)\n"
             f"📦 <b>Quantity:</b> {quantity}\n"
-            f"💰 <b>Gross P&L:</b> ₹{gross_pnl:+,.2f}\n"
-            f"💸 <b>Brokerage & Taxes:</b> -₹{total_charges:.2f}\n"
+            f"💰 <b>Gross P&L:</b> {gross_str}\n"
+            f"💸 <b>Charges & Tax:</b> -₹{total_charges:.2f}\n"
             f"{trend_icon} <b>Net Realized P&L:</b> <code>{pnl_str}</code>\n"
-            f"📋 <b>Exit Trigger:</b> {reason}\n"
-            f"⏱ <b>Time:</b> {now_str} IST"
+            f"📋 <b>Exit Reason:</b> {reason}\n"
+            f"🏷 <b>Mode:</b> {mode_tag} | ⏱ <b>Time:</b> {now_str} IST"
+        )
+        self.send_message_async(message)
+
+    def notify_scaling_advisory(self, stats: Dict[str, Any]):
+        """Notifies operator when statistical conditions are met to scale capital up."""
+        now_str = now_ist().strftime("%H:%M:%S")
+        trades = stats.get("total_trades", 0)
+        pf = stats.get("profit_factor", 0.0)
+        winrate = stats.get("win_rate", 0.0)
+        max_dd = stats.get("max_drawdown_pct", 0.0)
+        avg_slip = stats.get("avg_slippage", 0.0)
+
+        message = (
+            f"🚀 <b>SYSTEM SCALING ADVISORY (GREEN LIGHT)</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ <b>Milestone Achieved:</b> Statistical criteria met for Capital Scale-Up!\n\n"
+            f"📊 <b>Track Record:</b>\n"
+            f"  • Completed Trades: <code>{trades}</code>\n"
+            f"  • Profit Factor: <code>{pf:.2f}</code>\n"
+            f"  • Win Rate: <code>{winrate:.1f}%</code>\n"
+            f"  • Max Drawdown: <code>{max_dd:.1f}%</code>\n"
+            f"  • Average Slippage: <code>{avg_slip:.2f} pts</code>\n\n"
+            f"💡 <b>Recommendation:</b> Allocation can be safely increased by <b>+25% capital</b>.\n"
+            f"⏱ <b>Timestamp:</b> {now_str} IST"
+        )
+        self.send_message_async(message)
+
+    def notify_discard_alert(self, reason: str, stats: Dict[str, Any]):
+        """Dispatches high-priority quarantine alert when system health limits are breached."""
+        if not self.enabled:
+            return
+
+        now_ts = time.time()
+        last_alert = getattr(self, "_last_discard_alert_time", 0.0)
+        if now_ts - last_alert < 600.0:
+            logger.warning(f"[TELEGRAM] Suppressed duplicate quarantine alert (throttled): {reason}")
+            return
+        self._last_discard_alert_time = now_ts
+
+        now_str = now_ist().strftime("%H:%M:%S")
+        curr_dd = stats.get("drawdown_pct", 0.0)
+        consec_losses = stats.get("consecutive_losses", 0)
+
+        message = (
+            f"🛑 <b>SYSTEM HEALTH ALERT: QUARANTINE TRIGGERED</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚠️ <b>Critical Violation:</b> <b>{reason}</b>\n\n"
+            f"📉 <b>Breach Metrics:</b>\n"
+            f"  • Current Drawdown: <code>{curr_dd:.1f}%</code>\n"
+            f"  • Consecutive Losses: <code>{consec_losses}</code>\n\n"
+            f"🔒 <b>Action Required:</b> Halt trading immediately. Review risk settings.\n"
+            f"⏱ <b>Timestamp:</b> {now_str} IST"
         )
         self.send_message_async(message)
 
     def notify_panic_triggered(self, reason: str = "Operator Manual Panic"):
-        """Emergency circuit breaker notification."""
-        now_str = datetime.datetime.now().strftime("%H:%M:%S")
+        """Emergency circuit breaker notification with anti-spam throttling."""
+        if not self.enabled:
+            return
+
+        now_ts = time.time()
+        last_alert = getattr(self, "_last_panic_alert_time", 0.0)
+        last_reason = getattr(self, "_last_panic_reason", "")
+        # Debounce: strictly throttle duplicate panic notifications (min 30s cooldown between any panic, 15m for same reason)
+        if (now_ts - last_alert < 30.0) or ((now_ts - last_alert < 900.0) and (reason == last_reason)):
+            logger.warning(f"[TELEGRAM] Suppressed duplicate panic alert (throttled): {reason}")
+            return
+
+        self._last_panic_alert_time = now_ts
+        self._last_panic_reason = reason
+
+        now_str = now_ist().strftime("%H:%M:%S")
         message = (
             f"🚨 <b>EMERGENCY CIRCUIT BREAKER ACTIVATED</b>\n\n"
-            f"⚠️ <b>Action:</b> Panic switch triggered! All open options positions liquidated at market.\n"
+            f"⚠️ <b>Action:</b> Panic switch triggered! All open positions liquidated at market.\n"
             f"🛑 <b>Reason:</b> {reason}\n"
             f"🔒 <b>State:</b> Trading Engine HALTED\n"
             f"⏱ <b>Timestamp:</b> {now_str} IST"
@@ -229,79 +311,119 @@ class TelegramNotifier:
 
     def notify_eod_summary(self, state_mgr: Any, mode_override: Optional[str] = None):
         """
-        Sends the End of Day (EOD) Performance Report at 15:15 IST.
-        Summarizes trades count, win rate, Gross PnL, Brokerage & Taxes, and Net PnL.
+        Sends clean, meaningful End of Day (EOD) Performance Reports.
         """
         if not self.enabled:
-            return
+            return False, "Telegram notifications disabled"
 
-        date_str = datetime.datetime.now().strftime("%d %b %Y")
-        now_str = datetime.datetime.now().strftime("%H:%M:%S")
-        mode = mode_override or state_mgr.execution_mode
+        if hasattr(state_mgr, "check_and_perform_daily_rollover"):
+            state_mgr.check_and_perform_daily_rollover()
 
-        is_paper = (mode == "PAPER")
+        date_str = now_ist().strftime("%d %b %Y")
+        now_str = now_ist().strftime("%H:%M:%S")
 
-        if is_paper:
-            trades = list(getattr(state_mgr, "paper_completed_trades", []))
-            gross_pnl = float(getattr(state_mgr, "paper_realized_pnl", 0.0))
-            brokerage = float(getattr(state_mgr, "paper_total_brokerage", 0.0))
-            net_pnl = float(getattr(state_mgr, "paper_net_pnl", gross_pnl - brokerage))
-            capital = float(getattr(state_mgr, "paper_capital", 100000.0))
-            starting_cap = float(getattr(state_mgr, "paper_starting_capital", 100000.0))
-            session_title = "Paper Trading Sandbox (Enclosed Ledger)"
-            mode_tag = "📝 PAPER SIMULATED"
-        else:
-            trades = list(getattr(state_mgr, "completed_trades", []))
-            gross_pnl = float(getattr(state_mgr, "realized_pnl", 0.0))
-            brokerage = float(getattr(state_mgr, "total_brokerage", 0.0))
-            net_pnl = float(getattr(state_mgr, "net_pnl", gross_pnl - brokerage))
-            capital = float(getattr(state_mgr, "equity", 0.0))
-            starting_cap = float(getattr(state_mgr, "starting_equity", 0.0))
-            session_title = "Angel One Live Options Execution"
-            mode_tag = "⚡ LIVE SMARTAPI"
+        overall_success = True
+        overall_detail = "Reports sent successfully"
 
-        total_trades = len(trades)
-        winning = sum(1 for t in trades if t.get("net_pnl", 0) > 0)
-        losing = sum(1 for t in trades if t.get("net_pnl", 0) <= 0)
-        win_rate = (winning / total_trades * 100.0) if total_trades > 0 else 0.0
-        executed_orders = total_trades * 2
+        # Check which mode was active today
+        is_live_active = getattr(state_mgr, "execution_mode", "PAPER") == "REAL" or len(getattr(state_mgr, "completed_trades", [])) > 0
 
-        gross_prefix = "+" if gross_pnl >= 0 else "-"
-        gross_display = f"{gross_prefix}₹{abs(gross_pnl):,.2f}"
-
-        net_prefix = "+" if net_pnl >= 0 else "-"
-        net_display = f"{net_prefix}₹{abs(net_pnl):,.2f}"
-        status_icon = "🟢" if net_pnl >= 0 else "🔴"
-
-        # Trade list breakdown snippet (up to 4 most recent trades)
-        trade_snippets = []
-        for t in trades[-4:]:
-            t_sym = t.get("symbol", "OPT")
-            t_net = t.get("net_pnl", 0.0)
-            t_icon = "✅" if t_net >= 0 else "❌"
-            trade_snippets.append(f"  {t_icon} <code>{t_sym}</code>: {t_net:+,.2f}")
         
-        trades_breakdown = "\n".join(trade_snippets) if trade_snippets else "  <i>No positions closed today</i>"
+        # 1. LIVE REPORT (if real trades were taken or mode is REAL)
+        if is_live_active:
+            trades = list(getattr(state_mgr, "completed_trades", []))
+            gross = float(getattr(state_mgr, "realized_pnl", 0.0))
+            brokerage = float(getattr(state_mgr, "total_brokerage", 0.0))
+            net = float(getattr(state_mgr, "net_pnl", gross - brokerage))
+            
+            rms = getattr(state_mgr, "broker_rms", {})
+            net_equity = float(rms.get("net", 0.0) or getattr(state_mgr, "equity", 0.0))
+            
+            total = len(trades)
+            wins = sum(1 for t in trades if float(t.get("net_pnl", 0.0)) > 0)
+            losses = sum(1 for t in trades if float(t.get("net_pnl", 0.0)) <= 0)
+            winrate = (wins / total * 100.0) if total > 0 else 0.0
 
-        drawdown = getattr(state_mgr, "daily_drawdown_pct", 0.0)
+            net_icon = "🟢" if net >= 0 else "🔴"
+            net_prefix = "+" if net >= 0 else "-"
+            gross_prefix = "+" if gross >= 0 else "-"
 
-        message = (
-            f"📊 <b>END OF DAY (EOD) PERFORMANCE REPORT</b>\n\n"
-            f"📅 <b>Date:</b> {date_str} ({now_str} IST)\n"
-            f"🏷 <b>Session:</b> {session_title} ({mode_tag})\n"
-            f"🔢 <b>Total Closed Trades:</b> {total_trades} ({executed_orders} orders)\n"
-            f"✅ <b>Winning:</b> {winning} | ❌ <b>Losing:</b> {losing}\n"
-            f"🎯 <b>Win Rate:</b> <code>{win_rate:.1f}%</code>\n\n"
-            f"💰 <b>Gross Realised P&L:</b> <code>{gross_display}</code>\n"
-            f"💸 <b>Brokerage & Taxes:</b> <code>-₹{brokerage:,.2f}</code>\n"
-            f"{status_icon} <b>Net Realised P&L:</b> <code>{net_display}</code>\n\n"
-            f"💼 <b>Closing Capital:</b> ₹{capital:,.2f} (Start: ₹{starting_cap:,.2f})\n"
-            f"📉 <b>Daily Peak Drawdown:</b> {drawdown:.2f}%\n\n"
-            f"📋 <b>Recent Trade Activity:</b>\n{trades_breakdown}\n\n"
-            f"🏁 <b>Status:</b> Market Session Closed (15:15 IST)"
-        )
+            trade_lines = []
+            for t in trades[-10:]:
+                t_sym = t.get("symbol", "OPT")
+                t_net = float(t.get("net_pnl", 0.0))
+                t_icon = "✅" if t_net >= 0 else "❌"
+                trade_lines.append(f"  {t_icon} <code>{t_sym}</code>: {t_net:+,.2f}")
+            breakdown = "\n".join(trade_lines) if trade_lines else "  <i>No positions executed today</i>"
 
-        return self.send_message_sync(message)
+            msg = (
+                f"📊 <b>END OF DAY REPORT — {date_str}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🏷 <b>Mode:</b> ⚡ <b>REAL LIVE TRADING</b>\n"
+                f"🎯 <b>Result:</b> {wins}W / {losses}L (<code>{winrate:.0f}% Win Rate</code>)\n"
+                f"🔢 <b>Trades Taken:</b> {total}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💰 <b>Gross P&L:</b> <code>{gross_prefix}₹{abs(gross):,.2f}</code>\n"
+                f"💸 <b>Brokerage & Taxes:</b> <code>-₹{brokerage:,.2f}</code>\n"
+                f"{net_icon} <b>Net Realized P&L:</b> <code>{net_prefix}₹{abs(net):,.2f}</code>\n\n"
+                f"💼 <b>Broker Net Balance:</b> ₹{net_equity:,.2f}\n\n"
+                f"📋 <b>Today's Trades:</b>\n{breakdown}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"⏱ <i>Generated at {now_str} IST</i>"
+            )
+            res_live, det_live = self.send_message_sync(msg)
+            if not res_live:
+                overall_success = False
+                overall_detail = det_live
+
+        # 2. PAPER REPORT (if paper mode or paper trades taken)
+        paper_trades = list(getattr(state_mgr, "paper_completed_trades", []))
+        paper_status = getattr(state_mgr, "paper_agent_status", "IDLE")
+        should_send_paper = (paper_status == "RUNNING" or len(paper_trades) > 0 or getattr(state_mgr, "execution_mode", "PAPER") == "PAPER" or mode_override == "PAPER")
+
+        if should_send_paper and not is_live_active:
+            paper_gross = float(getattr(state_mgr, "paper_realized_pnl", 0.0))
+            paper_brokerage = float(getattr(state_mgr, "paper_total_brokerage", 0.0))
+            paper_net = float(getattr(state_mgr, "paper_net_pnl", paper_gross - paper_brokerage))
+            paper_cap = float(getattr(state_mgr, "paper_capital", 50000.0))
+            paper_total = len(paper_trades)
+            paper_wins = sum(1 for t in paper_trades if float(t.get("net_pnl", 0.0)) > 0)
+            paper_losses = sum(1 for t in paper_trades if float(t.get("net_pnl", 0.0)) <= 0)
+            paper_winrate = (paper_wins / paper_total * 100.0) if paper_total > 0 else 0.0
+
+            net_icon = "🟢" if paper_net >= 0 else "🔴"
+            net_prefix = "+" if paper_net >= 0 else "-"
+            gross_prefix = "+" if paper_gross >= 0 else "-"
+
+            paper_lines = []
+            for t in paper_trades[-10:]:
+                t_sym = t.get("symbol", "OPT")
+                t_net = float(t.get("net_pnl", 0.0))
+                t_icon = "✅" if t_net >= 0 else "❌"
+                paper_lines.append(f"  {t_icon} <code>{t_sym}</code>: {t_net:+,.2f}")
+            paper_breakdown = "\n".join(paper_lines) if paper_lines else "  <i>No paper trades executed today</i>"
+
+            msg_paper = (
+                f"📊 <b>END OF DAY REPORT — {date_str}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🏷 <b>Mode:</b> 📝 <b>PAPER SIMULATION</b>\n"
+                f"🎯 <b>Result:</b> {paper_wins}W / {paper_losses}L (<code>{paper_winrate:.0f}% Win Rate</code>)\n"
+                f"🔢 <b>Trades Taken:</b> {paper_total}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💰 <b>Gross P&L:</b> <code>{gross_prefix}₹{abs(paper_gross):,.2f}</code>\n"
+                f"💸 <b>Simulated Charges:</b> <code>-₹{paper_brokerage:,.2f}</code>\n"
+                f"{net_icon} <b>Net Realized P&L:</b> <code>{net_prefix}₹{abs(paper_net):,.2f}</code>\n\n"
+                f"💼 <b>Paper Capital:</b> ₹{paper_cap:,.2f}\n\n"
+                f"📋 <b>Today's Trades:</b>\n{paper_breakdown}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"⏱ <i>Generated at {now_str} IST</i>"
+            )
+            res_paper, det_paper = self.send_message_sync(msg_paper)
+            if not res_paper:
+                overall_success = False
+                overall_detail = det_paper
+
+        return overall_success, overall_detail
 
 
 class TelegramBotController:
@@ -362,6 +484,22 @@ class TelegramBotController:
             self._thread = None
         logger.info("[TELEGRAM_BOT] Controller stopped.")
 
+    def _run_async(self, coro, timeout: float = 45.0):
+        """Dispatches an async coroutine onto the orchestrator event loop safely."""
+        loop = getattr(self.orchestrator, "loop", None) if self.orchestrator else None
+        if loop and loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
+            return future.result(timeout=timeout)
+        else:
+            try:
+                cur_loop = asyncio.get_event_loop()
+                if cur_loop.is_running():
+                    future = asyncio.run_coroutine_threadsafe(coro, cur_loop)
+                    return future.result(timeout=timeout)
+                return cur_loop.run_until_complete(coro)
+            except Exception:
+                return asyncio.run(coro)
+
     def _fetch_updates(self, offset: int, timeout: int = 10) -> List[Dict[str, Any]]:
         url = f"https://api.telegram.org/bot{self.notifier.bot_token}/getUpdates?offset={offset}&timeout={timeout}"
         req = urllib.request.Request(url, headers={"User-Agent": "SmartAPIOptionsAgent/2.0"})
@@ -416,6 +554,8 @@ class TelegramBotController:
     def dispatch_command(self, cmd: str, args: List[str]) -> str:
         if cmd in ("/status", "status"):
             return self._cmd_status()
+        elif cmd in ("/health", "health", "/ping", "ping"):
+            return self._cmd_health()
         elif cmd in ("/positions", "positions"):
             return self._cmd_positions()
         elif cmd in ("/trades", "trades"):
@@ -428,8 +568,12 @@ class TelegramBotController:
             return self._cmd_start(["real"])
         elif cmd in ("/start_paper", "start_paper", "/paper", "paper"):
             return self._cmd_start(["paper"])
+        elif cmd in ("/scan", "scan", "/scanner", "scanner", "/radar", "radar"):
+            return self._cmd_scanner(args)
+        elif cmd in ("/resume", "resume", "/reset", "reset", "/reset_panic", "reset_panic"):
+            return self._cmd_reset_panic()
         elif cmd in ("/stop", "stop"):
-            return self._cmd_stop()
+            return self._cmd_stop(args)
         elif cmd in ("/squareoff", "squareoff", "/panic", "panic"):
             return self._cmd_squareoff()
         elif cmd in ("/help", "help"):
@@ -439,6 +583,56 @@ class TelegramBotController:
                 f"❓ Unknown command: <code>{cmd}</code>\n\n"
                 "Use /help to see all available remote commands."
             )
+
+    def _cmd_health(self) -> str:
+        """Detailed server and stream diagnostic health check."""
+        from smartapi_trader.utils.tz import now_ist
+        now = now_ist()
+        now_t = now.time()
+        is_weekday = (now.weekday() < 5)
+        is_mkt_hours = is_weekday and (datetime.time(9, 15) <= now_t <= datetime.time(15, 30))
+        
+        stream_client = getattr(self.orchestrator, "stream_client", None)
+        is_ws_conn = getattr(stream_client, "is_connected", False) if stream_client else False
+        total_ticks = getattr(stream_client, "total_ticks_received", 0) if stream_client else 0
+        last_tick_t = getattr(stream_client, "last_tick_time", 0.0) if stream_client else 0.0
+        sec_since_tick = int(time.time() - last_tick_t) if last_tick_t > 0 else -1
+
+        paper_status = getattr(self.state_mgr, "paper_agent_status", "PAUSED")
+        real_status = getattr(self.state_mgr, "real_agent_status", "PAUSED")
+        panic = getattr(self.state_mgr, "is_panic_active", False)
+
+        feed_badge = "🟢 CONNECTED" if is_ws_conn else "🔴 DISCONNECTED"
+        if sec_since_tick >= 0 and sec_since_tick < 60:
+            tick_badge = f"🟢 Flowing ({sec_since_tick}s ago | {total_ticks:,} total)"
+        elif sec_since_tick >= 60:
+            tick_badge = f"⚠️ Idle ({sec_since_tick}s ago | {total_ticks:,} total)"
+        else:
+            tick_badge = "⚪ No ticks recorded"
+
+        mkt_badge = "🟢 ACTIVE (09:15 - 15:30 IST)" if is_mkt_hours else "⚪ CLOSED (Pre/Post Market or Weekend)"
+
+        health_ok = True
+        if is_mkt_hours:
+            if not is_ws_conn or panic:
+                health_ok = False
+
+        overall_badge = "✅ ALL SYSTEMS HEALTHY & RUNNING AS EXPECTED" if health_ok else "⚠️ ABNORMALITY DETECTED"
+
+        return (
+            f"🩺 <b>SERVER HEALTH & DIAGNOSTIC REPORT</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🕒 <b>Server Time:</b> {now.strftime('%Y-%m-%d %H:%M:%S')} IST\n"
+            f"🏛 <b>Market Session:</b> {mkt_badge}\n"
+            f"🚦 <b>Overall Status:</b> <b>{overall_badge}</b>\n\n"
+            f"📡 <b>SmartAPI Stream:</b> {feed_badge}\n"
+            f"📊 <b>Tick Ingestion:</b> {tick_badge}\n"
+            f"📝 <b>Paper Agent:</b> <code>{paper_status}</code>\n"
+            f"⚡ <b>Real Live Agent:</b> <code>{real_status}</code>\n"
+            f"🚨 <b>Panic State:</b> {'🚨 ACTIVE' if panic else '✅ NORMAL'}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>Send /status for capital & PnL, or /positions for active trades.</i>"
+        )
 
     def _cmd_status(self) -> str:
         mode = self.state_mgr.execution_mode
@@ -484,20 +678,32 @@ class TelegramBotController:
         bnf_spot = spots.get("BANKNIFTY", {}).get("spot", 0.0)
         indices_line = f"📈 <b>Live Spots:</b> NIFTY: <code>{nifty_spot:,.2f}</code> | BNF: <code>{bnf_spot:,.2f}</code>\n"
 
+        so_status_line = ""
+        if self.orchestrator:
+            so_live = getattr(self.orchestrator, "stock_live_agent", None)
+            so_paper = getattr(self.orchestrator, "stock_paper_agent", None)
+            so_scanner = getattr(self.orchestrator, "intraday_scanner", None)
+            if so_live or so_paper:
+                so_live_st = getattr(so_live, "status", "IDLE") if so_live else "N/A"
+                so_paper_st = getattr(so_paper, "status", "IDLE") if so_paper else "N/A"
+                so_scanner_st = "RUNNING" if getattr(so_scanner, "is_active", False) else "IDLE"
+                so_status_line = f"🎯 <b>Stock Options:</b> Live={so_live_st} | Paper={so_paper_st} | Radar={so_scanner_st}\n"
+
         return (
             f"🤖 <b>OPTIONS SNIPER ENGINE STATUS</b>\n\n"
             f"🏷 <b>Execution Mode:</b> <code>{mode}</code>\n"
             f"🚦 <b>System State:</b> {status_flag}\n"
             f"{indices_line}"
-            f"📝 <b>Paper Agent:</b> {paper_status}\n"
-            f"⚡ <b>Real Live Agent:</b> {real_status}\n\n"
+            f"📝 <b>Index Paper Agent:</b> {paper_status}\n"
+            f"⚡ <b>Index Live Agent:</b> {real_status}\n"
+            f"{so_status_line}\n"
             f"💼 <b>Active Capital:</b> ₹{cap:,.2f}\n"
             f"💳 <b>Available Margin:</b> ₹{avail:,.2f}\n"
             f"🏦 <b>Live Angel One Cash:</b> {live_cap_badge}\n"
             f"💰 <b>Today's Net P&L:</b> <code>{pnl_display}</code>\n"
             f"📊 <b>Active Positions:</b> {pos_count}\n"
             f"🔢 <b>Trades Taken:</b> {trades_count}\n\n"
-            f"Send /positions for live trades or /eod for session report."
+            f"Send /health for diagnostics, /positions for trades, or /help for menu."
         )
 
     def _cmd_positions(self) -> str:
@@ -516,28 +722,103 @@ class TelegramBotController:
                 f"   SL: ₹{p.stop_loss:.2f} | TP1: ₹{p.target_1:.2f}\n"
                 f"   Unrealized P&L: <code>₹{pnl:+,.2f}</code>\n"
             )
+
+        # Include Stock Options positions
+        if self.orchestrator and hasattr(self.orchestrator, "stock_storage") and self.orchestrator.stock_storage:
+            try:
+                live_so = self.orchestrator.stock_storage.get_positions(is_paper=False, open_only=True)
+                if live_so:
+                    lines.append("\n⚡ <b>STOCK OPTIONS (LIVE):</b>")
+                    for sp in live_so:
+                        pnl = float(sp.get("unrealized_pnl", 0.0))
+                        icon = "🟢" if pnl >= 0 else "🔴"
+                        lines.append(
+                            f"{icon} <b>{sp.get('symbol')}</b> ({sp.get('option_type')})\n"
+                            f"   Qty: {sp.get('quantity', 0)} | Entry: ₹{float(sp.get('entry_price', 0)):.2f} | LTP: ₹{float(sp.get('current_ltp', 0)):.2f}\n"
+                            f"   SL: ₹{float(sp.get('stop_loss', 0)):.2f} | T1: ₹{float(sp.get('target_1', 0)):.2f}\n"
+                            f"   Unrealized P&L: <code>₹{pnl:+,.2f}</code>\n"
+                        )
+                paper_so = self.orchestrator.stock_storage.get_positions(is_paper=True, open_only=True)
+                if paper_so:
+                    lines.append("\n📝 <b>STOCK OPTIONS (PAPER):</b>")
+                    for sp in paper_so:
+                        pnl = float(sp.get("unrealized_pnl", 0.0))
+                        icon = "🟢" if pnl >= 0 else "🔴"
+                        lines.append(
+                            f"{icon} <b>{sp.get('symbol')}</b> ({sp.get('option_type')})\n"
+                            f"   Qty: {sp.get('quantity', 0)} | Entry: ₹{float(sp.get('entry_price', 0)):.2f} | LTP: ₹{float(sp.get('current_ltp', 0)):.2f}\n"
+                            f"   SL: ₹{float(sp.get('stop_loss', 0)):.2f} | T1: ₹{float(sp.get('target_1', 0)):.2f}\n"
+                            f"   Unrealized P&L: <code>₹{pnl:+,.2f}</code>\n"
+                        )
+            except Exception as e:
+                logger.error(f"[TELEGRAM_BOT] Error fetching stock options positions: {e}")
+
         return "\n".join(lines)
 
     def _cmd_trades(self) -> str:
-        mode = self.state_mgr.execution_mode
-        trades = (
-            getattr(self.state_mgr, "paper_completed_trades", [])
-            if mode == "PAPER"
-            else getattr(self.state_mgr, "completed_trades", [])
-        )
-        if not trades:
-            return "📝 <b>No trades completed yet today.</b>"
+        real_trades = list(getattr(self.state_mgr, "completed_trades", []))
+        paper_trades = list(getattr(self.state_mgr, "paper_completed_trades", []))
 
-        lines = [f"📋 <b>TODAY'S CLOSED TRADES ({mode}):</b>\n"]
-        for t in trades[-8:]:
-            net = t.get("net_pnl", 0.0)
-            icon = "🟢" if net >= 0 else "🔴"
-            lines.append(
-                f"{icon} <b>{t.get('symbol')}</b>\n"
-                f"   Entry: ₹{t.get('entry_price', 0):.2f} ➔ Exit: ₹{t.get('exit_price', 0):.2f} (Qty: {t.get('quantity', 0)})\n"
-                f"   Gross: ₹{t.get('gross_pnl', 0):+,.2f} | Charges: -₹{t.get('total_charges', 0):.2f}\n"
-                f"   Net P&L: <code>₹{net:+,.2f}</code>\n"
-            )
+        if not real_trades and not paper_trades:
+            return "📝 <b>No trades completed yet today (Neither Real nor Paper).</b>"
+
+        lines = []
+        if real_trades:
+            lines.append("⚡ <b>REAL LIVE TRADES TODAY:</b>")
+            for t in real_trades[-5:]:
+                net = float(t.get("net_pnl", 0.0))
+                icon = "🟢" if net >= 0 else "🔴"
+                lines.append(
+                    f"{icon} <b>{t.get('symbol')}</b>\n"
+                    f"   Entry: ₹{t.get('entry_price', 0):.2f} ➔ Exit: ₹{t.get('exit_price', 0):.2f} (Qty: {t.get('quantity', 0)})\n"
+                    f"   Gross: ₹{t.get('gross_pnl', 0):+,.2f} | Charges: -₹{t.get('total_charges', 0):.2f}\n"
+                    f"   Net P&L: <code>₹{net:+,.2f}</code>"
+                )
+            lines.append("")
+
+        if paper_trades:
+            lines.append("📝 <b>PAPER TRADES TODAY:</b>")
+            for t in paper_trades[-5:]:
+                net = float(t.get("net_pnl", 0.0))
+                icon = "🟢" if net >= 0 else "🔴"
+                lines.append(
+                    f"{icon} <b>{t.get('symbol')}</b>\n"
+                    f"   Entry: ₹{t.get('entry_price', 0):.2f} ➔ Exit: ₹{t.get('exit_price', 0):.2f} (Qty: {t.get('quantity', 0)})\n"
+                    f"   Gross: ₹{t.get('gross_pnl', 0):+,.2f} | Charges: -₹{t.get('total_charges', 0):.2f}\n"
+                    f"   Net P&L: <code>₹{net:+,.2f}</code>"
+                )
+
+        # Include Stock Options Trades
+        if self.orchestrator and hasattr(self.orchestrator, "stock_storage") and self.orchestrator.stock_storage:
+            try:
+                so_live = self.orchestrator.stock_storage.get_trades(is_paper=False, limit=5)
+                if so_live:
+                    lines.append("\n⚡ <b>STOCK OPTIONS (LIVE TRADES):</b>")
+                    for t in so_live:
+                        net = float(t.get("net_pnl", 0.0))
+                        icon = "🟢" if net >= 0 else "🔴"
+                        lines.append(
+                            f"{icon} <b>{t.get('symbol')}</b>\n"
+                            f"   Entry: ₹{float(t.get('entry_price', 0)):.2f} ➔ Exit: ₹{float(t.get('exit_price', 0)):.2f} (Qty: {t.get('quantity', 0)})\n"
+                            f"   Net P&L: <code>₹{net:+,.2f}</code> ({t.get('exit_reason', 'Closed')})"
+                        )
+                so_paper = self.orchestrator.stock_storage.get_trades(is_paper=True, limit=5)
+                if so_paper:
+                    lines.append("\n📝 <b>STOCK OPTIONS (PAPER TRADES):</b>")
+                    for t in so_paper:
+                        net = float(t.get("net_pnl", 0.0))
+                        icon = "🟢" if net >= 0 else "🔴"
+                        lines.append(
+                            f"{icon} <b>{t.get('symbol')}</b>\n"
+                            f"   Entry: ₹{float(t.get('entry_price', 0)):.2f} ➔ Exit: ₹{float(t.get('exit_price', 0)):.2f} (Qty: {t.get('quantity', 0)})\n"
+                            f"   Net P&L: <code>₹{net:+,.2f}</code> ({t.get('exit_reason', 'Closed')})"
+                        )
+            except Exception as e:
+                logger.error(f"[TELEGRAM_BOT] Error fetching stock options trades: {e}")
+
+        if not lines:
+            return "📝 <b>No trades completed yet today (Neither Index nor Stock Options).</b>"
+
         return "\n".join(lines)
 
     def _cmd_eod(self) -> str:
@@ -545,8 +826,16 @@ class TelegramBotController:
         return "📬 <i>End of Day (EOD) Report dispatched above!</i>"
 
     def _cmd_start(self, args: List[str]) -> str:
+        # If emergency panic was active, clear panic and reset daily risk circuit breaker
+        if getattr(self.state_mgr, "is_panic_active", False):
+            self.state_mgr.reset_panic()
+            if self.orchestrator and hasattr(self.orchestrator, "risk_manager") and self.orchestrator.risk_manager:
+                self.orchestrator.risk_manager.reset_daily_limits()
+
         sub = args[0].lower() if args else "paper"
-        if sub in ("real", "live"):
+        if sub in ("scanner", "radar", "stock", "stocks"):
+            return self._start_scanner_cmd()
+        elif sub in ("real", "live"):
             # 1. Verify broker credentials & active session
             auth_mgr = getattr(self.orchestrator, "auth_manager", None)
             if auth_mgr:
@@ -596,16 +885,161 @@ class TelegramBotController:
             return "⚡ <b>Real Live Trading Agent ARMED!</b> Live orders enabled."
         else:
             self.state_mgr.start_paper_agent()
-            return "📝 <b>Paper Trading Agent STARTED!</b> Virtual sandbox armed."
+            scanner_msg = ""
+            if self.orchestrator and hasattr(self.orchestrator, "intraday_scanner") and self.orchestrator.intraday_scanner:
+                if not self.orchestrator.intraday_scanner.is_active:
+                    try:
+                        self._run_async(self.orchestrator.intraday_scanner.start(), timeout=5.0)
+                        scanner_msg = "\n🎯 <b>Stock Options Radar:</b> ARMED (Autonomous 5m scans active)"
+                    except Exception as e:
+                        logger.warning(f"[TELEGRAM_BOT] Auto-start scanner error: {e}")
+            return f"📝 <b>Paper Trading Agent STARTED!</b> Virtual sandbox armed.{scanner_msg}"
 
-    def _cmd_stop(self) -> str:
+    def _cmd_stop(self, args: List[str] = None) -> str:
+        sub = args[0].lower() if args else ""
+        if sub in ("scanner", "radar", "stock", "stocks"):
+            return self._stop_scanner_cmd()
         self.state_mgr.pause_paper_agent()
         self.state_mgr.pause_real_agent()
-        return "⏸ <b>Trading Agents PAUSED.</b> Scanning paused."
+        scanner_msg = ""
+        if self.orchestrator and hasattr(self.orchestrator, "intraday_scanner") and self.orchestrator.intraday_scanner:
+            if self.orchestrator.intraday_scanner.is_active:
+                try:
+                    self._run_async(self.orchestrator.intraday_scanner.stop(), timeout=5.0)
+                    scanner_msg = "\n🎯 <b>Stock Options Radar:</b> STOPPED"
+                except Exception as e:
+                    logger.warning(f"[TELEGRAM_BOT] Stop scanner error: {e}")
+        return f"⏸ <b>Trading Agents PAUSED.</b> Scanning paused.{scanner_msg}"
+
+    def _cmd_scanner(self, args: List[str]) -> str:
+        """Remote handler for /scan and /scanner commands."""
+        if not self.orchestrator or not hasattr(self.orchestrator, "intraday_scanner") or not self.orchestrator.intraday_scanner:
+            return "❌ <b>Stock Options Scanner is not available</b> on this instance."
+
+        sub = args[0].lower() if args else ""
+
+        if sub in ("start", "on", "enable", "resume"):
+            return self._start_scanner_cmd()
+        elif sub in ("stop", "off", "disable", "pause"):
+            return self._stop_scanner_cmd()
+        elif sub in ("now", "run", "force", "exec"):
+            return self._execute_manual_scan()
+        elif sub in ("status", "info"):
+            return self._get_scanner_status_msg()
+        else:
+            # Default behavior for /scan without args: if running, trigger immediate scan; if idle, report status & controls
+            if self.orchestrator.intraday_scanner.is_active:
+                return self._execute_manual_scan()
+            else:
+                return self._get_scanner_status_msg()
+
+    def _start_scanner_cmd(self) -> str:
+        if not self.orchestrator or not hasattr(self.orchestrator, "intraday_scanner") or not self.orchestrator.intraday_scanner:
+            return "❌ Stock Options Scanner not initialized."
+        scanner = self.orchestrator.intraday_scanner
+        if scanner.is_active:
+            return f"🟢 <b>Stock Options Radar is ALREADY RUNNING.</b>\nInterval: {scanner.interval_mins}m | Universe: {len(scanner.selected_universe)} stocks."
+        try:
+            self._run_async(scanner.start(), timeout=5.0)
+            return (
+                f"🎯 <b>Stock Options Radar STARTED!</b>\n\n"
+                f"⏱️ <b>Interval:</b> Every {scanner.interval_mins} mins\n"
+                f"🕒 <b>Session:</b> {scanner.session_start.strftime('%H:%M')} – {scanner.session_end.strftime('%H:%M')} IST\n"
+                f"📡 <b>Universe:</b> {len(scanner.selected_universe)} F&O liquid leaders\n\n"
+                f"Automated AI scans will run continuously and alert you here on breakouts."
+            )
+        except Exception as e:
+            return f"❌ Failed to start scanner: <code>{e}</code>"
+
+    def _stop_scanner_cmd(self) -> str:
+        if not self.orchestrator or not hasattr(self.orchestrator, "intraday_scanner") or not self.orchestrator.intraday_scanner:
+            return "❌ Stock Options Scanner not initialized."
+        scanner = self.orchestrator.intraday_scanner
+        if not scanner.is_active:
+            return "🟡 <b>Stock Options Radar is already IDLE.</b>"
+        try:
+            self._run_async(scanner.stop(), timeout=5.0)
+            return "⏸️ <b>Stock Options Radar STOPPED.</b> Background scanning paused."
+        except Exception as e:
+            return f"❌ Failed to stop scanner: <code>{e}</code>"
+
+    def _execute_manual_scan(self) -> str:
+        if not self.orchestrator or not hasattr(self.orchestrator, "intraday_scanner") or not self.orchestrator.intraday_scanner:
+            return "❌ Stock Options Scanner not initialized."
+        scanner = self.orchestrator.intraday_scanner
+        if scanner.is_scanning:
+            return "⏳ <b>Scan in progress...</b> A market analysis is already actively executing."
+        try:
+            res = self._run_async(scanner.execute_scan(is_manual=True), timeout=45.0)
+            if not isinstance(res, dict):
+                return "✅ Manual scan triggered."
+            status = res.get("status")
+            if status == "success":
+                scan_data = res.get("scan", {})
+                cands = scan_data.get("candidates", [])
+                if cands:
+                    lines = [f"🎯 <b>AI SCAN COMPLETED: {len(cands)} Setup(s) Found!</b>\n"]
+                    for c in cands:
+                        sym = c.get("symbol")
+                        bias = c.get("bias")
+                        pc = c.get("primary_contract", {})
+                        stk = pc.get("strike_price")
+                        typ = pc.get("option_type")
+                        prem = float(pc.get("indicative_premium") or 0.0)
+                        tech = c.get("technical", {})
+                        trig = float(tech.get("entry_trigger") or 0.0)
+                        lines.append(f"• <b>{sym}</b> ({bias} • {stk} {typ} @ ₹{prem:.2f} | Trigger: ₹{trig:.2f})")
+                    lines.append("\n🤖 <i>Candidates routed to Stock Options execution engine.</i>")
+                    return "\n".join(lines)
+                else:
+                    reason = scan_data.get("no_trade_reason") or "No setups met the institutional filter criteria."
+                    return f"⚖️ <b>Scan Complete: 0 Trades Qualified</b>\n\nReason: <i>{reason}</i>\n🛡️ Capital is 100% preserved."
+            elif status == "gated":
+                return f"⏸️ <b>Scan Gated:</b> {res.get('message', 'Market consolidated.')}"
+            elif status == "outside_session":
+                return f"⏰ <b>Outside Trading Session:</b> {res.get('message', 'Active 09:00 - 15:00 IST.')}"
+            else:
+                return f"⚠️ <b>Scan Notice:</b> {res.get('message', status)}"
+        except Exception as e:
+            logger.error(f"[TELEGRAM_BOT] Manual scan failed: {e}")
+            return f"❌ <b>Scan Failed:</b> <code>{str(e)[:150]}</code>"
+
+    def _get_scanner_status_msg(self) -> str:
+        if not self.orchestrator or not hasattr(self.orchestrator, "intraday_scanner") or not self.orchestrator.intraday_scanner:
+            return "❌ Stock Options Scanner not initialized."
+        scanner = self.orchestrator.intraday_scanner
+        status_badge = "🟢 RUNNING" if scanner.is_active else "🟡 IDLE"
+        scanning_badge = "⏳ Scanning..." if scanner.is_scanning else "Sleeping"
+        last_scan_str = "Never"
+        if scanner._last_scan_time > 0:
+            dt = datetime.datetime.fromtimestamp(scanner._last_scan_time)
+            last_scan_str = dt.strftime("%H:%M:%S IST")
+
+        return (
+            f"🎯 <b>STOCK OPTIONS RADAR STATUS</b>\n\n"
+            f"🚦 <b>Radar State:</b> {status_badge}\n"
+            f"⚙️ <b>Activity:</b> {scanning_badge}\n"
+            f"⏱️ <b>Interval:</b> Every {scanner.interval_mins} mins\n"
+            f"🕒 <b>Session:</b> {scanner.session_start.strftime('%H:%M')} – {scanner.session_end.strftime('%H:%M')} IST\n"
+            f"📡 <b>Monitored Stocks:</b> {len(scanner.selected_universe)} F&O leaders\n"
+            f"🕐 <b>Last Scan:</b> <code>{last_scan_str}</code>\n\n"
+            f"• Send <code>/scan now</code> to run an instant AI scan.\n"
+            f"• Send <code>/scan start</code> to turn on the background radar.\n"
+            f"• Send <code>/scan stop</code> to pause background scanning."
+        )
+
+    def _cmd_reset_panic(self) -> str:
+        self.state_mgr.reset_panic()
+        if self.orchestrator and hasattr(self.orchestrator, "risk_manager") and self.orchestrator.risk_manager:
+            self.orchestrator.risk_manager.reset_daily_limits()
+        mode = self.state_mgr.execution_mode
+        if mode == "PAPER":
+            self.state_mgr.start_paper_agent()
+        return "✅ <b>EMERGENCY PANIC CLEARED.</b> Circuit breakers reset and scanner re-armed."
 
     def _cmd_squareoff(self) -> str:
         self.state_mgr.trigger_panic()
-        # Square off open positions
+        # Square off open index positions
         for p in list(self.state_mgr.positions.values()):
             if p.is_open:
                 p.is_open = False
@@ -617,20 +1051,43 @@ class TelegramBotController:
                     symbol=p.symbol,
                     is_paper=(self.state_mgr.execution_mode == "PAPER")
                 )
-        return "🚨 <b>EMERGENCY SQUARE-OFF COMPLETE!</b> All positions liquidated and engine halted."
+
+        # Also square off Stock Options live positions
+        so_positions = 0
+        if self.orchestrator and hasattr(self.orchestrator, "stock_live_agent") and self.orchestrator.stock_live_agent:
+            try:
+                res = self.orchestrator.stock_live_agent.emergency_kill_switch()
+                so_positions = res.get("closed_positions", 0)
+                if hasattr(self.orchestrator, "stock_paper_agent") and self.orchestrator.stock_paper_agent:
+                    self.orchestrator.stock_paper_agent.is_running = False
+            except Exception as e:
+                logger.error(f"[TELEGRAM_BOT] Stock options emergency kill error: {e}")
+
+        return (
+            f"🚨 <b>EMERGENCY SQUARE-OFF COMPLETE!</b>\n"
+            f"All Index and Stock Options positions liquidated and engines halted.\n"
+            f"Stock Options positions closed: {so_positions}"
+        )
 
     def _cmd_help(self) -> str:
         return (
             "🤖 <b>OPTIONS SNIPER TELEGRAM COMMANDS</b>\n\n"
             "📊 <b>Market & Session:</b>\n"
             "• <code>/status</code> — System state, daily P&L, balance, agent status\n"
+            "• <code>/health</code> — Server diagnostics, stream latency, market checks\n"
             "• <code>/positions</code> — Live active open contracts & unrealized P&L\n"
             "• <code>/trades</code> — Today's completed trades with charges\n"
             "• <code>/eod</code> — Generate and send End of Day performance report\n\n"
             "🕹 <b>Remote Engine Control:</b>\n"
-            "• <code>/start paper</code> — Start paper trading agent\n"
+            "• <code>/start paper</code> — Start paper trading agent (Index + Stock Options)\n"
             "• <code>/start live</code> — Arm real live Angel One execution\n"
-            "• <code>/stop</code> — Pause active trading agent\n"
-            "• <code>/squareoff</code> — Emergency Panic! Liquidate all contracts\n"
+            "• <code>/resume</code> or <code>/reset</code> — Clear emergency panic & reset circuit breakers\n"
+            "• <code>/stop</code> — Pause active trading agents\n"
+            "• <code>/squareoff</code> — Emergency Panic! Liquidate all contracts\n\n"
+            "🎯 <b>Stock Options AI Radar:</b>\n"
+            "• <code>/scan</code> or <code>/scan now</code> — Run instant on-demand AI breakout scan\n"
+            "• <code>/scan start</code> — Turn ON autonomous background radar (5m scans)\n"
+            "• <code>/scan stop</code> — Turn OFF background radar\n"
+            "• <code>/scan status</code> — View radar interval, last scan & universe\n\n"
             "• <code>/help</code> — Show this commands menu"
         )

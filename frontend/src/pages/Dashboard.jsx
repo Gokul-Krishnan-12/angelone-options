@@ -97,8 +97,8 @@ export default function Dashboard({
                 {isRunning
                   ? 'Pause Live Agent'
                   : !isCapitalAdequate
-                  ? `Min ${formatINR(MIN_CAPITAL_REQUIRED)} Required`
-                  : 'Start Live Trading Agent'}
+                    ? `Min ${formatINR(MIN_CAPITAL_REQUIRED)} Required`
+                    : 'Start Live Trading Agent'}
               </span>
             </button>
           </div>
@@ -144,9 +144,9 @@ export default function Dashboard({
 
         <div className="hud-card" style={{ borderLeft: '3px solid var(--accent-orange)' }}>
           <div className="card-header-line">
-            <span>Brokerage & Taxes</span>
+            <span>Brokerages</span>
             <span className="mono font-semibold" style={{ color: 'var(--accent-orange)' }}>
-              ANGEL ONE + TAX
+              TAX
             </span>
           </div>
           <div className="metric-big mono font-bold" style={{ color: 'var(--accent-orange)' }}>
@@ -269,6 +269,8 @@ export default function Dashboard({
         <PositionsTable
           positions={positions}
           onExitPosition={onExitPosition}
+          showVenueTabs={true}
+          title="Active Derivatives Exposure (Portfolio Overview)"
         />
       ) : (
         <div className="hud-card">

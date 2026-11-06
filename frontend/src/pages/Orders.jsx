@@ -30,9 +30,15 @@ export default function Orders({ state, onExitPosition, onRefresh }) {
     }
   };
 
-  const positions = ordersData.positions || [];
-  const orders = ordersData.orders || [];
-  const history = ordersData.trade_history || [];
+  const isPaperOrder = (ord) => {
+    if (ord.is_paper) return true;
+    const id = ord.order_id || '';
+    return id.startsWith('ORD_NIFTY_') || id.startsWith('ORD_BANKNIFTY_') || id.startsWith('ORD_SENSEX_') || id.startsWith('ORD_EXIT_PARTIAL_') || id.startsWith('ORD_SL_') || id.startsWith('MANUAL_EXIT_');
+  };
+
+  const positions = (ordersData.positions || []).filter(p => !p.is_paper && p.execution_mode === 'LIVE' && p.quantity > 0);
+  const orders = (ordersData.orders || []).filter(o => !isPaperOrder(o));
+  const history = (ordersData.trade_history || []).filter(h => !h.is_paper);
 
   return (
     <div className="page-container">
@@ -127,6 +133,7 @@ export default function Orders({ state, onExitPosition, onRefresh }) {
             <table className="data-table">
               <thead>
                 <tr>
+                  <th>Entered Time</th>
                   <th>Symbol</th>
                   <th>Option Type</th>
                   <th>Lots / Units</th>
@@ -141,7 +148,7 @@ export default function Orders({ state, onExitPosition, onRefresh }) {
               <tbody>
                 {positions.length === 0 ? (
                   <tr>
-                    <td colSpan={9} style={{ textAlign: 'center', padding: '2.5rem', color: 'var(--text-muted)' }}>
+                    <td colSpan={10} style={{ textAlign: 'center', padding: '2.5rem', color: 'var(--text-muted)' }}>
                       No active derivatives positions open.
                     </td>
                   </tr>
@@ -150,9 +157,13 @@ export default function Orders({ state, onExitPosition, onRefresh }) {
                     const pnl = pos.unrealized_pnl || 0;
                     const pnlPct = pos.unrealized_pnl_pct || 0;
                     const isProfit = pnl >= 0;
+                    const enteredTime = (pos.entry_time || pos.created_at || pos.timestamp || '').replace('T', ' ').slice(0, 19);
 
                     return (
                       <tr key={pos.symbol}>
+                        <td className="mono text-muted" style={{ fontSize: '0.72rem', whiteSpace: 'nowrap' }}>
+                          {enteredTime || '--'}
+                        </td>
                         <td className="mono font-bold" style={{ color: '#fff' }}>{pos.symbol}</td>
                         <td>
                           <span
@@ -214,7 +225,7 @@ export default function Orders({ state, onExitPosition, onRefresh }) {
                 {orders.length === 0 ? (
                   <tr>
                     <td colSpan={8} style={{ textAlign: 'center', padding: '2.5rem', color: 'var(--text-muted)' }}>
-                      No orders have been dispatched today.
+                      No live broker orders have been dispatched today. (Paper simulation orders are logged in Paper Agent).
                     </td>
                   </tr>
                 ) : (
@@ -263,6 +274,7 @@ export default function Orders({ state, onExitPosition, onRefresh }) {
               <thead>
                 <tr>
                   <th>Trade #</th>
+                  <th>Strategy</th>
                   <th>Contract</th>
                   <th>Strike Price</th>
                   <th>Entry</th>
@@ -275,38 +287,62 @@ export default function Orders({ state, onExitPosition, onRefresh }) {
               <tbody>
                 {history.length === 0 ? (
                   <tr>
-                    <td colSpan={8} style={{ textAlign: 'center', padding: '2.5rem', color: 'var(--text-muted)' }}>
-                      No completed trades recorded for today's session.
+                    <td colSpan={9} style={{ textAlign: 'center', padding: '2.5rem', color: 'var(--text-muted)' }}>
+                      No completed live broker trades today. (Paper trading performance is tracked in Paper Agent).
                     </td>
                   </tr>
                 ) : (
                   history.map((h, i) => {
-                    const strike = h.strike_price || (() => {
-                      const m = h.symbol?.match(/(\d{4,6})\s*(CE|PE)/i);
-                      return m ? `${m[1]} ${m[2].toUpperCase()}` : '--';
+                    const strike = (() => {
+                      let s = h.strike_price || 0;
+                      if (h.symbol) {
+                        const m5 = h.symbol.match(/(\d{5})\s*(CE|PE)$/i);
+                        if (m5) s = parseFloat(m5[1]);
+                        else {
+                          const m4 = h.symbol.match(/(\d{4})\s*(CE|PE)$/i);
+                          if (m4) s = parseFloat(m4[1]);
+                        }
+                      }
+                      if (s > 100000) s = s % 100000;
+                      return s > 0 ? `₹${s.toLocaleString('en-IN')}` : '--';
                     })();
+                    const pnl = h.net_pnl !== undefined ? h.net_pnl : (h.pnl !== undefined ? h.pnl : (h.gross_pnl || 0));
+                    const strat = h.strategy_name || 'ILSME_Sniper';
                     return (
-                      <tr key={i}>
+                      <tr key={h.id || i}>
                         <td className="mono">#{i + 1}</td>
+                        <td>
+                          <span
+                            className="pill-badge"
+                            style={{
+                              background: strat.includes('Pullback') ? 'rgba(168, 85, 247, 0.15)' : (strat.includes('Momentum') ? 'rgba(234, 179, 8, 0.15)' : 'rgba(56, 189, 248, 0.15)'),
+                              color: strat.includes('Pullback') ? '#c084fc' : (strat.includes('Momentum') ? '#facc15' : '#38bdf8'),
+                              fontSize: '0.70rem',
+                              padding: '0.15rem 0.45rem',
+                            }}
+                          >
+                            {strat}
+                          </span>
+                        </td>
                         <td className="mono font-bold">{h.symbol}</td>
                         <td className="mono font-bold" style={{ color: 'var(--accent-blue)' }}>
                           {typeof strike === 'number' ? `₹${strike.toLocaleString('en-IN')}` : strike}
                         </td>
-                        <td className="mono">₹{h.entry_price}</td>
-                        <td className="mono">₹{h.exit_price}</td>
-                        <td className="mono">{h.lots}</td>
-                        <td className={`mono font-bold ${h.pnl >= 0 ? 'profit-text' : 'loss-text'}`}>
-                          {h.pnl >= 0 ? `+${formatINR(h.pnl)}` : formatINR(h.pnl)}
+                        <td className="mono">₹{Number(h.entry_price || 0).toFixed(2)}</td>
+                        <td className="mono">₹{Number(h.exit_price || 0).toFixed(2)}</td>
+                        <td className="mono">{h.lots || Math.ceil((h.quantity || 0) / (h.lot_size || 20))}</td>
+                        <td className={`mono font-bold ${pnl >= 0 ? 'profit-text' : 'loss-text'}`}>
+                          {pnl >= 0 ? `+${formatINR(pnl)}` : formatINR(pnl)}
                         </td>
                         <td>
                           <span
                             className="pill-badge"
                             style={{
-                              background: h.pnl >= 0 ? '#10b981' : '#f43f5e',
+                              background: pnl >= 0 ? '#10b981' : '#f43f5e',
                               color: '#fff',
                             }}
                           >
-                            {h.pnl >= 0 ? 'WIN' : 'LOSS'}
+                            {pnl >= 0 ? 'WIN' : 'LOSS'}
                           </span>
                         </td>
                       </tr>

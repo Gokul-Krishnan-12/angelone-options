@@ -3,6 +3,8 @@ import sys
 import yaml
 import asyncio
 import signal
+import time
+from datetime import datetime, time as dtime
 import uvicorn
 from typing import Dict, Any
 
@@ -113,13 +115,15 @@ class TradingOrchestrator:
             api_key=broker_cfg.get("api_key", ""),
             client_code=broker_cfg.get("client_code", ""),
             feed_token=self.feed_token,
-            is_simulated=is_sim
+            is_simulated=is_sim,
+            auth_manager=self.auth_manager
         )
 
         # Connect pipeline event listeners
         self.event_bus.subscribe(EventType.TICK, self.candle_aggregator.on_tick)
         self.event_bus.subscribe(EventType.TICK, self.strategy.on_tick)
         self.event_bus.subscribe(EventType.BAR, self.strategy.on_bar)
+        self.event_bus.subscribe(EventType.POSITION_UPDATE, self._on_position_update)
 
         # Inject context for Web UI
         ctx.event_bus = self.event_bus
@@ -133,17 +137,190 @@ class TradingOrchestrator:
         ctx.notifier = self.notifier
         ctx.telegram_bot = self.telegram_bot
 
+        # AI Stock Options Subsystem (Overnight Planner, Intraday Scanner, Live & Paper Agents)
+        from smartapi_trader.ai.ai_service import AIService
+        from smartapi_trader.stock_options.universe import StockUniverseManager
+        from smartapi_trader.stock_options.market_data_service import StockMarketDataService
+        from smartapi_trader.stock_options.storage import StockOptionsStorage
+        from smartapi_trader.stock_options.validator import StockOptionsValidator
+        from smartapi_trader.stock_options.planner import OvernightAIPlanner
+        from smartapi_trader.stock_options.scanner import IntradayAIScanner
+        from smartapi_trader.stock_options.live_agent import StockOptionsLiveAgent
+        from smartapi_trader.stock_options.paper_agent import StockOptionsPaperAgent
+        from smartapi_trader.stock_options.routes import so_ctx
+
+        self.stock_storage = StockOptionsStorage()
+        self.stock_universe = StockUniverseManager()
+        self.stock_market_data = StockMarketDataService(self.stock_universe, self.smart_api)
+        
+        # Resilient AI configuration resolution (settings.yaml -> SQLite persistent storage -> env)
+        ai_cfg = dict(self.settings.get("ai", {}))
+        if self.stock_storage:
+            if not ai_cfg.get("gemini_api_key"):
+                ai_cfg["gemini_api_key"] = self.stock_storage.get_setting("gemini_api_key", "")
+            if not ai_cfg.get("openai_api_key"):
+                ai_cfg["openai_api_key"] = self.stock_storage.get_setting("openai_api_key", "")
+            if not ai_cfg.get("provider"):
+                ai_cfg["provider"] = self.stock_storage.get_setting("ai_provider", "GEMINI")
+            if not ai_cfg.get("model"):
+                ai_cfg["model"] = self.stock_storage.get_setting("ai_model", "gemini-2.5-flash")
+        self.ai_service = AIService(ai_cfg)
+        self.stock_validator = StockOptionsValidator(self.stock_universe)
+        self.overnight_planner = OvernightAIPlanner(self.ai_service, self.stock_market_data, self.stock_storage, self.notifier)
+        self.intraday_scanner = IntradayAIScanner(self.ai_service, self.stock_market_data, self.stock_storage, default_interval_mins=5, notifier=self.notifier)
+        self.stock_live_agent = StockOptionsLiveAgent(
+            event_bus=self.event_bus,
+            risk_manager=self.risk_manager,
+            live_engine=self.live_engine,
+            storage=self.stock_storage,
+            validator=self.stock_validator,
+            notifier=self.notifier,
+            market_data=self.stock_market_data
+        )
+        self.stock_paper_agent = StockOptionsPaperAgent(
+            storage=self.stock_storage,
+            validator=self.stock_validator,
+            initial_capital=500000.0,
+            notifier=self.notifier,
+            market_data=self.stock_market_data,
+            event_bus=self.event_bus
+        )
+
+        so_ctx.ai_service = self.ai_service
+        so_ctx.market_data = self.stock_market_data
+        so_ctx.storage = self.stock_storage
+        so_ctx.planner = self.overnight_planner
+        so_ctx.scanner = self.intraday_scanner
+        so_ctx.live_agent = self.stock_live_agent
+        so_ctx.paper_agent = self.stock_paper_agent
+        so_ctx.universe_mgr = self.stock_universe
+        from smartapi_trader.stock_options.routes import bind_dispatch_callbacks
+        bind_dispatch_callbacks()
+
+
+    async def _on_position_update(self, event: Any):
+        """Dynamically registers WebSocket feed subscription for any opened options contract."""
+        if getattr(event, 'is_open', False) and getattr(event, 'token', None):
+            exch = getattr(event, 'exchange', '') or ("BFO" if "SENSEX" in getattr(event, 'symbol', '') else "NFO")
+            token_str = str(event.token)
+            symbol_str = str(event.symbol)
+            self.stream_client.subscribe(token=token_str, symbol=symbol_str, exchange=exch, mode=2)
+            logger.info(f"[ORCHESTRATOR] 🎯 Live tick subscription active for open position: {symbol_str} (Token: {token_str}, Exch: {exch})")
+
+    async def _market_health_watchdog_loop(self):
+        """
+        Actively monitors stream connectivity, agent status, and server health during market hours (09:15 - 15:15 IST).
+        Runs every 2 minutes to minimize CPU load and sends high-priority Telegram alerts if issues are detected.
+        """
+        last_alert_time = 0.0
+        last_panic_alert_time = 0.0
+        while True:
+            try:
+                await asyncio.sleep(120)  # Every 2 minutes
+                from smartapi_trader.utils.tz import now_ist, is_market_hours
+                from datetime import time as dt_time
+                now = now_ist()
+                
+                # Check target EOD cutoff (default 15:15 IST) so alerts do not fire post-EOD report
+                eod_time_str = self.settings.get("telegram", {}).get("eod_report_time", "15:15")
+                try:
+                    parts = eod_time_str.split(":")
+                    eod_cutoff = dt_time(int(parts[0]), int(parts[1]) if len(parts) > 1 else 15)
+                except Exception:
+                    eod_cutoff = dt_time(15, 15)
+
+                # Check if market is active (Mon-Fri 09:15 - EOD cutoff IST, excluding exchange holidays)
+                is_mkt_hours = is_market_hours(now) and (now.time() < eod_cutoff)
+                
+                if is_mkt_hours:
+                    issues = []
+                    
+                    # 1. Check WebSocket connection
+                    is_ws_conn = getattr(self.stream_client, "is_connected", False)
+                    last_tick = getattr(self.stream_client, "last_tick_time", 0.0)
+                    time_since_tick = time.time() - last_tick if last_tick > 0 else 9999
+                    
+                    if not self.stream_client.is_simulated:
+                        if not is_ws_conn:
+                            issues.append("🔴 SmartWebSocket is DISCONNECTED from Angel One feed.")
+                        elif time_since_tick > 120:
+                            issues.append(f"⚠️ Live market ticks stalled (No ticks received for {int(time_since_tick)}s).")
+                    
+                    # 2. Check Agent Status
+                    paper_st = getattr(self.state_mgr, "paper_agent_status", "PAUSED")
+                    real_st = getattr(self.state_mgr, "real_agent_status", "PAUSED")
+                    is_panic = getattr(self.state_mgr, "is_panic_active", False)
+                    
+                    # Anti-spam: Emergency panic is an intentional safety shutdown (e.g. daily drawdown circuit breaker).
+                    # It is already alerted once by the RiskManager. Only remind the operator at most once per 60 minutes.
+                    if is_panic:
+                        now_ts = time.time()
+                        if (now_ts - last_panic_alert_time) > 3600:
+                            issues.append("🚨 System is in EMERGENCY PANIC / HALT state!")
+                            last_panic_alert_time = now_ts
+                    elif self.mode == "LIVE" and real_st != "RUNNING":
+                        issues.append(f"⚠️ Mode is LIVE but Real Agent is {real_st} (not RUNNING).")
+                    elif self.mode == "PAPER" and paper_st != "RUNNING":
+                        issues.append(f"⚠️ Mode is PAPER but Paper Agent is {paper_st} (not RUNNING).")
+                    
+                    # If issues detected, alert via Telegram (throttled to once every 5 minutes)
+                    if issues and (time.time() - last_alert_time > 300):
+                        last_alert_time = time.time()
+                        alert_body = "\n".join([f"• {iss}" for iss in issues])
+                        alert_msg = (
+                            f"🚨 <b>MARKET HOURS HEALTH WARNING</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"⏰ <b>Time:</b> {now.strftime('%H:%M:%S')} IST\n"
+                            f"⚠️ <b>Detected Issues:</b>\n{alert_body}\n\n"
+                            f"<i>Use /status to diagnose, /resume to reset panic, or /start to resume execution.</i>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━"
+                        )
+                        if self.notifier:
+                            self.notifier.send_message_async(alert_msg)
+                            logger.warning(f"[WATCHDOG] Market hours alert dispatched to Telegram: {issues}")
+                            
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[WATCHDOG] Error in watchdog loop: {e}")
+                await asyncio.sleep(60)
+
     async def _eod_monitor_loop(self):
-        """Monitors clock and dispatches daily EOD report to Telegram at 15:15 IST."""
+        """Monitors clock and dispatches daily EOD report to Telegram at 15:15 IST on active trading days."""
         last_sent_date = None
         while True:
             try:
                 await asyncio.sleep(15)
-                from datetime import datetime
-                now = datetime.now()
+                from smartapi_trader.utils.tz import now_ist, is_trading_day
+                now = now_ist()
                 now_str = now.strftime("%Y-%m-%d")
+
+                # Continuously ensure daily rollover occurs cleanly across midnight
+                if hasattr(self, "state_mgr") and self.state_mgr:
+                    rolled = self.state_mgr.check_and_perform_daily_rollover()
+                    if rolled:
+                        if hasattr(self, "auth_manager") and self.auth_manager and not self.auth_manager.is_simulated:
+                            logger.info("[ORCHESTRATOR] 🌅 Daily rollover: Refreshing Angel One authentication session...")
+                            try:
+                                self.auth_manager.initialize_session()
+                                if hasattr(self, "stream_client") and self.stream_client:
+                                    self.stream_client.update_tokens(self.auth_manager.jwt_token, self.auth_manager.feed_token)
+                                if hasattr(self, "live_engine") and self.live_engine:
+                                    self.live_engine.update_jwt_token(self.auth_manager.jwt_token)
+                            except Exception as reauth_err:
+                                logger.error(f"[ORCHESTRATOR] Daily rollover reauth error: {reauth_err}")
+                        if hasattr(self, "strategy") and self.strategy:
+                            self.strategy.reset_daily_state()
+                            logger.info("[ORCHESTRATOR] 🌅 Strategy daily state successfully reset with fresh levels for new session.")
+                        if hasattr(self, "risk_manager") and self.risk_manager:
+                            self.risk_manager.reset_daily_limits()
+                            logger.info("[ORCHESTRATOR] 🌅 Risk manager daily limits successfully reset for new session.")
+
+                # Automated daily EOD reports only run on active trading days (Mon-Fri, non-holiday)
+                if not is_trading_day(now):
+                    continue
                 
-                # Check target EOD time (default 15:15)
+                # Check target EOD time (default 15:15 IST)
                 eod_time_str = self.settings.get("telegram", {}).get("eod_report_time", "15:15")
                 parts = eod_time_str.split(":")
                 target_hour = int(parts[0])
@@ -160,6 +337,7 @@ class TradingOrchestrator:
             except Exception as e:
                 logger.error(f"[EOD_MONITOR] Error in EOD loop: {e}")
                 await asyncio.sleep(30)
+
 
     async def initialize(self):
         """Pre-flight setup: indexes scrip master and subscribes to index spot contracts."""
@@ -180,32 +358,42 @@ class TradingOrchestrator:
         # Re-subscribe to any active open positions recovered from storage for SL/TP management
         for sym, pos in self.state_mgr.positions.items():
             if pos.is_open and pos.token:
-                self.stream_client.subscribe(token=str(pos.token), symbol=sym, exchange="NFO", mode=2)
-                logger.info(f"[ORCHESTRATOR] 🛡️ Subscribed to recovered position: {sym} (Token: {pos.token})")
+                pos_exch = pos.exchange or ("BFO" if "SENSEX" in sym else "NFO")
+                self.stream_client.subscribe(token=str(pos.token), symbol=sym, exchange=pos_exch, mode=2)
+                logger.info(f"[ORCHESTRATOR] 🛡️ Subscribed to recovered position: {sym} (Token: {pos.token}, Exch: {pos_exch})")
 
         # Sync live spot quotes and RMS margin balance from Angel One if authenticated
         if self.auth_manager and not self.auth_manager.is_simulated:
             try:
                 live_spots = self.auth_manager.fetch_spot_ltp()
                 for k, v in live_spots.items():
+                    # Preserve correctly resolved PDH/PDL from strategy / historical store
+                    strat_state = getattr(self, "strategy", None)
+                    strat_st = strat_state.state.get(k, {}) if strat_state else {}
+                    true_pdh = strat_st.get("pdh", 0.0) or self.state_mgr.spot_levels.get(k, {}).get("pdh", 0.0)
+                    true_pdl = strat_st.get("pdl", 0.0) or self.state_mgr.spot_levels.get(k, {}).get("pdl", 0.0)
+
+                    # Ensure PDH >= PDL integrity
+                    if true_pdh > 0 and true_pdl > 0 and true_pdh < true_pdl:
+                        true_pdh, true_pdl = true_pdl, true_pdh
+
                     self.state_mgr.update_spot_telemetry(
                         underlying=k,
                         spot=v["spot"],
                         vwap=v.get("vwap", v["spot"]),
-                        pdh=v.get("close", 0.0),
-                        pdl=v.get("low", 0.0),
+                        pdh=true_pdh,
+                        pdl=true_pdl,
                         high=v.get("high", 0.0),
                         low=v.get("low", 0.0)
                     )
-                    if hasattr(self, "strategy") and k in self.strategy.state:
-                        self.strategy.state[k]["last_spot"] = v["spot"]
-                        self.strategy.state[k]["vwap"] = v.get("vwap", v["spot"])
+                    if strat_state and k in strat_state.state:
+                        strat_state.state[k]["last_spot"] = v["spot"]
+                        strat_state.state[k]["vwap"] = v.get("vwap", v["spot"])
                         if v.get("high", 0) > 0:
-                            self.strategy.state[k]["session_high"] = v["high"]
+                            strat_state.state[k]["session_high"] = max(strat_state.state[k].get("session_high", 0.0), v["high"])
                         if v.get("low", 0) > 0:
-                            self.strategy.state[k]["session_low"] = v["low"]
-                        if v.get("close", 0) > 0:
-                            self.strategy.state[k]["pdh"] = v["close"]
+                            cur_low = strat_state.state[k].get("session_low", 0.0)
+                            strat_state.state[k]["session_low"] = min(cur_low, v["low"]) if cur_low > 0 else v["low"]
             except Exception as e:
                 logger.error(f"[ORCHESTRATOR] Error querying spot LTP: {e}")
 
@@ -219,22 +407,47 @@ class TradingOrchestrator:
                 logger.error(f"[ORCHESTRATOR] Error fetching initial RMS balance: {e}")
 
         # Start WebSocket or synthetic stream
+        self.loop = asyncio.get_running_loop()
         await self.stream_client.start()
 
-        # Start 2-way Telegram Bot & Automated EOD Report Scheduler
+        # Start 2-way Telegram Bot, Automated EOD Report Scheduler, and Market Health Watchdog
         if self.settings.get("telegram", {}).get("enabled", True):
             if self.settings.get("telegram", {}).get("enable_bot_commands", True):
                 self.telegram_bot.start()
             self._eod_task = asyncio.create_task(self._eod_monitor_loop())
-            logger.info("[ORCHESTRATOR] Telegram 2-way bot & EOD scheduler active.")
+            self._watchdog_task = asyncio.create_task(self._market_health_watchdog_loop())
+        # Start Stock Options Autonomous Monitor and Scanner
+        self.stock_paper_agent.start()
+        auto_start_scanner = self.settings.get("stock_options", {}).get("auto_start_scanner", True)
+        persisted_scanner = self.stock_storage.get_setting("scanner_is_active", None)
+        # Auto-start if enabled in settings or previously armed
+        should_start = auto_start_scanner if persisted_scanner is None else (auto_start_scanner or persisted_scanner)
+        if should_start:
+            try:
+                await self.intraday_scanner.start()
+                logger.info("[ORCHESTRATOR] 🎯 Resumed autonomous intraday stock options scanner on boot.")
+            except Exception as e:
+                logger.warning(f"[ORCHESTRATOR] Could not auto-resume scanner: {e}")
 
         logger.info(f"[ORCHESTRATOR] System ready! Active Execution Mode: {self.mode}")
 
     async def shutdown(self):
         """Gracefully halts all components and flushes event buffers."""
         logger.warning("[ORCHESTRATOR] Initiating graceful shutdown...")
+        if hasattr(self, "stock_paper_agent") and self.stock_paper_agent:
+            self.stock_paper_agent.stop()
+        if hasattr(self, "intraday_scanner") and self.intraday_scanner:
+            try:
+                # Gracefully cancel runtime loop without resetting persisted user configuration
+                if self.intraday_scanner._task and not self.intraday_scanner._task.done():
+                    self.intraday_scanner._task.cancel()
+                self.intraday_scanner.is_active = False
+            except Exception:
+                pass
         if self._eod_task:
             self._eod_task.cancel()
+        if hasattr(self, "_watchdog_task") and self._watchdog_task:
+            self._watchdog_task.cancel()
         if hasattr(self, "telegram_bot") and self.telegram_bot:
             self.telegram_bot.stop()
         await self.stream_client.stop()

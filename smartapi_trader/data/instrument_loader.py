@@ -43,7 +43,7 @@ class InstrumentLoader:
             self.conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
 
     def is_cache_valid_for_today(self) -> bool:
-        """Checks if today's master scrip file has already been indexed."""
+        """Checks if today's master scrip file has already been indexed with index and stock options."""
         today_str = datetime.now().strftime("%Y-%m-%d")
         cursor = self.conn.cursor()
         cursor.execute("SELECT value FROM meta WHERE key = 'last_download_date'")
@@ -51,8 +51,10 @@ class InstrumentLoader:
         if row and row["value"] == today_str:
             cursor.execute("SELECT COUNT(*) as count FROM instruments")
             cnt = cursor.fetchone()["count"]
-            if cnt > 100:
-                logger.info(f"[INSTRUMENTS] Local cache is valid for today ({today_str}) with {cnt} instruments indexed.")
+            cursor.execute("SELECT COUNT(*) as count FROM instruments WHERE instrumenttype = 'OPTSTK'")
+            optstk_cnt = cursor.fetchone()["count"]
+            if cnt > 100 and optstk_cnt > 100:
+                logger.info(f"[INSTRUMENTS] Local cache is valid for today ({today_str}) with {cnt} instruments indexed (including {optstk_cnt} real stock options).")
                 return True
         return False
 
@@ -90,7 +92,7 @@ class InstrumentLoader:
                     logger.warning("[INSTRUMENTS] Received empty or invalid master payload.")
                     continue
 
-                logger.info(f"[INSTRUMENTS] Download complete ({len(raw_data)} total instruments). Filtering and indexing index derivatives...")
+                logger.info(f"[INSTRUMENTS] Download complete ({len(raw_data)} total instruments). Filtering and indexing index and stock derivatives...")
                 self._index_records(raw_data)
                 return True
 
@@ -101,8 +103,10 @@ class InstrumentLoader:
         return False
 
     def _index_records(self, records: List[Dict[str, Any]]):
-        """Filters and inserts index spot and derivative records into SQLite."""
-        target_names = {"NIFTY", "BANKNIFTY", "SENSEX"}
+        """Filters and inserts index spot, index options, and stock options into SQLite."""
+        from smartapi_trader.stock_options.universe import NSE_FO_STOCKS
+        target_indices = {"NIFTY", "BANKNIFTY", "SENSEX", "MIDCPNIFTY"}
+        fo_stock_symbols = set(NSE_FO_STOCKS.keys())
         target_segments = {"NSE", "BSE", "NFO", "BFO"}
         today_str = datetime.now().strftime("%Y-%m-%d")
 
@@ -112,12 +116,14 @@ class InstrumentLoader:
             seg = (r.get("exch_seg") or "").upper()
             inst_type = (r.get("instrumenttype") or "").upper()
             
-            # Keep target indices or options/futures on target indices
-            if name in target_names and seg in target_segments:
+            is_index = name in target_indices and seg in target_segments
+            is_stock_fo = name in fo_stock_symbols and seg == "NFO" and inst_type in ("OPTSTK", "FUTSTK")
+
+            if is_index or is_stock_fo:
                 try:
                     strike = float(r.get("strike", 0.0) or 0.0)
-                    # Strike in Angel One file is often multiplied by 100 for NFO
-                    if strike > 500000:
+                    # Strike in Angel One file is multiplied by 100 for NFO/BFO derivatives
+                    if seg in ("NFO", "BFO") and strike > 0:
                         strike = strike / 100.0
                     
                     lotsize = int(r.get("lotsize", 1) or 1)
@@ -138,7 +144,7 @@ class InstrumentLoader:
                 except Exception:
                     continue
 
-        logger.info(f"[INSTRUMENTS] Indexing {len(filtered)} filtered index derivatives into SQLite...")
+        logger.info(f"[INSTRUMENTS] Indexing {len(filtered)} filtered index and stock derivatives into SQLite...")
         with self.conn:
             self.conn.execute("DELETE FROM instruments")
             self.conn.executemany("""
@@ -147,6 +153,7 @@ class InstrumentLoader:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, filtered)
             self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('last_download_date', ?)", (today_str,))
+        logger.info(f"[INSTRUMENTS] Successfully indexed {len(filtered)} derivatives.")
         
         logger.info(f"[INSTRUMENTS] Successfully indexed {len(filtered)} contracts.")
 
@@ -157,8 +164,10 @@ class InstrumentLoader:
         """
         today = datetime.now()
         # SEBI standardized: Nifty weekly on Tuesday (weekday 1), Sensex weekly on Thursday (weekday 3)
-        nifty_expiry = (today + timedelta(days=(1 - today.weekday() + 7) % 7 or 7)).strftime("%d%b%Y").upper()
-        sensex_expiry = (today + timedelta(days=(3 - today.weekday() + 7) % 7 or 7)).strftime("%d%b%Y").upper()
+        nifty_days = (1 - today.weekday()) % 7
+        sensex_days = (3 - today.weekday()) % 7
+        nifty_expiry = (today + timedelta(days=nifty_days)).strftime("%d%b%Y").upper()
+        sensex_expiry = (today + timedelta(days=sensex_days)).strftime("%d%b%Y").upper()
         # Monthly Bank Nifty expiry on last Tuesday
         banknifty_monthly = (today + timedelta(days=(1 - today.weekday() + 28) % 7 + 21)).strftime("%d%b%Y").upper()
         today_str = today.strftime("%Y-%m-%d")
@@ -218,22 +227,38 @@ class InstrumentLoader:
         cursor.execute("""
             SELECT DISTINCT expiry FROM instruments 
             WHERE name = ? AND exch_seg = ? AND instrumenttype = 'OPTIDX' AND expiry != ''
-            ORDER BY expiry ASC
         """, (underlying, exch_seg))
         
-        expiries = [row["expiry"] for row in cursor.fetchall()]
-        if not expiries:
+        raw_expiries = [row["expiry"] for row in cursor.fetchall()]
+        if not raw_expiries:
             # Try without exch_seg restriction
             cursor.execute("""
                 SELECT DISTINCT expiry FROM instruments 
                 WHERE name = ? AND expiry != ''
-                ORDER BY expiry ASC
             """, (underlying,))
-            expiries = [row["expiry"] for row in cursor.fetchall()]
+            raw_expiries = [row["expiry"] for row in cursor.fetchall()]
 
-        if not expiries:
+        if not raw_expiries:
             logger.error(f"[INSTRUMENTS] No active expiries found for {underlying}")
             return None
+
+        # Parse expiry dates and sort chronologically, ignoring past dates
+        today_date = datetime.now().date()
+        valid_expiries = []
+        for exp in raw_expiries:
+            try:
+                exp_dt = datetime.strptime(exp.strip(), "%d%b%Y").date()
+                if exp_dt >= today_date:
+                    valid_expiries.append((exp_dt, exp.strip()))
+            except Exception:
+                continue
+
+        if not valid_expiries:
+            # Fallback in case date formatting fails or testing with older dates
+            valid_expiries = [(datetime.min.date(), exp.strip()) for exp in raw_expiries]
+
+        valid_expiries.sort(key=lambda x: x[0])
+        expiries = [exp_str for _, exp_str in valid_expiries]
 
         target_expiry = expiries[min(expiry_index, len(expiries) - 1)]
 
@@ -271,4 +296,57 @@ class InstrumentLoader:
             }
         
         logger.warning(f"[INSTRUMENTS] Could not resolve ATM option for {underlying} @ {spot_price}")
+        return None
+
+    def get_otm_option(
+        self,
+        underlying: str,
+        spot_price: float,
+        option_type: str,
+        strikes_otm: int = 1,
+        expiry_index: int = 0
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Resolves the Out-Of-The-Money (OTM) hedge option strike for Debit Spreads.
+        - For CE (Bull Call): Higher strike than ATM (strike > atm_strike)
+        - For PE (Bear Put): Lower strike than ATM (strike < atm_strike)
+        """
+        atm = self.get_atm_option(underlying, spot_price, option_type, expiry_index)
+        if not atm:
+            return None
+
+        atm_strike = float(atm["strike"])
+        target_expiry = str(atm["expiry"])
+        cursor = self.conn.cursor()
+
+        if option_type == "CE":
+            cursor.execute("""
+                SELECT * FROM instruments
+                WHERE name = ? AND expiry = ? AND symbol LIKE '%CE' AND strike > ?
+                ORDER BY strike ASC
+                LIMIT ?
+            """, (underlying, target_expiry, atm_strike, max(1, strikes_otm)))
+        else:
+            cursor.execute("""
+                SELECT * FROM instruments
+                WHERE name = ? AND expiry = ? AND symbol LIKE '%PE' AND strike < ?
+                ORDER BY strike DESC
+                LIMIT ?
+            """, (underlying, target_expiry, atm_strike, max(1, strikes_otm)))
+
+        rows = cursor.fetchall()
+        if rows:
+            best_otm = rows[-1]  # Take the Nth strike OTM
+            return {
+                "symboltoken": str(best_otm["token"]),
+                "tradingsymbol": str(best_otm["symbol"]),
+                "name": str(best_otm["name"]),
+                "strike": float(best_otm["strike"]),
+                "expiry": str(best_otm["expiry"]),
+                "lotsize": int(best_otm["lotsize"]),
+                "exchange": str(best_otm["exch_seg"]),
+                "tick_size": float(best_otm["tick_size"]),
+            }
+
+        logger.warning(f"[INSTRUMENTS] Could not resolve {strikes_otm}-strike OTM {option_type} option for {underlying} @ {spot_price}")
         return None

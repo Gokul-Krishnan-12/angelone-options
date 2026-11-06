@@ -65,7 +65,14 @@ class TradeStorage:
                 ("exchange", "TEXT DEFAULT 'NFO'"),
                 ("sl_order_id", "TEXT DEFAULT ''"),
                 ("sl_trigger_price", "REAL DEFAULT 0.0"),
-                ("sl_limit_price", "REAL DEFAULT 0.0")
+                ("sl_limit_price", "REAL DEFAULT 0.0"),
+                ("strategy_name", "TEXT DEFAULT 'ILSME_Sniper'"),
+                ("execution_strategy", "TEXT DEFAULT 'NAKED'"),
+                ("hedge_tradingsymbol", "TEXT DEFAULT ''"),
+                ("hedge_symboltoken", "TEXT DEFAULT ''"),
+                ("net_debit", "REAL DEFAULT 0.0"),
+                ("spread_width", "REAL DEFAULT 0.0"),
+                ("entry_time", "TEXT DEFAULT ''")
             ]:
                 try:
                     conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {col_def};")
@@ -91,15 +98,25 @@ class TradeStorage:
                     average_price REAL,
                     rejection_reason TEXT,
                     is_paper INTEGER DEFAULT 0,
+                    strategy_name TEXT DEFAULT 'ILSME_Sniper',
                     created_at TEXT,
                     updated_at TEXT
                 );
             """)
+            for col, col_def in [
+                ("strategy_name", "TEXT DEFAULT 'ILSME_Sniper'"),
+                ("execution_strategy", "TEXT DEFAULT 'NAKED'")
+            ]:
+                try:
+                    conn.execute(f"ALTER TABLE orders ADD COLUMN {col} {col_def};")
+                except sqlite3.OperationalError:
+                    pass
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS trades (
                     id TEXT PRIMARY KEY,
                     timestamp TEXT,
+                    entry_time TEXT,
                     date TEXT,
                     symbol TEXT,
                     strike_price REAL,
@@ -112,9 +129,19 @@ class TradeStorage:
                     total_charges REAL,
                     net_pnl REAL,
                     is_paper INTEGER DEFAULT 0,
-                    exit_reason TEXT
+                    exit_reason TEXT,
+                    strategy_name TEXT DEFAULT 'ILSME_Sniper'
                 );
             """)
+            for col, col_def in [
+                ("strategy_name", "TEXT DEFAULT 'ILSME_Sniper'"),
+                ("execution_strategy", "TEXT DEFAULT 'NAKED'"),
+                ("entry_time", "TEXT")
+            ]:
+                try:
+                    conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_def};")
+                except sqlite3.OperationalError:
+                    pass
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS daily_ledger (
@@ -157,8 +184,10 @@ class TradeStorage:
                         quantity, lot_size, lots, entry_price, current_ltp,
                         unrealized_pnl, unrealized_pnl_pct, realized_pnl,
                         stop_loss, target_1, exchange, sl_order_id, sl_trigger_price, sl_limit_price,
-                        be_moved, partial_taken, is_open, is_paper, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        be_moved, partial_taken, is_open, is_paper, created_at, updated_at,
+                        execution_strategy, hedge_tradingsymbol, hedge_symboltoken, net_debit, spread_width,
+                        entry_time
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(symbol) DO UPDATE SET
                         token=excluded.token,
                         quantity=excluded.quantity,
@@ -176,7 +205,13 @@ class TradeStorage:
                         be_moved=excluded.be_moved,
                         partial_taken=excluded.partial_taken,
                         is_open=excluded.is_open,
-                        updated_at=excluded.updated_at;
+                        updated_at=excluded.updated_at,
+                        execution_strategy=excluded.execution_strategy,
+                        hedge_tradingsymbol=excluded.hedge_tradingsymbol,
+                        hedge_symboltoken=excluded.hedge_symboltoken,
+                        net_debit=excluded.net_debit,
+                        spread_width=excluded.spread_width,
+                        entry_time=COALESCE(NULLIF(positions.entry_time, ''), excluded.entry_time);
                 """, (
                     pos.symbol, pos.token, pos.underlying, pos.option_type, pos.strike_price,
                     pos.quantity, pos.lot_size, pos.lots, pos.entry_price, pos.current_ltp,
@@ -186,7 +221,13 @@ class TradeStorage:
                     getattr(pos, "sl_limit_price", 0.0),
                     1 if pos.be_moved else 0,
                     1 if pos.partial_taken else 0, 1 if pos.is_open else 0,
-                    1 if is_paper else 0, now_str, now_str
+                    1 if is_paper else 0, now_str, now_str,
+                    getattr(pos, "execution_strategy", "NAKED"),
+                    getattr(pos, "hedge_tradingsymbol", ""),
+                    getattr(pos, "hedge_symboltoken", ""),
+                    float(getattr(pos, "net_debit", 0.0) or 0.0),
+                    float(getattr(pos, "spread_width", 0.0) or 0.0),
+                    getattr(pos, "entry_time", "") or now_str
                 ))
                 conn.commit()
         except Exception as e:
@@ -221,7 +262,13 @@ class TradeStorage:
                         sl_limit_price=float(r["sl_limit_price"] or 0.0) if "sl_limit_price" in r.keys() else 0.0,
                         be_moved=bool(r["be_moved"]),
                         partial_taken=bool(r["partial_taken"]),
-                        is_open=True
+                        is_open=True,
+                        execution_strategy=r["execution_strategy"] if "execution_strategy" in r.keys() else "NAKED",
+                        hedge_tradingsymbol=r["hedge_tradingsymbol"] if "hedge_tradingsymbol" in r.keys() else "",
+                        hedge_symboltoken=r["hedge_symboltoken"] if "hedge_symboltoken" in r.keys() else "",
+                        net_debit=float(r["net_debit"] or 0.0) if "net_debit" in r.keys() else 0.0,
+                        spread_width=float(r["spread_width"] or 0.0) if "spread_width" in r.keys() else 0.0,
+                        entry_time=r["entry_time"] if ("entry_time" in r.keys() and r["entry_time"]) else (r["created_at"] if "created_at" in r.keys() else "")
                     )
                     positions.append(pos)
         except Exception as e:
@@ -313,6 +360,7 @@ class TradeStorage:
     def save_trade(self, trade: Dict[str, Any]):
         """Persists completed trade into trades table."""
         ts = trade.get("timestamp") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        entry_time_val = trade.get("entry_time") or ts
         date_str = ts.split(" ")[0] if " " in ts else datetime.now().strftime("%Y-%m-%d")
         try:
             with self._get_connection() as conn:
@@ -320,13 +368,17 @@ class TradeStorage:
                     INSERT INTO trades (
                         id, timestamp, date, symbol, strike_price, option_type,
                         quantity, entry_price, exit_price, gross_pnl, brokerage,
-                        total_charges, net_pnl, is_paper, exit_reason
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        total_charges, net_pnl, is_paper, exit_reason, strategy_name,
+                        execution_strategy, entry_time
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         exit_price=excluded.exit_price,
                         gross_pnl=excluded.gross_pnl,
                         net_pnl=excluded.net_pnl,
-                        exit_reason=excluded.exit_reason;
+                        exit_reason=excluded.exit_reason,
+                        strategy_name=excluded.strategy_name,
+                        execution_strategy=excluded.execution_strategy,
+                        entry_time=excluded.entry_time;
                 """, (
                     trade.get("id"),
                     ts,
@@ -342,7 +394,10 @@ class TradeStorage:
                     float(trade.get("total_charges") or 65.0),
                     float(trade.get("net_pnl") or 0.0),
                     1 if trade.get("is_paper") else 0,
-                    trade.get("exit_reason", "")
+                    trade.get("exit_reason", ""),
+                    trade.get("strategy_name") or "ILSME_Sniper",
+                    trade.get("execution_strategy") or ("DEBIT_SPREAD" if "[SPREAD]" in trade.get("symbol", "") else "NAKED"),
+                    entry_time_val
                 ))
                 conn.commit()
                 logger.info(f"[STORAGE] Persisted trade {trade.get('id')} to SQLite.")

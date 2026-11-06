@@ -1,79 +1,270 @@
+# ==============================================================================
+# SmartAPI Index Options Sniper & AI Stock Options Trading Engine Configuration
+# ==============================================================================
+# Copy this file to settings.yaml and enter your actual credentials and preferences:
+#   cp smartapi_trader/config/settings.example.yaml smartapi_trader/config/settings.yaml
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. AI Intelligence Engine (Google Gemini / OpenAI)
+# ------------------------------------------------------------------------------
+ai:
+  # Provider: GEMINI (Recommended: high speed, free tier) or OPENAI
+  provider: GEMINI
+
+  # Default Model: gemini-2.5-flash or gpt-4o-mini
+  model: gemini-2.5-flash
+
+  # Google AI Studio API Key (from https://aistudio.google.com/)
+  gemini_api_key: "YOUR_GEMINI_API_KEY"
+
+  # OpenAI API Key (optional, from https://platform.openai.com/)
+  openai_api_key: "YOUR_OPENAI_API_KEY"
+
+  # Maximum timeout in seconds for AI screening and plan synthesis
+  timeout_seconds: 30
+
+# ------------------------------------------------------------------------------
+# 2. Broker Connectivity (Angel One SmartAPI)
+# ------------------------------------------------------------------------------
 broker:
+  # SmartAPI Application API Key (from https://smartapi.angelbroking.com/)
   api_key: "YOUR_SMARTAPI_API_KEY"
-  base_url: https://apiconnect.angelbroking.com
+
+  # Angel One Client ID (e.g. AACI163472)
   client_code: "YOUR_CLIENT_CODE"
+
+  # 4-Digit Login MPIN
+  pin: "YOUR_4_DIGIT_PIN"
+
+  # 2FA TOTP Base32 Secret Key (from Angel One Authenticator QR setup)
+  totp_secret: "YOUR_BASE32_TOTP_SECRET"
+
+  # Angel One API Gateway Endpoints
+  base_url: https://apiconnect.angelbroking.com
+  websocket_url: wss://smartapisocket.angelone.in/smart-stream
+
+  # Rate limiting and reconnection limits (SEBI/SmartAPI compliance)
+  rate_limit_orders_per_sec: 10
+  max_reconnect_attempts: 10
+  reconnect_delay_seconds: 5
+
+  # Dynamic session cache (auto-managed by the system, leave blank)
   feed_token: ''
   jwt_token: ''
-  max_reconnect_attempts: 10
-  pin: "YOUR_PIN"
-  rate_limit_orders_per_sec: 10
-  reconnect_delay_seconds: 5
   refresh_token: ''
-  totp_secret: "YOUR_BASE32_TOTP_SECRET"
-  websocket_url: wss://smartapisocket.angelone.in/smart-stream
+
+# ------------------------------------------------------------------------------
+# 3. Market Data & Instrument Storage
+# ------------------------------------------------------------------------------
 data:
+  # Local SQLite database caching instruments and scrip master
   db_path: data/instruments.db
-  premarket_download_time: 08:30
-  scrip_master_url: https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json
+
+  # Centralized SQLite trade history, ledger, and position storage
   storage_db_path: data/trading_storage.db
+
+  # Official Angel One Scrip Master JSON URL (daily instrument download)
+  scrip_master_url: https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json
+  premarket_download_time: 08:30
+
+# ------------------------------------------------------------------------------
+# 4. Execution Engine (Paper Simulation vs Live Broker)
+# ------------------------------------------------------------------------------
 execution:
+  # Execution Mode: "PAPER" (virtual simulation sandbox) or "LIVE" (real RMS orders)
   execution_mode: PAPER
-  max_slippage_pct: 2.0
-  paper_initial_capital: 50000.0
-  simulated_latency_ms: 200
-  slippage_factor: 0.2
+
+  # Initial simulated virtual capital in INR for paper trading
+  paper_initial_capital: 75000.0
+
+  # Microstructure & execution friction simulation parameters
+  slippage_factor: 0.2          # 0.20 × Bid-Ask Spread adverse fill penalty
+  simulated_latency_ms: 200     # 200ms exchange matching engine delay
+  max_slippage_pct: 2.0         # Abort entry if price slipped >2.0%
+
+# ------------------------------------------------------------------------------
+# 5. Quantitative Risk Management & Capital Protection
+# ------------------------------------------------------------------------------
 risk:
-  breakeven_mode: STRUCTURAL_SWING_BREAK
-  breakeven_trigger_r: 0.8
-  consecutive_loss_limit: 2
-  correlation_guard: true
-  dynamic_sl_buffer: true
-  expiry_0dte_block_until: '13:00'
-  ignore_time_filter_in_paper: true
-  initial_sl_percent: 0.1
-  mandatory_square_off: '15:12'
-  market_close_time: '15:30'
-  market_open_time: 09:15
-  max_daily_drawdown_pct: 0.03
-  max_sl_buffer_pct: 0.055
-  max_trades_per_day: 2
-  midday_chop_filter_end: '13:30'
-  midday_chop_filter_start: '11:15'
+  # Capital Floor: System locks if Angel One balance falls below this minimum
   min_capital_required: 50000.0
-  min_sl_buffer_pct: 0.035
-  partial_exit_qty_pct: 0.6
-  partial_exit_r: 1.8
-  risk_per_trade_pct: 0.015
-  stagnation_timeout_mins: 45
+
+  # Position Sizing: Risk fraction of account equity per trade (0.018 = 1.8%)
+  risk_per_trade_pct: 0.018
+
+  # Maximum lots allowed per trade
+  max_lots_per_trade: 2
+
+  # Maximum concurrent open positions across all engines
+  max_open_positions: 2
+
+  # Daily Risk Limits
+  max_trades_per_day: 2         # Max completed trades allowed per session
+  max_daily_drawdown_pct: 0.045 # 4.5% daily drawdown hard circuit breaker
+  consecutive_loss_limit: 2     # Halt for the day after 2 consecutive stop-outs
+  directional_loss_cooldown_minutes: 45.0 # Cooldown on same direction after loss
+
+  # Stop-Loss & Dynamic Buffers
+  initial_sl_percent: 0.12      # 12% initial hard stop on option premium
+  max_sl_percent: 0.12
+  dynamic_sl_buffer: true       # Use dynamic exchange limit buffers for STOPLOSS_LIMIT
+  min_sl_buffer_pct: 0.035      # 3.5% limit buffer below trigger
+  max_sl_buffer_pct: 0.055      # 5.5% limit buffer below trigger
+
+  # Breakeven & Multi-Stage Profit Harvesting
+  breakeven_mode: STRUCTURAL_SWING_BREAK # Moves SL to entry upon verified structural break
+  breakeven_trigger_r: 0.85     # Requires ≥+0.85R profit before moving SL to Breakeven
   structural_swing_break_confirmation: true
-  trail_remainder_swing: true
+  partial_exit_r: 2.5           # Target 1: Book partial profit at +2.0R to +2.5R
+  partial_exit_qty_pct: 0.5     # Close 50% of position at Target 1
+  target_2_r: 3.0               # Target 2: Final runner target at +3.0R
+  trail_remainder_swing: true   # Trail remaining runner along 3m pivot swings
+
+  # Structural Invalidation & Time Decay Stops
+  enable_structural_invalidation: true # Liquidate if underlying spot reverses past swing
+  invalidation_buffer_pct: 0.07 # 0.07% buffer past breakout level
+  invalidation_buffer_pts: 15.0
+  stagnation_timeout_mins: 20   # Liquidate position if stagnant for 20m to eliminate theta
+
+  # Session Schedule & Liquidity Windows
+  market_open_time: 09:15
+  market_close_time: "15:30"
+  last_entry_time: "14:30"      # No new entries permitted after 14:30 IST
+  mandatory_square_off: "15:12" # Auto-liquidate all intraday derivative positions
+  orb_cutoff_time: "09:55"      # Opening range breakout entry cutoff
+  midday_chop_filter_start: "11:30" # Block entries during lunch chop
+  midday_chop_filter_end: "12:30"
+  expiry_0dte_block_until: "13:00"  # Block same-day expiring contracts before 13:00 IST
+  correlation_guard: true       # Prevent duplicate simultaneous exposure on correlated indices
+  ignore_time_filter_in_paper: false
+
+# ------------------------------------------------------------------------------
+# 6. Strategy Engine (ILSME Sniper & Momentum ORB)
+# ------------------------------------------------------------------------------
 strategy:
+  name: ILSME_Sniper_MultiEngine
+
+  # Active index underlyings to monitor and trade
   active_indices:
   - NIFTY
-  - BANKNIFTY
   - SENSEX
-  fvg_min_points: 2.5
+
+  # Execution Modes: NAKED (naked option buying) or DEBIT_SPREAD (vertical debit spreads)
+  real_execution_strategy: NAKED
+  paper_execution_strategies:
+  - NAKED
+  - DEBIT_SPREAD
+
+  # Sub-strategy activation toggles
+  enable_ilsme_sweep: true       # Engine 1: 15m Liquidity Sweep at PDH/PDL
+  enable_trend_pullback: true    # Engine 2: 9/21 EMA Trend Pullbacks
+  enable_momentum_breakout: false # Engine 3: Opening Range Breakouts
+
+  # Technical Indicators & Lookback Filters
+  ema_fast_period: 9
+  ema_slow_period: 21
+  donchian_lookback_bars: 15
+  donchian_require_or_break: true
+  trade_cooldown_minutes: 15.0
+
+  # Bar timeframe settings
   macro_timeframe_minutes: 15
-  max_bid_ask_spread_pct: 1.5
   micro_timeframe_minutes: 3
-  min_open_interest: 50000
-  min_wick_ratio: 0.35
-  name: ILSME_Sniper
-  preferred_delta_max: 0.6
-  preferred_delta_min: 0.48
-  volume_expansion_multiplier: 1.8
+
+  # Rejection & Sweep Thresholds
+  min_wick_ratio: 0.25          # Minimum 25% rejection wick for valid 15m sweep
+  sweep_ttl_minutes: 15.0       # Sweep validity window in minutes
+  max_spike_candle_pct: 1.0     # Reject setup if candle was an abnormal single-tick spike
+
+  # Fair Value Gap (FVG) Thresholds
+  fvg_min_points: 2.0
+  fvg_bounce_confirmation_pts: 3.5
+  fvg_ttl_minutes: 15.0
+
+  # Volume & Momentum Confirmation
+  require_volume_expansion: true
+  volume_expansion_multiplier: 1.25 # Tick volume must be ≥1.25x 20-period SMA
   volume_sma_period: 20
+  min_open_interest: 50000
+  max_bid_ask_spread_pct: 1.5
+  max_consecutive_trend_bars: 4
+  require_candle_confirmation: true
+
+  # VWAP Clearance Thresholds
+  max_vwap_atr_multiplier: 3.0
+  max_vwap_distance_nifty: 65.0
+  max_vwap_distance_sensex: 180.0
+  max_vwap_distance_banknifty: 130.0
+
+  # Opening Range Breakout (ORB) Calibration
+  orb_timeframe_minutes: 15
+  orb_min_body_ratio: 0.5
+  orb_use_adaptive_atr_buffer: true
+  min_orb_range_nifty: 30.0
+  min_orb_range_sensex: 100.0
+  min_orb_range_banknifty: 120.0
+  min_orb_range_midcpnifty: 40.0
+  orb_min_penetration_nifty: 6.0
+  orb_min_penetration_sensex: 25.0
+  orb_min_penetration_banknifty: 20.0
+  orb_macro_clearance_nifty: 30.0
+  orb_macro_clearance_sensex: 100.0
+  orb_macro_clearance_banknifty: 80.0
+
+  # Contract Delta Filter (ATM or immediate ITM)
+  preferred_delta_min: 0.48
+  preferred_delta_max: 0.60
+
+  # Vertical Debit Spread Settings (if DEBIT_SPREAD is selected)
+  debit_spread_strikes_otm: 1
+  debit_spread_take_profit_pct: 0.50
+  debit_spread_stop_loss_pct: 0.40
+
+# ------------------------------------------------------------------------------
+# 7. Stock Options AI Subsystem (200+ NSE F&O Stocks)
+# ------------------------------------------------------------------------------
+stock_options:
+  # Auto-start the background periodic market scanner on startup
+  auto_start_scanner: true
+
+  # Scan frequency interval in minutes during market hours
+  scan_interval_mins: 5
+
+  # Maximum candidate setups to formulate and track per scan
+  max_candidates: 3
+
+  # Active scanning window
+  session_start: "09:00"
+  session_end: "15:00"
+
+# ------------------------------------------------------------------------------
+# 8. Telegram Bot Notifications & Remote Copilot
+# ------------------------------------------------------------------------------
 telegram:
+  # Enable Telegram notifications and mobile commands
+  enabled: true
+
+  # Telegram Bot Token (from @BotFather)
   bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
+
+  # Your personal Telegram numeric chat ID (from @userinfobot)
   chat_id: "YOUR_TELEGRAM_CHAT_ID"
+
+  # Enable interactive commands (/status, /panic, /balance, /report, etc.)
   enable_bot_commands: true
-  enabled: false
-  eod_report_time: '15:15'
-  notify_on_breakeven: true
-  notify_on_session_end: true
-  notify_on_tp1: true
+
+  # Notification preferences
   notify_on_trade_entry: true
   notify_on_trade_exit: true
+  notify_on_tp1: true
+  notify_on_breakeven: true
+  notify_on_session_end: true
+  eod_report_time: "15:15"
+
+# ------------------------------------------------------------------------------
+# 9. Web Dashboard & REST/WebSocket Server
+# ------------------------------------------------------------------------------
 web:
   host: 0.0.0.0
   port: 5000

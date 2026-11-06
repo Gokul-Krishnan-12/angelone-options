@@ -46,11 +46,11 @@ logger.add(
     level="INFO"
 )
 
-# 2. Daily Rotating Structured File Output
+# 2. Daily Rotating Structured File Output (Retain 30 days, compressed)
 logger.add(
     "logs/trader_{time:YYYY-MM-DD}.log",
     rotation="00:00",
-    retention="14 days",
+    retention="30 days",
     compression="zip",
     format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{line} - {message}",
     level="DEBUG",
@@ -64,4 +64,33 @@ logger.add(
     enqueue=True
 )
 
-__all__ = ["logger", "add_log_listener", "remove_log_listener"]
+def cleanup_old_logs(log_dir: str = "logs", days: int = 30):
+    """Automatically deletes log files and empty directories older than specified retention days."""
+    try:
+        if not os.path.exists(log_dir):
+            return
+        import time
+        now = time.time()
+        cutoff = now - (days * 86400)
+        for root, dirs, files in os.walk(log_dir, topdown=False):
+            for f in files:
+                fpath = os.path.join(root, f)
+                try:
+                    if os.path.getmtime(fpath) < cutoff:
+                        os.remove(fpath)
+                except Exception:
+                    pass
+            for d in dirs:
+                dpath = os.path.join(root, d)
+                try:
+                    if not os.listdir(dpath):
+                        os.rmdir(dpath)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+# Run automatic purge on initialization
+cleanup_old_logs("logs", 30)
+
+__all__ = ["logger", "add_log_listener", "remove_log_listener", "cleanup_old_logs"]

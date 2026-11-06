@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Play, Pause, Activity, Cpu, ShieldCheck, Zap, Sparkles, PlusCircle, CheckCircle2, Wallet, Trash2, RotateCcw, Target } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Play, Pause, Activity, Cpu, ShieldCheck, Zap, Sparkles, PlusCircle, CheckCircle2, Wallet, Trash2, RotateCcw, Target, Layers, Sliders } from 'lucide-react';
 import { formatINR } from '../components/MetricsHud';
 import PositionsTable from '../components/PositionsTable';
 import PnLCalendar from '../components/PnLCalendar';
@@ -23,18 +23,89 @@ export default function PaperTrade({
   const [isUpdating, setIsUpdating] = useState(false);
   const [successMsg, setSuccessMsg] = useState('');
 
-  const getStrikeDisplay = (tr) => {
-    if (tr.strike_price && tr.strike_price > 0) {
-      const opt = tr.option_type || (tr.symbol?.toUpperCase().includes('PE') ? 'PE' : 'CE');
-      return { strike: tr.strike_price, type: opt };
+  const [paperStrategies, setPaperStrategies] = useState(['NAKED', 'DEBIT_SPREAD']);
+  const [isUpdatingStrategies, setIsUpdatingStrategies] = useState(false);
+  const [strategyMsg, setStrategyMsg] = useState('');
+
+  useEffect(() => {
+    fetch('/api/settings')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.strategy && data.strategy.paper_execution_strategies) {
+          setPaperStrategies(data.strategy.paper_execution_strategies);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleUpdatePaperStrategies = async (newStrats) => {
+    if (!newStrats || newStrats.length === 0) return;
+    setIsUpdatingStrategies(true);
+    setStrategyMsg('');
+    try {
+      const res = await fetch('/api/strategy/paper_mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ strategies: newStrats })
+      });
+      if (res.ok) {
+        setPaperStrategies(newStrats);
+        const label = newStrats.length === 2 ? 'Both Naked & Debit Spread (Simultaneous)' : (newStrats[0] === 'DEBIT_SPREAD' ? 'Debit Spread Only' : 'Naked Buying Only');
+        setStrategyMsg(`Paper execution mode updated to: ${label}!`);
+        setTimeout(() => setStrategyMsg(''), 4000);
+      }
+    } catch (e) {
+      alert('Failed to update paper mode strategies: ' + e);
+    } finally {
+      setIsUpdatingStrategies(false);
     }
+  };
+
+  const togglePaperStrategy = (strat) => {
+    let next;
+    if (paperStrategies.includes(strat)) {
+      if (paperStrategies.length === 1) {
+        alert('You must have at least one execution strategy selected (Naked or Debit Spread).');
+        return;
+      }
+      next = paperStrategies.filter((s) => s !== strat);
+    } else {
+      next = [...paperStrategies, strat];
+    }
+    handleUpdatePaperStrategies(next);
+  };
+
+  const handleRunBothWays = () => {
+    handleUpdatePaperStrategies(['NAKED', 'DEBIT_SPREAD']);
+  };
+
+  const getStrikeDisplay = (tr) => {
+    let strike = tr.strike_price || 0;
+    let opt = tr.option_type || '';
+
     if (tr.symbol) {
-      const m = tr.symbol.match(/(\d{4,6})\s*(CE|PE)/i);
-      if (m) {
-        return { strike: parseFloat(m[1]), type: m[2].toUpperCase() };
+      const m5 = tr.symbol.match(/(\d{5})\s*(CE|PE)$/i);
+      if (m5) {
+        strike = parseFloat(m5[1]);
+        if (!opt) opt = m5[2].toUpperCase();
+      } else {
+        const m4 = tr.symbol.match(/(\d{4})\s*(CE|PE)$/i);
+        if (m4) {
+          strike = parseFloat(m4[1]);
+          if (!opt) opt = m4[2].toUpperCase();
+        }
       }
     }
-    return { strike: null, type: tr.option_type || '--' };
+
+    if (strike > 100000) {
+      strike = strike % 100000;
+    }
+
+    if (!opt && tr.symbol) {
+      opt = tr.symbol.toUpperCase().includes('PE') ? 'PE' : 'CE';
+    }
+
+    return { strike: strike > 0 ? strike : null, type: opt || '--' };
   };
 
   const handleResetTrades = async () => {
@@ -198,6 +269,82 @@ export default function PaperTrade({
         )}
       </div>
 
+      {/* Paper Strategy Mode Selector: Checkboxes + Run Both Ways */}
+      <div className="hud-card" style={{ borderLeft: '3px solid var(--accent-emerald)' }}>
+        <div className="card-header-line">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <Layers size={15} color="var(--accent-emerald)" />
+            <span>Paper Execution Mode (Compare Naked vs. Debit Spread)</span>
+          </div>
+          <span className="mono text-muted">
+            Running: <strong style={{ color: paperStrategies.length === 2 ? 'var(--accent-emerald)' : '#38bdf8' }}>
+              {paperStrategies.includes('NAKED') && paperStrategies.includes('DEBIT_SPREAD')
+                ? 'BOTH SIMULTANEOUSLY (SIDE-BY-SIDE COMPARISON)'
+                : paperStrategies.includes('DEBIT_SPREAD')
+                ? 'DEBIT SPREAD ONLY'
+                : 'NAKED BUYING ONLY'}
+            </strong>
+          </span>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '1rem', marginTop: '0.75rem' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem', flexWrap: 'wrap' }}>
+            {/* Checkbox 1: Naked Buying */}
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.82rem', color: '#fff' }}>
+              <input
+                type="checkbox"
+                checked={paperStrategies.includes('NAKED')}
+                onChange={() => togglePaperStrategy('NAKED')}
+                disabled={isUpdatingStrategies}
+                style={{ cursor: 'pointer', width: '16px', height: '16px', accentColor: 'var(--accent-orange)' }}
+              />
+              <span>Naked Options Buying (ATM)</span>
+            </label>
+
+            {/* Checkbox 2: Debit Spread */}
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', fontSize: '0.82rem', color: '#fff' }}>
+              <input
+                type="checkbox"
+                checked={paperStrategies.includes('DEBIT_SPREAD')}
+                onChange={() => togglePaperStrategy('DEBIT_SPREAD')}
+                disabled={isUpdatingStrategies}
+                style={{ cursor: 'pointer', width: '16px', height: '16px', accentColor: 'var(--accent-emerald)' }}
+              />
+              <span>Debit Spread (Buy ATM + Sell OTM)</span>
+            </label>
+
+            {/* Quick Button: Run Both Ways */}
+            <button
+              className="btn-secondary"
+              style={{
+                fontSize: '0.74rem',
+                padding: '0.3rem 0.75rem',
+                borderColor: paperStrategies.length === 2 ? 'var(--accent-emerald)' : 'var(--border-light)',
+                color: paperStrategies.length === 2 ? 'var(--accent-emerald)' : 'var(--text-muted)',
+                background: paperStrategies.length === 2 ? 'rgba(16, 185, 129, 0.12)' : 'transparent',
+                fontWeight: 600,
+                cursor: 'pointer'
+              }}
+              onClick={handleRunBothWays}
+              disabled={isUpdatingStrategies}
+            >
+              ⚡ Run Both Ways Simultaneously
+            </button>
+          </div>
+
+          <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', maxWidth: '420px', lineHeight: '1.4' }}>
+            When running both ways simultaneously, every signal places both a Naked trade and a Debit Spread trade in paper trading. Their P&L and win rate are logged separately so you can see which is more profitable.
+          </div>
+        </div>
+
+        {strategyMsg && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--accent-emerald)', fontSize: '0.75rem', marginTop: '0.5rem' }}>
+            <CheckCircle2 size={13} />
+            <span>{strategyMsg}</span>
+          </div>
+        )}
+      </div>
+
       {/* Metrics Row */}
       <div className="grid-metrics" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
         <div className="hud-card">
@@ -228,9 +375,9 @@ export default function PaperTrade({
 
         <div className="hud-card" style={{ borderLeft: '3px solid var(--accent-orange)' }}>
           <div className="card-header-line">
-            <span>Brokerage & Taxes</span>
+            <span>Brokerages</span>
             <span className="mono font-semibold" style={{ color: 'var(--accent-orange)' }}>
-              ANGEL ONE + TAX
+              TAX
             </span>
           </div>
           <div className="metric-big mono font-bold" style={{ color: 'var(--accent-orange)' }}>
@@ -341,10 +488,14 @@ export default function PaperTrade({
         </div>
       </div>
 
-      {/* Simulated Active Positions Table */}
+      {/* Simulated Active Positions Table (Strictly Isolated to Virtual Paper Trades) */}
       <PositionsTable
-        positions={state.positions || []}
+        positions={(state.paper_positions || state.positions || []).filter(
+          (pos) => pos.is_paper || pos.execution_mode === 'PAPER' || pos.execution_venue === 'PAPER'
+        )}
         onExitPosition={onExitPosition}
+        title="Active Simulated Paper Positions (Virtual Ledger)"
+        emptyText="No active paper positions. Engine scanning for Institutional Liquidity Sweep setup."
       />
 
       {/* Historical P&L Calendar & Per-Date Breakdown */}
@@ -392,7 +543,7 @@ export default function PaperTrade({
             <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', background: 'rgba(255,255,255,0.02)', padding: '0.6rem 0.75rem', borderRadius: '6px', margin: '0.5rem 0', border: '1px solid var(--border-light)', fontSize: '0.76rem' }}>
               <div>
                 <span className="text-muted">Total Trades: </span>
-                <span className="mono font-bold text-main">{(paperState.completed_trades || []).length} / 2 Quota</span>
+                <span className="mono font-bold text-main">{tradesTaken} / {maxTradesAllowed} Quota</span>
               </div>
               <div>
                 <span className="text-muted">Strikes Traded: </span>
@@ -415,7 +566,9 @@ export default function PaperTrade({
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>TIME</th>
+                    <th>ENTRY TIME</th>
+                    <th>EXIT TIME</th>
+                    <th>STRATEGY</th>
                     <th>CONTRACT</th>
                     <th>STRIKE PRICE</th>
                     <th>TYPE</th>
@@ -431,9 +584,24 @@ export default function PaperTrade({
                 <tbody>
                   {paperState.completed_trades.map((tr) => {
                     const strikeInfo = getStrikeDisplay(tr);
+                    const strat = tr.strategy_name || 'ILSME_Sniper';
                     return (
                       <tr key={tr.id}>
+                        <td className="mono text-muted" style={{ fontSize: '0.72rem' }}>{tr.entry_time || tr.timestamp}</td>
                         <td className="mono text-muted" style={{ fontSize: '0.72rem' }}>{tr.timestamp}</td>
+                        <td>
+                          <span
+                            className="pill-badge"
+                            style={{
+                              background: strat.includes('Pullback') ? 'rgba(168, 85, 247, 0.15)' : (strat.includes('Momentum') ? 'rgba(234, 179, 8, 0.15)' : 'rgba(56, 189, 248, 0.15)'),
+                              color: strat.includes('Pullback') ? '#c084fc' : (strat.includes('Momentum') ? '#facc15' : '#38bdf8'),
+                              fontSize: '0.70rem',
+                              padding: '0.15rem 0.45rem',
+                            }}
+                          >
+                            {strat}
+                          </span>
+                        </td>
                         <td className="mono font-semibold">{tr.symbol}</td>
                         <td className="mono font-bold" style={{ color: 'var(--accent-blue)' }}>
                           {strikeInfo.strike ? `₹${strikeInfo.strike.toLocaleString('en-IN')}` : '--'}

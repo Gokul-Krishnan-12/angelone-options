@@ -11,8 +11,15 @@ import {
   HelpCircle
 } from 'lucide-react';
 import { formatINR } from './MetricsHud';
+import { authFetch } from '../utils/api';
 
-export default function PnLCalendar({ liveTrades = [] }) {
+export default function PnLCalendar({
+  liveTrades = [],
+  apiEndpoint = '/api/paper/calendar',
+  title = 'Paper Trading P&L Calendar',
+  subtitle = 'Actual paper trades executed, daily net profit/loss, brokerage & statutory charges',
+  quotaText = ''
+}) {
   // Always initialize with actual real-world current date
   const now = new Date();
   const [viewDate, setViewDate] = useState(new Date(now.getFullYear(), now.getMonth(), 1));
@@ -39,7 +46,8 @@ export default function PnLCalendar({ liveTrades = [] }) {
     setLoading(true);
     setError('');
     try {
-      const res = await fetch(`/api/paper/calendar?month=${monthStr}`);
+      const sep = apiEndpoint.includes('?') ? '&' : '?';
+      const res = await authFetch(`${apiEndpoint}${sep}month=${monthStr}`);
       if (res.ok) {
         const json = await res.json();
         setCalendarData(json);
@@ -56,7 +64,7 @@ export default function PnLCalendar({ liveTrades = [] }) {
 
   useEffect(() => {
     fetchCalendar();
-  }, [monthStr, liveTrades.length]);
+  }, [monthStr, liveTrades.length, apiEndpoint]);
 
   const handlePrevMonth = () => {
     setViewDate(new Date(year, month - 1, 1));
@@ -160,17 +168,32 @@ export default function PnLCalendar({ liveTrades = [] }) {
   };
 
   const getStrikeBadge = (tr) => {
-    if (tr.strike_price && tr.strike_price > 0) {
-      const opt = tr.option_type || (tr.symbol?.toUpperCase().includes('PE') ? 'PE' : 'CE');
-      return { strike: tr.strike_price, type: opt };
-    }
-    if (tr.symbol) {
-      const m = tr.symbol.match(/(\d{4,6})\s*(CE|PE)/i);
-      if (m) {
-        return { strike: parseFloat(m[1]), type: m[2].toUpperCase() };
+    let strike = tr.strike_price || tr.strike || 0;
+    let opt = tr.option_type || '';
+
+    if (!strike && tr.symbol) {
+      const m5 = tr.symbol.match(/(\d{5})\s*(CE|PE)$/i);
+      if (m5) {
+        strike = parseFloat(m5[1]);
+        if (!opt) opt = m5[2].toUpperCase();
+      } else {
+        const m4 = tr.symbol.match(/(\d{4})\s*(CE|PE)$/i);
+        if (m4) {
+          strike = parseFloat(m4[1]);
+          if (!opt) opt = m4[2].toUpperCase();
+        }
       }
     }
-    return { strike: null, type: tr.option_type || '--' };
+
+    if (strike > 100000) {
+      strike = strike % 100000;
+    }
+
+    if (!opt && tr.symbol) {
+      opt = tr.symbol.toUpperCase().includes('PE') ? 'PE' : 'CE';
+    }
+
+    return { strike: strike > 0 ? strike : null, type: opt || '--' };
   };
 
   const isToday = (dateStr) => {
@@ -185,10 +208,10 @@ export default function PnLCalendar({ liveTrades = [] }) {
           <CalendarIcon size={18} color="var(--accent-emerald)" />
           <div>
             <h3 style={{ fontSize: '1rem', fontWeight: 700, color: '#fff', margin: 0 }}>
-              Paper Trading P&L Calendar
+              {title}
             </h3>
             <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
-              Actual paper trades executed, daily net profit/loss, brokerage & statutory charges
+              {subtitle}
             </span>
           </div>
         </div>
@@ -571,7 +594,7 @@ export default function PnLCalendar({ liveTrades = [] }) {
                 <div className="index-tile">
                   <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>Trades Executed</div>
                   <div className="mono font-bold" style={{ fontSize: '1.1rem', color: '#fff', margin: '0.2rem 0' }}>
-                    {selectedDayData.trade_count} / 2 Quota
+                    {quotaText ? `${selectedDayData.trade_count} / ${quotaText}` : `${selectedDayData.trade_count} Trades`}
                   </div>
                   <div style={{ fontSize: '0.66rem', color: 'var(--accent-emerald)' }}>
                     {selectedDayData.wins} Win · {selectedDayData.losses} Loss
@@ -585,6 +608,7 @@ export default function PnLCalendar({ liveTrades = [] }) {
                   <thead>
                     <tr>
                       <th>TRADE ID / TIME</th>
+                      <th>STRATEGY</th>
                       <th>CONTRACT</th>
                       <th>STRIKE</th>
                       <th>TYPE</th>
@@ -600,11 +624,27 @@ export default function PnLCalendar({ liveTrades = [] }) {
                   <tbody>
                     {selectedDayData.trades.map((tr) => {
                       const strikeInfo = getStrikeBadge(tr);
+                      const isStockOpt = tr.execution_strategy === 'STOCK_OPTIONS';
+                      const isSpread = tr.execution_strategy === 'DEBIT_SPREAD' || tr.symbol?.includes('[SPREAD]');
                       return (
-                        <tr key={tr.id}>
+                        <tr key={tr.id || tr.trade_id}>
                           <td>
-                            <div className="mono font-semibold" style={{ fontSize: '0.74rem', color: '#fff' }}>{tr.id}</div>
+                            <div className="mono font-semibold" style={{ fontSize: '0.74rem', color: '#fff' }}>{tr.id || tr.trade_id}</div>
                             <div className="mono text-muted" style={{ fontSize: '0.68rem' }}>{tr.timestamp}</div>
+                          </td>
+                          <td>
+                            <span
+                              className="pill-badge"
+                              style={{
+                                background: isStockOpt ? 'rgba(237, 76, 34, 0.15)' : (isSpread ? 'rgba(168, 85, 247, 0.15)' : 'rgba(56, 189, 248, 0.12)'),
+                                color: isStockOpt ? 'var(--accent-orange)' : (isSpread ? '#c084fc' : '#38bdf8'),
+                                fontSize: '0.68rem',
+                                fontWeight: 700,
+                                padding: '0.15rem 0.45rem',
+                              }}
+                            >
+                              {isStockOpt ? '⚡ STOCK F&O' : (isSpread ? '🛡️ SPREAD' : '● NAKED')}
+                            </span>
                           </td>
                           <td className="mono font-semibold">{tr.symbol}</td>
                           <td className="mono font-bold" style={{ color: 'var(--accent-blue)' }}>

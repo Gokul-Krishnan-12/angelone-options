@@ -7,6 +7,7 @@ from smartapi_trader.core.events import (
 from smartapi_trader.core.event_bus import EventBus
 from smartapi_trader.core.state_manager import StateManager
 from smartapi_trader.utils.logger import logger
+from smartapi_trader.utils.tz import ist_time
 
 class RiskManager:
     """
@@ -32,6 +33,7 @@ class RiskManager:
     ):
         self.bus = event_bus
         self.state_mgr = state_manager
+        self.raw_config = config
         self.cfg = config.get("risk", {})
         self.notifier = notifier
         self.live_engine = live_engine
@@ -41,10 +43,14 @@ class RiskManager:
         self.max_drawdown_pct = self.cfg.get("max_daily_drawdown_pct", 0.03) # 3.0%
         self.max_trades = self.cfg.get("max_trades_per_day", 2)
         self.consecutive_loss_limit = self.cfg.get("consecutive_loss_limit", 2)
-        self.be_trigger_r = self.cfg.get("breakeven_trigger_r", 1.0)
+        self.be_trigger_r = self.cfg.get("breakeven_trigger_r", 1.5)
         self.tp1_r = self.cfg.get("partial_exit_r", 2.0)
-        self.tp1_qty_pct = self.cfg.get("partial_exit_qty_pct", 0.60)
+        self.tp2_r = self.cfg.get("target_2_r", 3.0)                    # Target 2 (Full exit for runner at +3.0R)
+        self.tp1_qty_pct = self.cfg.get("partial_exit_qty_pct", 0.50)
         self.max_slippage_pct = config.get("execution", {}).get("max_slippage_pct", 2.0)
+        self.correlation_guard = bool(self.cfg.get("correlation_guard", True))
+        self.max_open_positions = int(self.cfg.get("max_open_positions", 1))
+        self._daily_drawdown_halted = False
 
         # Wire up listeners
         self.bus.subscribe(EventType.SIGNAL, self._on_signal)
@@ -72,12 +78,66 @@ class RiskManager:
             self._raise_alert("WARNING", "Panic/Halted", "Order rejected: System is in PANIC or HALT mode.")
             return
 
+        # 1b. Active Indices Filter Guard (applies to index options only)
+        index_names = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"}
+        active_indices = self.raw_config.get("strategy", {}).get("active_indices", ["NIFTY", "BANKNIFTY", "SENSEX"])
+        underlying = getattr(signal, "underlying", "").upper()
+        if underlying in index_names and underlying not in [idx.upper() for idx in active_indices]:
+            self._raise_alert("WARNING", "DisabledIndex", f"Order rejected: {underlying} is disabled in active_indices settings.")
+            return
+
         # 2. Daily Trade Budget Check
         is_paper = (self.state_mgr.execution_mode == "PAPER") or getattr(signal, "is_paper", False)
         trades_count = self.state_mgr.paper_trades_taken if is_paper else self.state_mgr.trades_taken_today
-        if trades_count >= self.max_trades:
-            self._raise_alert("WARNING", "MaxTradesLimit", f"Daily trade quota reached ({trades_count}/{self.max_trades}).")
+        is_stock_option = getattr(signal, "strategy_name", "").startswith("StockOpt_") or (underlying not in index_names)
+        max_quota = self.max_trades * 2 if is_stock_option else self.max_trades
+        if trades_count >= max_quota:
+            self._raise_alert("WARNING", "MaxTradesLimit", f"Daily trade quota reached ({trades_count}/{max_quota}).")
             return
+
+        # 2b. Concurrent Positions & Correlation Guard Check
+        open_positions = [p for p in self.state_mgr.positions.values() if p.is_open]
+        open_index_positions = [p for p in open_positions if getattr(p, "underlying", "").upper() in index_names]
+        open_stock_positions = [p for p in open_positions if getattr(p, "underlying", "").upper() not in index_names]
+
+        if not is_stock_option and len(open_index_positions) >= 1:
+            self._raise_alert(
+                "WARNING",
+                "MaxPositionsLimit",
+                f"Order rejected: Maximum concurrent index positions reached ({len(open_index_positions)}/1)."
+            )
+            return
+
+        if is_stock_option and len(open_stock_positions) >= 1:
+            self._raise_alert(
+                "WARNING",
+                "MaxPositionsLimit",
+                f"Order rejected: Maximum concurrent stock options positions reached ({len(open_stock_positions)}/1)."
+            )
+            return
+
+        if len(open_positions) >= max(2, self.max_open_positions):
+            self._raise_alert(
+                "WARNING",
+                "MaxPositionsLimit",
+                f"Order rejected: Maximum concurrent open positions limit reached ({len(open_positions)}/{max(2, self.max_open_positions)})."
+            )
+            return
+
+        if self.correlation_guard and open_positions:
+            sig_underlying = getattr(signal, "underlying", "").upper()
+            sig_opt_type = getattr(signal, "option_type", "").upper()
+
+            for p in open_positions:
+                p_underlying = getattr(p, "underlying", "").upper()
+                p_opt_type = getattr(p, "option_type", "").upper()
+                if (sig_underlying in index_names and p_underlying in index_names) and (sig_opt_type == p_opt_type or self.max_open_positions <= 1):
+                    self._raise_alert(
+                        "WARNING",
+                        "CorrelationGuard",
+                        f"Order rejected: Correlated index position already open ({p.symbol} in {p_underlying} with {p_opt_type})."
+                    )
+                    return
 
         # 3. Consecutive Loss Circuit Breaker
         if self.state_mgr.consecutive_losses >= self.consecutive_loss_limit:
@@ -87,25 +147,40 @@ class RiskManager:
         # 4. Daily Drawdown Circuit Breaker (3.0%)
         current_drawdown = self.state_mgr.daily_drawdown_pct / 100.0
         if current_drawdown >= self.max_drawdown_pct:
+            self._daily_drawdown_halted = True
             self._raise_alert("CRITICAL", "MaxDrawdownBreach", f"Drawdown ({current_drawdown:.1%}) exceeds 3.0% hard threshold! System halted.")
             self.state_mgr.trigger_panic()
             return
 
-        # 5. Time Constraints
-        is_paper = (self.state_mgr.execution_mode == "PAPER")
-        ignore_time = self.cfg.get("ignore_time_filter_in_paper", False) and is_paper
+        # 5. Time Constraints (Strict 15:00 Entry Cut-off & Midday Chop)
+        now_time = ist_time()
+        # Dynamic Midday chop filter
+        start_str = str(self.cfg.get("midday_chop_filter_start", "11:45"))
+        end_str = str(self.cfg.get("midday_chop_filter_end", "12:00"))
+        try:
+            sh, sm = map(int, start_str.split(":"))
+            eh, em = map(int, end_str.split(":"))
+            chop_start = time(sh, sm)
+            chop_end = time(eh, em)
+        except Exception:
+            chop_start = time(11, 45)
+            chop_end = time(12, 0)
 
-        if not ignore_time:
-            now_time = datetime.now().time()
-            # Midday chop filter
-            if time(11, 15) <= now_time <= time(13, 30):
-                self._raise_alert("WARNING", "MiddayChopFilter", "Order rejected: Midday consolidation window (11:15-13:30 IST).")
-                return
+        if not is_stock_option and chop_start <= now_time <= chop_end:
+            self._raise_alert("WARNING", "MiddayChopFilter", f"Order rejected: Midday consolidation window ({start_str}-{end_str} IST).")
+            return
 
-            # EOD cut-off
-            if now_time >= time(15, 12):
-                self._raise_alert("WARNING", "EODCutoff", "Order rejected: Past mandatory square-off time (15:12 IST).")
-                return
+        # Strict entry cut-off (configurable, default 14:30 IST) - No new positions entered late in the session
+        last_entry_str = str(self.cfg.get("last_entry_time", "14:30"))
+        try:
+            lh, lm = map(int, last_entry_str.split(":"))
+            entry_cutoff = time(lh, lm)
+        except Exception:
+            entry_cutoff = time(14, 30)
+
+        if now_time >= entry_cutoff:
+            self._raise_alert("WARNING", "EODCutoff", f"Order rejected: Past entry cut-off time ({last_entry_str} IST). Restricting late-day entry due to close and whipsaw risk.")
+            return
 
         # 6. Sizing Formulation
         equity = self.state_mgr.paper_capital if is_paper else self.state_mgr.equity
@@ -119,19 +194,66 @@ class RiskManager:
 
         lot_size = signal.lot_size
         risk_per_lot = unit_risk * lot_size
-        lots = math.floor(capital_at_risk / risk_per_lot)
+
+        # Enforce cumulative risk (already realized losses today + active open risk + new trade risk)
+        # does not exceed the hard maximum daily drawdown budget (e.g. 3.0% of day's starting capital).
+        base_starting_capital = (
+            self.state_mgr.paper_starting_capital
+            if is_paper
+            else (self.state_mgr.starting_equity if self.state_mgr.starting_equity > 0 else equity)
+        )
+        max_daily_loss_budget = base_starting_capital * self.max_drawdown_pct
+        today_realized_loss = abs(min(0.0, self.state_mgr.paper_net_pnl if is_paper else self.state_mgr.net_pnl))
+
+        current_open_risk = sum(
+            (max(0.0, p.entry_price - p.stop_loss) if p.stop_loss > 0 else (p.entry_price * 0.12)) * p.quantity
+            for p in open_positions
+        )
+        remaining_risk_budget = max(0.0, max_daily_loss_budget - today_realized_loss - current_open_risk)
+
+        if (current_open_risk + risk_per_lot + today_realized_loss) > max_daily_loss_budget:
+            # Allow single minimum lot for high-value index (SENSEX/BANKNIFTY) if no open positions
+            # and risk is within 1.15x of daily budget
+            allow_single_lot_exception = (
+                len(open_positions) == 0
+                and today_realized_loss == 0.0
+                and risk_per_lot <= (max_daily_loss_budget * 1.15)
+                and (signal.entry_price * lot_size) <= available_margin
+            )
+            if not allow_single_lot_exception:
+                self._raise_alert(
+                    "WARNING",
+                    "CumulativeRiskExceeded",
+                    f"Order rejected: Single-lot risk (₹{risk_per_lot:.2f}) exceeds remaining daily drawdown headroom (₹{remaining_risk_budget:.2f}). "
+                    f"Max daily budget: ₹{max_daily_loss_budget:.2f}, Realized loss today: ₹{today_realized_loss:.2f}, Open risk: ₹{current_open_risk:.2f}."
+                )
+                return
+            else:
+                logger.info(
+                    f"[RISK] Permitting single minimum lot for {signal.underlying} "
+                    f"(Risk ₹{risk_per_lot:.2f} within 1.15x of ₹{max_daily_loss_budget:.2f} budget; margin fully covered)."
+                )
+
+        effective_capital_at_risk = min(capital_at_risk, remaining_risk_budget)
+        lots = math.floor(effective_capital_at_risk / risk_per_lot)
+
+        # Institutional Risk Sizing Cap: Disallow multiple lots on micro-stop losses
+        max_lots_cap = int(self.cfg.get("max_lots_per_trade", 1))
+        lots = min(lots, max_lots_cap)
 
         if lots < 1:
-            # Allow minimum 1 lot for both REAL and PAPER if available margin covers the contract
-            # and single-lot risk does not exceed the maximum daily drawdown limit (3.0% of equity)
+            # Allow minimum 1 lot only if available margin covers the contract
+            # AND the single lot risk fits within daily headroom or exception
             margin_req = signal.entry_price * lot_size
-            max_tolerable_risk = equity * self.max_drawdown_pct
-            if margin_req <= available_margin and risk_per_lot <= max_tolerable_risk:
+            if margin_req <= available_margin:
                 lots = 1
-                logger.info(f"[RISK] Minimum 1 lot permitted for {signal.underlying} (Margin: ₹{margin_req:.2f} <= ₹{available_margin:.2f}, Risk: ₹{risk_per_lot:.2f} <= ₹{max_tolerable_risk:.2f}).")
+                logger.info(
+                    f"[RISK] Minimum 1 lot permitted for {signal.underlying} "
+                    f"(Margin: ₹{margin_req:.2f} <= ₹{available_margin:.2f})."
+                )
             else:
-                reason = "Margin insufficient" if margin_req > available_margin else f"Single lot risk (₹{risk_per_lot:.2f}) exceeds max daily risk (₹{max_tolerable_risk:.2f})"
-                self._raise_alert("WARNING", "InsufficientRiskCapital", f"Order rejected: {reason}. Required: ₹{margin_req:.2f}, Available: ₹{available_margin:.2f}.")
+                reason = "Margin insufficient" if margin_req > available_margin else f"Single lot risk (₹{risk_per_lot:.2f}) exceeds remaining daily drawdown headroom (₹{remaining_risk_budget:.2f})"
+                self._raise_alert("WARNING", "InsufficientRiskCapital", f"Order rejected: {reason}. Required margin: ₹{margin_req:.2f}, Available: ₹{available_margin:.2f}.")
                 return
 
         total_quantity = lots * lot_size
@@ -141,27 +263,17 @@ class RiskManager:
             self._raise_alert("WARNING", "MarginExhaustion", f"Required margin (₹{margin_required:.2f}) exceeds available (₹{available_margin:.2f}).")
             return
 
-        logger.info(f"[RISK] Order APPROVED: {signal.tradingsymbol} Lots={lots} (Qty={total_quantity}) Risk=₹{capital_at_risk:.2f} Margin=₹{margin_required:.2f}")
+        logger.info(f"[RISK] Order APPROVED: {signal.tradingsymbol} Lots={lots} (Qty={total_quantity}) Risk=₹{risk_per_lot * lots:.2f} Margin=₹{margin_required:.2f}")
 
         # Construct and submit validated order
-        order_event = OrderEvent(
-            order_id=f"ORD_{signal.underlying}_{int(datetime.now().timestamp() * 1000)}",
-            symbol=signal.tradingsymbol,
-            token=signal.symboltoken,
-            exchange=signal.exchange,
-            transaction_type="BUY",
-            order_type="LIMIT",
-            product_type="INTRADAY",
-            quantity=total_quantity,
-            price=signal.entry_price,
-            trigger_price=0.0,
-            status="PENDING",
-            variety="NORMAL"
-        )
-        
+        strat_name = getattr(signal, "strategy_name", "ILSME_Sniper")
+        is_spread = (getattr(signal, "execution_strategy", "NAKED") == "DEBIT_SPREAD")
+        pos_symbol = f"{signal.tradingsymbol}[SPREAD]" if is_spread else signal.tradingsymbol
+        entry_cost = signal.net_debit if is_spread else signal.entry_price
+
         # Save position expectation metadata for multi-stage bracket tracking
         pos_event = PositionEvent(
-            symbol=signal.tradingsymbol,
+            symbol=pos_symbol,
             token=signal.symboltoken,
             underlying=signal.underlying,
             option_type=signal.option_type,
@@ -169,19 +281,88 @@ class RiskManager:
             quantity=total_quantity,
             lot_size=signal.lot_size,
             lots=lots,
-            entry_price=signal.entry_price,
-            current_ltp=signal.entry_price,
+            entry_price=entry_cost,
+            current_ltp=entry_cost,
             stop_loss=signal.stop_loss,
+            initial_stop_loss=getattr(signal, "initial_stop_loss", 0.0) or signal.stop_loss,
+            initial_unit_risk=getattr(signal, "initial_unit_risk", 0.0) or max(1.0, entry_cost - signal.stop_loss if signal.stop_loss > 0 else entry_cost * 0.12),
+            entry_time=getattr(signal, "entry_time", "") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             target_1=signal.target_1,
             exchange=signal.exchange,
             swing_invalidation_level=getattr(signal, "swing_invalidation_level", 0.0),
-            is_open=True
+            invalidation_buffer=getattr(signal, "invalidation_buffer", 0.0),
+            is_open=True,
+            is_paper=(self.state_mgr.execution_mode == "PAPER"),
+            execution_mode=self.state_mgr.execution_mode,
+            strategy_name=strat_name,
+            execution_strategy="DEBIT_SPREAD" if is_spread else "NAKED",
+            hedge_tradingsymbol=getattr(signal, "hedge_tradingsymbol", ""),
+            hedge_symboltoken=getattr(signal, "hedge_symboltoken", ""),
+            hedge_strike=getattr(signal, "hedge_strike", 0.0),
+            hedge_entry_price=getattr(signal, "hedge_entry_price", 0.0),
+            hedge_current_ltp=getattr(signal, "hedge_entry_price", 0.0),
+            net_debit=getattr(signal, "net_debit", 0.0),
+            spread_width=getattr(signal, "spread_width", 0.0)
         )
         await self.bus.publish(pos_event)
-        await self.bus.publish(order_event)
 
-        # Immediately place protective Native Exchange Stop-Loss Limit order on broker
-        await self._place_exchange_stop_loss(pos_event)
+        if is_spread:
+            # Order 1: Buy Long ATM leg
+            order_long = OrderEvent(
+                order_id=f"ORD_SPD_L_{signal.underlying}_{int(datetime.now().timestamp() * 1000)}",
+                symbol=signal.tradingsymbol,
+                token=signal.symboltoken,
+                exchange=signal.exchange,
+                transaction_type="BUY",
+                order_type="LIMIT",
+                product_type="INTRADAY",
+                quantity=total_quantity,
+                price=signal.entry_price,
+                trigger_price=0.0,
+                status="PENDING",
+                variety="NORMAL",
+                strategy_name=strat_name,
+                is_paper=(self.state_mgr.execution_mode == "PAPER")
+            )
+            # Order 2: Sell Short OTM hedge leg
+            order_short = OrderEvent(
+                order_id=f"ORD_SPD_S_{signal.underlying}_{int(datetime.now().timestamp() * 1000)}",
+                symbol=signal.hedge_tradingsymbol,
+                token=signal.hedge_symboltoken,
+                exchange=signal.exchange,
+                transaction_type="SELL",
+                order_type="LIMIT",
+                product_type="INTRADAY",
+                quantity=total_quantity,
+                price=signal.hedge_entry_price,
+                trigger_price=0.0,
+                status="PENDING",
+                variety="NORMAL",
+                strategy_name=strat_name,
+                is_paper=(self.state_mgr.execution_mode == "PAPER")
+            )
+            await self.bus.publish(order_long)
+            await self.bus.publish(order_short)
+        else:
+            order_event = OrderEvent(
+                order_id=f"ORD_{signal.underlying}_{int(datetime.now().timestamp() * 1000)}",
+                symbol=signal.tradingsymbol,
+                token=signal.symboltoken,
+                exchange=signal.exchange,
+                transaction_type="BUY",
+                order_type="LIMIT",
+                product_type="INTRADAY",
+                quantity=total_quantity,
+                price=signal.entry_price,
+                trigger_price=0.0,
+                status="PENDING",
+                variety="NORMAL",
+                strategy_name=strat_name,
+                is_paper=(self.state_mgr.execution_mode == "PAPER")
+            )
+            await self.bus.publish(order_event)
+            # Immediately place protective Native Exchange Stop-Loss Limit order on broker
+            await self._place_exchange_stop_loss(pos_event)
 
         if self.notifier:
             self.notifier.notify_trade_entry({
@@ -194,7 +375,8 @@ class RiskManager:
                 "target_1": signal.target_1,
                 "quantity": total_quantity,
                 "lots": lots,
-                "mode": self.state_mgr.execution_mode
+                "mode": self.state_mgr.execution_mode,
+                "strategy_name": strat_name
             })
 
     def _get_sl_limit_buffer(self, trigger_price: float) -> float:
@@ -205,6 +387,25 @@ class RiskManager:
         else:
             buffer_pct = 0.02
         return max(0.50, round(trigger_price * buffer_pct, 2))
+
+    def _get_invalidation_buffer(self, underlying: str, spot: float = 0.0, base_buffer: float = 0.0) -> float:
+        """
+        Computes scale-invariant, volatility-adaptive invalidation buffer for breakout trap protection.
+        1. Uses signal's real-time ATR-derived buffer if attached (> 0).
+        2. Dynamically scales with spot percentage (default 0.07% of index spot, e.g. SENSEX 75k -> 52.5 pts).
+        3. Falls back safely to configured point buffer if spot is unavailable.
+        """
+        if base_buffer > 0:
+            return round(base_buffer, 1)
+
+        buf_pct = float(self.cfg.get("invalidation_buffer_pct", 0.07)) / 100.0
+        cfg_pts = float(self.cfg.get("invalidation_buffer_pts", 12.0))
+        if spot > 0:
+            pct_buf = spot * buf_pct
+            # Clamp to configured points only for NIFTY-tier (spot < 30k) if cfg_pts is higher
+            return round(max(cfg_pts if spot < 30000 else 0.0, pct_buf), 1)
+
+        return cfg_pts
 
     async def _place_exchange_stop_loss(self, pos: PositionEvent):
         """Places a resting STOPLOSS_LIMIT order on Angel One / paper engine with dynamic volatility buffer."""
@@ -249,11 +450,8 @@ class RiskManager:
     async def _on_tick(self, tick: TickEvent):
         """Monitors active positions against stop-loss, breakeven, and partial take-profit triggers."""
         # 1. EOD Square-Off Monitor (15:12 IST)
-        is_paper = (self.state_mgr.execution_mode == "PAPER")
-        ignore_time = self.cfg.get("ignore_time_filter_in_paper", False) and is_paper
-        
-        now_time = datetime.now().time()
-        if now_time >= time(15, 12) and not self.state_mgr.is_halted and not ignore_time:
+        now_time = ist_time()
+        if now_time >= time(15, 12) and not self.state_mgr.is_halted:
             open_positions = [p for p in self.state_mgr.positions.values() if p.is_open]
             if open_positions:
                 logger.warning("[RISK] MANDATORY 15:12 IST SQUARE-OFF TRIGGERED! Closing all open positions at market.")
@@ -262,11 +460,16 @@ class RiskManager:
 
         # 2. Hard Daily Drawdown Monitor
         if self.state_mgr.daily_drawdown_pct >= (self.max_drawdown_pct * 100):
-            logger.critical(f"[RISK] Daily Drawdown limit ({self.state_mgr.daily_drawdown_pct}%) breached! Triggering immediate circuit breaker liquidation.")
-            await self._square_off_all("Hard 3.0% daily drawdown circuit breaker breach")
-            self.state_mgr.trigger_panic()
-            if self.notifier:
-                self.notifier.notify_panic_triggered("Hard 3.0% daily drawdown circuit breaker breach")
+            if not getattr(self, "_daily_drawdown_halted", False):
+                self._daily_drawdown_halted = True
+                if not self.state_mgr.is_panic_active and not self.state_mgr.is_halted:
+                    logger.critical(f"[RISK] Daily Drawdown limit ({self.state_mgr.daily_drawdown_pct:.2f}%) breached! Triggering immediate circuit breaker liquidation.")
+                    await self._square_off_all("Hard 3.0% daily drawdown circuit breaker breach")
+                    self.state_mgr.trigger_panic()
+                    if self.notifier:
+                        self.notifier.notify_panic_triggered("Hard 3.0% daily drawdown circuit breaker breach")
+                else:
+                    logger.warning(f"[RISK] Daily Drawdown limit ({self.state_mgr.daily_drawdown_pct:.2f}%) breached, but system is already in PANIC/HALT mode. Latching circuit breaker.")
             return
 
         # 3. Position-level Trailing & Bracket Management
@@ -276,13 +479,64 @@ class RiskManager:
 
             ltp = tick.ltp
             pos.current_ltp = ltp
-            unit_risk = pos.entry_price - pos.stop_loss if pos.stop_loss > 0 else (pos.entry_price * 0.12)
+            # Calculate unit_risk anchored permanently to initial entry risk (never collapses to 0 on breakeven)
+            initial_sl = getattr(pos, "initial_stop_loss", 0.0)
+            if initial_sl <= 0.0 and not pos.be_moved:
+                initial_sl = pos.stop_loss
+                pos.initial_stop_loss = initial_sl
+
+            unit_risk = getattr(pos, "initial_unit_risk", 0.0)
+            if unit_risk <= 0.0:
+                if initial_sl > 0.0 and initial_sl < pos.entry_price:
+                    unit_risk = pos.entry_price - initial_sl
+                else:
+                    unit_risk = pos.entry_price * 0.12
+                pos.initial_unit_risk = max(1.0, unit_risk)
+            unit_risk = max(1.0, unit_risk)
             profit_points = ltp - pos.entry_price
 
             # Stop Loss Trigger (Hard SL)
             if ltp <= pos.stop_loss:
                 logger.warning(f"[RISK] STOP-LOSS HIT for {symbol} @ {ltp} (SL was {pos.stop_loss}). Exiting position.")
                 await self._exit_position(pos, ltp, "Stop-Loss Hit")
+                continue
+
+            # Structural Invalidation Check (Failed Breakout Trap Protection):
+            # If trade was entered on Momentum/Trend Breakout and underlying spot reverses back across the breakout level:
+            if self.cfg.get("enable_structural_invalidation", True):
+                strat_name = getattr(pos, "strategy_name", "")
+                swing_level = getattr(pos, "swing_invalidation_level", 0.0)
+                if swing_level > 0 and ("Breakout" in strat_name or "ORB" in strat_name):
+                    spot = self.state_mgr.spot_levels.get(pos.underlying, {}).get("spot", 0.0)
+                    if spot > 0:
+                        pos_inval_buf = getattr(pos, "invalidation_buffer", 0.0)
+                        inval_buf = self._get_invalidation_buffer(pos.underlying, spot, pos_inval_buf)
+                        is_invalidated = False
+                        if pos.option_type == "CE" and spot < (swing_level - inval_buf):
+                            is_invalidated = True
+                        elif pos.option_type == "PE" and spot > (swing_level + inval_buf):
+                            is_invalidated = True
+                        if is_invalidated:
+                            logger.warning(
+                                f"[RISK] ⚠️ STRUCTURAL BREAKOUT INVALIDATION for {symbol} ({pos.underlying}): "
+                                f"Spot ₹{spot:.2f} failed breakout and broke back across invalidation boundary ₹{swing_level:.2f} by >{inval_buf:.1f} pts. "
+                                f"Liquidating position to prevent deeper trap loss."
+                            )
+                            await self._exit_position(pos, ltp, f"Structural Invalidation: Breakout Boundary Breached ({inval_buf:.0f}pt)")
+                            continue
+
+            # Stagnation / Time-Decay Exit:
+            # If open position is held in negative/flat territory past timeout, exit to prevent severe theta burn
+            entry_ts = getattr(pos, "created_at_ts", None)
+            if entry_ts is None:
+                pos.created_at_ts = datetime.now().timestamp()
+                entry_ts = pos.created_at_ts
+            
+            elapsed_mins = (datetime.now().timestamp() - entry_ts) / 60.0
+            stagnation_limit_mins = float(self.cfg.get("stagnation_timeout_mins", 40))
+            if elapsed_mins >= stagnation_limit_mins and profit_points <= 0.0:
+                logger.warning(f"[RISK] ⏳ STAGNATION EXIT TRIGGERED for {symbol}: Position held {elapsed_mins:.1f}m in negative/flat territory. Liquidating to eliminate severe theta decay.")
+                await self._exit_position(pos, ltp, f"Stagnation / Time-Decay Exit ({stagnation_limit_mins:.0f}m)")
                 continue
 
             # Stage 1: Refined Breakeven Shift (Structural Invalidation Confirmation)
@@ -297,7 +551,9 @@ class RiskManager:
                     else:
                         structural_confirmed = (spot <= swing_level)
 
-            if profit_points >= (unit_risk * self.be_trigger_r) and structural_confirmed and not pos.be_moved:
+            reached_be_profit = profit_points >= (unit_risk * self.be_trigger_r)
+            min_structural_profit = unit_risk * max(0.65, self.be_trigger_r * 0.8)
+            if (reached_be_profit or (is_structural_mode and structural_confirmed and profit_points >= min_structural_profit)) and not pos.be_moved:
                 pos.stop_loss = pos.entry_price
                 pos.be_moved = True
                 pos.structural_be_confirmed = True
@@ -339,6 +595,12 @@ class RiskManager:
                 qty_to_close = lots_to_close * pos.lot_size
                 remaining_qty = max(0, pos.quantity - qty_to_close)
 
+                if remaining_qty == 0:
+                    # 1-lot position: TP1 fully closes the position and locks in 100% of realized gains
+                    logger.info(f"[RISK] Target 1 (+2.0R) HIT for single-lot {symbol}! Fully booking gains @ ₹{ltp:.2f}")
+                    await self._exit_position(pos, ltp, "Target 1 (+2.0R) Hit")
+                    return
+
                 pos.partial_taken = True
                 pos.quantity = remaining_qty
                 pos.lots = max(0, pos.lots - lots_to_close)
@@ -362,15 +624,71 @@ class RiskManager:
                 
                 # Execute partial sell
                 await self._execute_partial_exit(pos, qty_to_close, ltp)
+
+                # Record completed trade for the closed partial quantity
+                partial_pnl = round((ltp - pos.entry_price) * qty_to_close, 2)
+                self.state_mgr.record_completed_trade(
+                    pnl=partial_pnl,
+                    entry_price=pos.entry_price,
+                    exit_price=ltp,
+                    quantity=qty_to_close,
+                    symbol=pos.symbol,
+                    exchange=getattr(pos, 'exchange', 'NFO'),
+                    is_paper=(self.state_mgr.execution_mode == "PAPER"),
+                    strike_price=getattr(pos, 'strike_price', 0.0),
+                    option_type=getattr(pos, 'option_type', ''),
+                    exit_reason="Target 1 (+2.0R) Partial (60%)",
+                    is_partial=True,
+                    pos=pos,
+                    entry_time=getattr(pos, "entry_time", "")
+                )
+
                 if self.notifier:
                     self.notifier.notify_partial_tp1({
                         "symbol": symbol,
                         "booked_qty": qty_to_close,
                         "price": ltp,
                         "gain_pts": profit_points,
-                        "pnl": profit_points * qty_to_close,
+                        "pnl": partial_pnl,
                         "mode": self.state_mgr.execution_mode
                     })
+
+            # Stage 3: Target 2 (T2) Full Profit Booking for Runner Position (e.g. +3.0R)
+            if profit_points >= (unit_risk * self.tp2_r) and pos.is_open and pos.quantity > 0:
+                logger.info(f"[RISK] 🎯 Target 2 (+{self.tp2_r:.1f}R) HIT for runner in {symbol}! Fully booking remaining {pos.quantity} units @ ₹{ltp:.2f}")
+                await self._exit_position(pos, ltp, f"Target 2 (+{self.tp2_r:.1f}R) Hit")
+                continue
+
+            # Stage 4: Dynamic Trailing Stop for Runner after Partial Booking
+            # If position has already taken partial profit and price extends beyond +2.2R,
+            # lock in profits by ratcheting the Stop-Loss up behind the move (trail to +1.0R, +1.5R, etc.)
+            if pos.partial_taken and pos.is_open and profit_points >= (unit_risk * 2.2):
+                trail_sl_r = (profit_points / unit_risk) - 1.0  # Keep a 1.0R trailing buffer
+                trail_sl_price = self._round_to_tick(pos.entry_price + (unit_risk * trail_sl_r))
+                if trail_sl_price > pos.stop_loss:
+                    old_sl = pos.stop_loss
+                    pos.stop_loss = trail_sl_price
+                    new_trigger = trail_sl_price
+                    buffer = self._get_sl_limit_buffer(new_trigger)
+                    new_limit = self._round_to_tick(max(0.05, new_trigger - buffer))
+                    pos.sl_trigger_price = new_trigger
+                    pos.sl_limit_price = new_limit
+
+                    if getattr(pos, "sl_order_id", "") and (engine := self._get_active_engine()):
+                        try:
+                            await engine.modify_order(pos.sl_order_id, {
+                                "variety": "STOPLOSS",
+                                "order_type": "STOPLOSS_LIMIT",
+                                "price": new_limit,
+                                "trigger_price": new_trigger,
+                                "quantity": pos.quantity
+                            })
+                            logger.info(f"[RISK] 🛡️ Trailed Exchange Stop-Loss up for runner {symbol}: SL={old_sl} -> {trail_sl_price} (LTP: ₹{ltp:.2f})")
+                        except Exception as e:
+                            logger.error(f"[RISK] Error modifying exchange trailing SL: {e}")
+
+                    self.state_mgr.persist_position(pos)
+                    self.state_mgr.broadcast_state()
 
     async def _execute_partial_exit(self, pos: PositionEvent, qty: int, price: float):
         """Sends order to book partial profits."""
@@ -378,12 +696,14 @@ class RiskManager:
             order_id=f"ORD_EXIT_PARTIAL_{int(datetime.now().timestamp() * 1000)}",
             symbol=pos.symbol,
             token=pos.token,
+            exchange=getattr(pos, 'exchange', 'NFO'),
             transaction_type="SELL",
             order_type="LIMIT",
             quantity=qty,
             price=price,
             status="PENDING",
-            variety="NORMAL"
+            variety="NORMAL",
+            is_paper=(self.state_mgr.execution_mode == "PAPER")
         )
         await self.bus.publish(exit_order)
 
@@ -401,28 +721,75 @@ class RiskManager:
         pos.is_open = False
         pnl = round((price - pos.entry_price) * pos.quantity, 2)
         pos.realized_pnl = pnl
+        self.state_mgr.persist_position(pos)
+        await self.bus.publish(pos)
         
-        exit_order = OrderEvent(
-            order_id=f"ORD_EXIT_FULL_{int(datetime.now().timestamp() * 1000)}",
-            symbol=pos.symbol,
-            token=pos.token,
-            transaction_type="SELL",
-            order_type="MARKET",
-            quantity=pos.quantity,
-            price=price,
-            status="PENDING",
-            variety="NORMAL"
-        )
+        if getattr(pos, "execution_strategy", "NAKED") == "DEBIT_SPREAD":
+            # For debit spread exit:
+            # 1. Buy back the short hedge leg
+            hedge_sym = getattr(pos, "hedge_tradingsymbol", "")
+            hedge_tok = getattr(pos, "hedge_symboltoken", "")
+            hedge_ltp = getattr(pos, "hedge_current_ltp", getattr(pos, "hedge_entry_price", 0.0))
+            if hedge_sym:
+                exit_short_leg = OrderEvent(
+                    order_id=f"ORD_EXIT_SPD_SHORT_{int(datetime.now().timestamp() * 1000)}",
+                    symbol=hedge_sym,
+                    token=hedge_tok,
+                    exchange=getattr(pos, 'exchange', 'NFO'),
+                    transaction_type="BUY",
+                    order_type="MARKET",
+                    quantity=pos.quantity,
+                    price=hedge_ltp,
+                    status="PENDING",
+                    variety="NORMAL",
+                    is_paper=(self.state_mgr.execution_mode == "PAPER")
+                )
+                await self.bus.publish(exit_short_leg)
+
+            # 2. Sell the long ATM leg
+            long_sym = pos.symbol.replace("[SPREAD]", "")
+            exit_long_leg = OrderEvent(
+                order_id=f"ORD_EXIT_SPD_LONG_{int(datetime.now().timestamp() * 1000)}",
+                symbol=long_sym,
+                token=pos.token,
+                exchange=getattr(pos, 'exchange', 'NFO'),
+                transaction_type="SELL",
+                order_type="MARKET",
+                quantity=pos.quantity,
+                price=pos.current_ltp,
+                status="PENDING",
+                variety="NORMAL",
+                is_paper=(self.state_mgr.execution_mode == "PAPER")
+            )
+            await self.bus.publish(exit_long_leg)
+        else:
+            exit_order = OrderEvent(
+                order_id=f"ORD_EXIT_FULL_{int(datetime.now().timestamp() * 1000)}",
+                symbol=pos.symbol,
+                token=pos.token,
+                exchange=getattr(pos, 'exchange', 'NFO'),
+                transaction_type="SELL",
+                order_type="MARKET",
+                quantity=pos.quantity,
+                price=price,
+                status="PENDING",
+                variety="NORMAL",
+                is_paper=(self.state_mgr.execution_mode == "PAPER")
+            )
+            await self.bus.publish(exit_order)
         self.state_mgr.record_completed_trade(
             pnl=pnl,
             entry_price=pos.entry_price,
             exit_price=price,
             quantity=pos.quantity,
             symbol=pos.symbol,
+            exchange=getattr(pos, 'exchange', 'NFO'),
             is_paper=(self.state_mgr.execution_mode == "PAPER"),
             strike_price=getattr(pos, 'strike_price', 0.0),
             option_type=getattr(pos, 'option_type', ''),
-            exit_reason=reason
+            exit_reason=reason,
+            pos=pos,
+            entry_time=getattr(pos, "entry_time", "")
         )
 
         if self.notifier:
@@ -451,3 +818,8 @@ class RiskManager:
         logger.warning(f"[RISK_ALERT] [{level}] {rule}: {msg}")
         alert = RiskAlertEvent(level=level, rule_name=rule, message=msg, action_taken="REJECT")
         self.bus.publish_nowait(alert)
+
+    def reset_daily_limits(self):
+        """Resets intraday circuit breaker latch flags (e.g. at daily rollover or manual reset)."""
+        self._daily_drawdown_halted = False
+        logger.info("[RISK] Intraday risk circuit breaker flags reset.")

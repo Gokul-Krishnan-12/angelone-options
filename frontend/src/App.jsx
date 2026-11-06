@@ -10,8 +10,13 @@ import AgentControl from './pages/AgentControl';
 import Settings from './pages/Settings';
 import ActivityLog from './pages/ActivityLog';
 import SystemWorkflow from './pages/SystemWorkflow';
+import OvernightAiPlanner from './pages/OvernightAiPlanner';
+import StockOptionsTrading from './pages/StockOptionsTrading';
+import StockOptionsPaperTrading from './pages/StockOptionsPaperTrading';
 import ApiKeysModal from './components/ApiKeysModal';
+
 import { PanicModal } from './components/Modals';
+import Login from './components/Login';
 
 export default function App() {
   const [state, setState] = useState({
@@ -53,6 +58,7 @@ export default function App() {
   const [isPanicModalOpen, setIsPanicModalOpen] = useState(false);
   const [isConfigured, setIsConfigured] = useState(false);
   const [isConnectModalOpen, setIsConnectModalOpen] = useState(false);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   const [logs, setLogs] = useState([
     {
@@ -62,13 +68,65 @@ export default function App() {
     },
   ]);
 
+  const [isAuthenticated, setIsAuthenticated] = useState(null);
+  const [token, setToken] = useState(() => localStorage.getItem('sniper_session_token') || '');
+
   const wsRef = useRef(null);
   const pingTimestampRef = useRef(0);
   const heartbeatTimerRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const isMountedRef = useRef(true);
 
+  // Check existing session on mount
   useEffect(() => {
+    checkAuthStatus();
+  }, []);
+
+  const checkAuthStatus = async () => {
+    try {
+      const curToken = localStorage.getItem('sniper_session_token') || '';
+      const res = await fetch('/api/auth/status', {
+        headers: curToken ? { Authorization: `Bearer ${curToken}` } : {},
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setIsAuthenticated(Boolean(data.authenticated));
+      } else {
+        setIsAuthenticated(false);
+      }
+    } catch (e) {
+      setIsAuthenticated(false);
+    }
+  };
+
+  const handleLoginSuccess = (newToken) => {
+    localStorage.setItem('sniper_session_token', newToken);
+    setToken(newToken);
+    setIsAuthenticated(true);
+  };
+
+  const handleLogout = async () => {
+    try {
+      const curToken = token || localStorage.getItem('sniper_session_token') || '';
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: curToken ? { Authorization: `Bearer ${curToken}` } : {},
+      });
+    } catch (e) {
+      console.error('Logout error:', e);
+    }
+    localStorage.removeItem('sniper_session_token');
+    setToken('');
+    setIsAuthenticated(false);
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+  };
+
+  // Main data polling & telemetry stream (active only when authenticated)
+  useEffect(() => {
+    if (!isAuthenticated) return;
     isMountedRef.current = true;
     fetchState();
     checkBrokerConfig();
@@ -91,7 +149,7 @@ export default function App() {
         wsRef.current = null;
       }
     };
-  }, []);
+  }, [isAuthenticated]);
 
   const checkBrokerConfig = async () => {
     try {
@@ -126,8 +184,9 @@ export default function App() {
 
   const setupWebSocket = () => {
     if (!isMountedRef.current) return;
+    const curToken = token || localStorage.getItem('sniper_session_token') || '';
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws/telemetry`;
+    const wsUrl = `${protocol}//${window.location.host}/ws/telemetry${curToken ? `?token=${encodeURIComponent(curToken)}` : ''}`;
 
     try {
       if (wsRef.current) {
@@ -195,11 +254,14 @@ export default function App() {
         break;
       case 'TICK': {
         const tick = msg.data;
-        if (['99926000', '99926009', '99919000'].includes(tick.token)) {
+        if (!tick) break;
+        const tickToken = String(tick.token || '');
+
+        if (['99926000', '99926009', '99919000'].includes(tickToken)) {
           const key =
-            tick.token === '99926000'
+            tickToken === '99926000'
               ? 'NIFTY'
-              : tick.token === '99926009'
+              : tickToken === '99926009'
               ? 'BANKNIFTY'
               : 'SENSEX';
           setState((prev) => ({
@@ -212,6 +274,63 @@ export default function App() {
               },
             },
           }));
+        }
+
+        // Live dynamic option tick processing for open derivative positions
+        setState((prev) => {
+          let posChanged = false;
+          const updatedPositions = (prev.positions || []).map((pos) => {
+            if (String(pos.token) === tickToken || pos.symbol === tick.symbol) {
+              posChanged = true;
+              const newLtp = parseFloat(tick.ltp) || pos.current_ltp;
+              const entry = parseFloat(pos.entry_price) || 0;
+              const qty = parseInt(pos.quantity) || 0;
+              const diff = newLtp - entry;
+              const unrealized = Math.round(diff * qty * 100) / 100;
+              const unrealizedPct = entry > 0 ? Math.round((diff / entry) * 10000) / 100 : 0;
+              return {
+                ...pos,
+                current_ltp: newLtp,
+                unrealized_pnl: unrealized,
+                unrealized_pnl_pct: unrealizedPct,
+                last_tick_time: Date.now(),
+              };
+            }
+            return pos;
+          });
+
+          if (!posChanged) return prev;
+
+          const totalUnrealized = updatedPositions.reduce(
+            (sum, p) => sum + (parseFloat(p.unrealized_pnl) || 0),
+            0
+          );
+          return {
+            ...prev,
+            positions: updatedPositions,
+            unrealized_pnl: Math.round(totalUnrealized * 100) / 100,
+          };
+        });
+        break;
+      }
+      case 'POSITION_UPDATE': {
+        if (msg.data) {
+          setState((prev) => {
+            const pos = msg.data;
+            const existingIdx = (prev.positions || []).findIndex(
+              (p) => p.symbol === pos.symbol
+            );
+            let nextPositions;
+            if (pos.is_open === false) {
+              nextPositions = (prev.positions || []).filter((p) => p.symbol !== pos.symbol);
+            } else if (existingIdx >= 0) {
+              nextPositions = [...prev.positions];
+              nextPositions[existingIdx] = { ...nextPositions[existingIdx], ...pos };
+            } else {
+              nextPositions = [pos, ...(prev.positions || [])];
+            }
+            return { ...prev, positions: nextPositions };
+          });
         }
         break;
       }
@@ -395,11 +514,32 @@ export default function App() {
     }
   };
 
+  // Security gate: Loading state
+  if (isAuthenticated === null) {
+    return (
+      <div className="login-viewport" style={{ background: 'var(--bg-dark)' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.9rem' }}>
+          <div className="pulse-dot" style={{ width: 14, height: 14, background: 'var(--accent-orange)' }} />
+          <span className="mono text-muted" style={{ fontSize: '0.8rem' }}>Verifying 2FA session status...</span>
+        </div>
+      </div>
+    );
+  }
+
+  // Security gate: Unauthenticated state -> render Login Screen
+  if (isAuthenticated === false) {
+    return <Login onLoginSuccess={handleLoginSuccess} />;
+  }
+
   return (
     <BrowserRouter>
       <div className="app-shell">
-        {/* Persistent Navigation Sidebar */}
-        <Sidebar state={state} />
+        {/* Persistent Navigation Sidebar with Mobile Drawer */}
+        <Sidebar
+          state={state}
+          isOpen={isMobileMenuOpen}
+          onClose={() => setIsMobileMenuOpen(false)}
+        />
 
         <div className="main-wrapper">
           {/* Persistent Top Header */}
@@ -414,6 +554,8 @@ export default function App() {
             onRefreshBalance={handleRefreshBalance}
             onOpenPanic={() => setIsPanicModalOpen(true)}
             isRefreshingBalance={isRefreshingBalance}
+            onLogout={handleLogout}
+            onToggleMobileMenu={() => setIsMobileMenuOpen((prev) => !prev)}
           />
 
           {/* Panic Override Warning Banner */}
@@ -464,7 +606,20 @@ export default function App() {
               }
             />
             <Route
+              path="/overnight-ai-planner"
+              element={<OvernightAiPlanner />}
+            />
+            <Route
+              path="/stock-options-trading"
+              element={<StockOptionsTrading state={state} onOpenPanic={() => setIsPanicModalOpen(true)} />}
+            />
+            <Route
+              path="/stock-options-paper-trading"
+              element={<StockOptionsPaperTrading />}
+            />
+            <Route
               path="/paper"
+
               element={
                 <PaperTrade
                   state={state}

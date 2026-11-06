@@ -7,6 +7,7 @@ from smartapi_trader.core.events import (
 from smartapi_trader.core.event_bus import EventBus
 from smartapi_trader.utils.logger import logger
 from smartapi_trader.utils.charges import calculate_option_charges
+from smartapi_trader.utils.tz import now_ist, ist_date_str, is_market_hours, is_trading_day
 
 class StateManager:
     """
@@ -64,17 +65,14 @@ class StateManager:
         self.is_panic_active = False
         self.is_halted = False
         self.strategy_status = "Scanning for Liquidity Sweep"
+        self.current_date = ist_date_str()
         
         # State collections
         self.positions: Dict[str, PositionEvent] = {} # Keyed by symbol
         self.orders: Dict[str, OrderEvent] = {}       # Keyed by order_id
         self.ticks: Dict[str, TickEvent] = {}         # Keyed by token
         self.trade_history: List[Dict[str, Any]] = []
-        self.spot_levels: Dict[str, Dict[str, float]] = {
-            "NIFTY": {"spot": 23140.5, "vwap": 23063.1, "pdh": 23162.7, "pdl": 23020.95, "high": 23162.7, "low": 23020.95},
-            "BANKNIFTY": {"spot": 55580.4, "vwap": 55438.5, "pdh": 55762.6, "pdl": 55373.75, "high": 55762.6, "low": 55373.75},
-            "SENSEX": {"spot": 73895.74, "vwap": 73580.54, "pdh": 73968.05, "pdl": 73477.77, "high": 73968.05, "low": 73477.77},
-        }
+        self.spot_levels: Dict[str, Dict[str, float]] = self._init_dynamic_spot_levels()
 
         # Wire up event subscriptions
         self._register_subscribers()
@@ -83,11 +81,176 @@ class StateManager:
         if self.storage:
             self._restore_from_storage()
 
+    def _init_dynamic_spot_levels(self) -> Dict[str, Dict[str, float]]:
+        """Initializes spot telemetry levels with genuine previous day levels from historical files."""
+        import os
+        import json
+        levels = {}
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        default_fallback = {
+            "NIFTY": {"spot": 22700.0, "vwap": 22700.0, "pdh": 22800.0, "pdl": 22500.0, "high": 22800.0, "low": 22500.0},
+            "BANKNIFTY": {"spot": 54200.0, "vwap": 54200.0, "pdh": 54500.0, "pdl": 53800.0, "high": 54500.0, "low": 53800.0},
+            "SENSEX": {"spot": 72500.0, "vwap": 72500.0, "pdh": 72800.0, "pdl": 72000.0, "high": 72800.0, "low": 72000.0},
+        }
+        for idx in ["NIFTY", "BANKNIFTY", "SENSEX"]:
+            path = f"data/historical/{idx.lower()}_3m.json"
+            resolved = False
+            if os.path.exists(path):
+                try:
+                    with open(path, "r") as f:
+                        bars = json.load(f)
+                    dates = sorted(list(set(c[0][:10] for c in bars if c[0][:10] < today_str)))
+                    if dates:
+                        prev_date = dates[-1]
+                        prev_bars = [c for c in bars if c[0].startswith(prev_date)]
+                        if prev_bars:
+                            pdh = max(b[2] for b in prev_bars)
+                            pdl = min(b[3] for b in prev_bars)
+                            close = prev_bars[-1][4]
+                            levels[idx] = {
+                                "spot": close, "vwap": close, "pdh": pdh, "pdl": pdl,
+                                "high": pdh, "low": pdl
+                            }
+                            resolved = True
+                except Exception:
+                    pass
+            if not resolved:
+                levels[idx] = default_fallback[idx]
+        return levels
+
+    def _reconcile_unrecorded_trades(self):
+        """
+        Self-healing reconciliation: Scans filled exit orders against the trades table.
+        If a position was exited (sell order filled) but no trade was recorded in SQLite,
+        reconstructs the completed trade, cancels lingering trigger-pending SL orders,
+        and saves the trade to storage.
+        """
+        if not self.storage:
+            return
+        try:
+            with self.storage._get_connection() as conn:
+                # Find filled SELL orders that represent completed position exits
+                sell_orders = conn.execute("""
+                    SELECT * FROM orders 
+                    WHERE transaction_type = 'SELL' 
+                      AND status = 'FILLED' 
+                      AND order_id NOT LIKE 'ORD_SL_%'
+                    ORDER BY created_at ASC
+                """).fetchall()
+
+                for s_row in sell_orders:
+                    s_ord = dict(s_row)
+                    symbol = s_ord.get("symbol", "")
+                    s_qty = int(s_ord.get("filled_quantity") or s_ord.get("quantity") or 0)
+                    s_price = float(s_ord.get("average_price") or s_ord.get("price") or 0.0)
+                    s_time = s_ord.get("created_at", "")
+                    s_date = s_time[:10] if s_time else datetime.now().strftime("%Y-%m-%d")
+                    is_paper = bool(s_ord.get("is_paper", 1))
+
+                    if not symbol or s_qty <= 0:
+                        continue
+
+                    # Check if a trade already exists for this symbol and date
+                    existing = conn.execute("""
+                        SELECT COUNT(*) as cnt FROM trades 
+                        WHERE symbol = ? AND (date = ? OR timestamp LIKE ?)
+                    """, (symbol, s_date, f"{s_date}%")).fetchone()
+
+                    if existing and existing["cnt"] > 0:
+                        continue  # Already recorded
+
+                    # Find corresponding filled BUY order
+                    b_row = conn.execute("""
+                        SELECT * FROM orders 
+                        WHERE symbol = ? AND transaction_type = 'BUY' AND status = 'FILLED'
+                        ORDER BY created_at ASC LIMIT 1
+                    """, (symbol,)).fetchone()
+
+                    b_price = 0.0
+                    b_exchange = "NSE"
+                    if b_row:
+                        b_ord = dict(b_row)
+                        b_price = float(b_ord.get("average_price") or b_ord.get("price") or 0.0)
+                        b_exchange = b_ord.get("exchange") or "NSE"
+
+                    # If no buy order found, look in positions table
+                    if b_price == 0.0:
+                        pos_row = conn.execute("SELECT * FROM positions WHERE symbol = ?", (symbol,)).fetchone()
+                        if pos_row:
+                            p_dict = dict(pos_row)
+                            b_price = float(p_dict.get("entry_price") or 0.0)
+                            b_exchange = p_dict.get("exchange") or "NSE"
+
+                    if b_price == 0.0:
+                        b_price = s_price
+
+                    gross_pnl = round((s_price - b_price) * s_qty, 2)
+                    charges = calculate_option_charges(b_price, s_price, s_qty, b_exchange)
+                    total_fee = charges.get("total_charges", 61.79)
+                    net_pnl = round(gross_pnl - total_fee, 2)
+
+                    import re
+                    strike_val = 0.0
+                    opt_val = ""
+                    # Indian index strikes are 5 digits (e.g. 72200, 53900, 22600) or 4 digits (<10000)
+                    m = re.search(r'(\d{5})\s*(CE|PE)$', symbol, re.IGNORECASE)
+                    if m:
+                        strike_val = float(m.group(1))
+                        opt_val = m.group(2).upper()
+                    else:
+                        m4 = re.search(r'(\d{4})\s*(CE|PE)$', symbol, re.IGNORECASE)
+                        if m4:
+                            strike_val = float(m4.group(1))
+                            opt_val = m4.group(2).upper()
+                    if strike_val > 100000:
+                        strike_val = strike_val % 100000
+
+                    exit_reason = "Target 1 (+2.0R) Hit" if gross_pnl > 0 else "Stop Loss Hit"
+                    trade_id = f"TR_{s_date.replace('-', '')[4:]}_001"
+
+                    trade_record = {
+                        "id": trade_id,
+                        "timestamp": s_time.replace("T", " ")[:19] if s_time else datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "entry_time": b_time.replace("T", " ")[:19] if b_time else (s_time.replace("T", " ")[:19] if s_time else datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+                        "date": s_date,
+                        "symbol": symbol,
+                        "strike_price": strike_val,
+                        "option_type": opt_val,
+                        "quantity": s_qty,
+                        "entry_price": b_price,
+                        "exit_price": s_price,
+                        "gross_pnl": gross_pnl,
+                        "brokerage": charges.get("brokerage", 40.0),
+                        "total_charges": total_fee,
+                        "net_pnl": net_pnl,
+                        "is_paper": 1 if is_paper else 0,
+                        "exit_reason": exit_reason,
+                        "execution_strategy": "DEBIT_SPREAD" if "[SPREAD]" in symbol else "NAKED"
+                    }
+
+                    self.storage.save_trade(trade_record)
+                    self.storage.mark_position_closed(symbol, realized_pnl=gross_pnl)
+                    logger.info(f"[STATE] 🛠️ Reconciled unrecorded completed trade for {symbol}: Gross=₹{gross_pnl:+.2f}, Net=₹{net_pnl:+.2f}")
+
+                    # Cancel lingering resting SL orders for this symbol
+                    conn.execute("""
+                        UPDATE orders 
+                        SET status = 'CANCELLED', updated_at = ? 
+                        WHERE symbol = ? AND order_id LIKE 'ORD_SL_%' AND status = 'TRIGGER_PENDING'
+                    """, (datetime.now().isoformat(), symbol))
+                    conn.commit()
+
+        except Exception as e:
+            logger.error(f"[STATE] Error in _reconcile_unrecorded_trades: {e}")
+
     def _restore_from_storage(self):
         """Restores ledger, active positions, and trade history from SQLite storage."""
         if not self.storage:
             return
         try:
+            # First reconcile any unrecorded exit executions
+            self._reconcile_unrecorded_trades()
+
             today_str = datetime.now().strftime("%Y-%m-%d")
             ledger = self.storage.load_daily_ledger(today_str)
             if ledger:
@@ -132,8 +295,37 @@ class StateManager:
             # Load completed trades
             self.completed_trades = self.storage.load_todays_trades(is_paper=False)
             self.paper_completed_trades = self.storage.load_todays_trades(is_paper=True)
-            self.trade_history = self.storage.load_all_trades(limit=100)
+            # Sanitize any legacy strike prices with expiry prefix (e.g. 172200 -> 72200)
+            for tr_list in (self.completed_trades, self.paper_completed_trades, self.trade_history):
+                for tr in tr_list:
+                    sp = float(tr.get("strike_price") or 0.0)
+                    if sp > 100000:
+                        tr["strike_price"] = sp % 100000
+
             logger.info(f"[STATE] Restored trades: {len(self.completed_trades)} live, {len(self.paper_completed_trades)} paper, {len(self.trade_history)} total history.")
+
+            # Self-healing ledger recalculation from completed trades
+            if self.paper_completed_trades:
+                self._recalculate_paper_ledger()
+                self._sync_ledger_to_storage()
+
+            if self.completed_trades:
+                self.realized_pnl = round(sum(float(t.get("gross_pnl", 0.0)) for t in self.completed_trades), 2)
+                self.total_brokerage = round(sum(float(t.get("total_charges", 0.0)) for t in self.completed_trades), 2)
+                self.net_pnl = round(sum(float(t.get("net_pnl", 0.0)) for t in self.completed_trades), 2)
+                self.daily_pnl = self.net_pnl
+                self.trades_taken_today = sum(1 for t in self.completed_trades if not (t.get("is_partial") or "Partial" in str(t.get("exit_reason", ""))))
+                streak = 0
+                for tr in reversed(self.completed_trades):
+                    if tr.get("is_partial") or "Partial" in str(tr.get("exit_reason", "")):
+                        continue
+                    if float(tr.get("gross_pnl", 0.0)) < 0:
+                        streak += 1
+                    else:
+                        break
+                if self.execution_mode == "LIVE":
+                    self.consecutive_losses = streak
+                self._sync_ledger_to_storage()
 
             self._recalculate_portfolio()
         except Exception as e:
@@ -162,7 +354,97 @@ class StateManager:
         }
         self.storage.save_daily_ledger(ledger_data)
 
+    def check_and_perform_daily_rollover(self) -> bool:
+        """
+        Checks if the date has changed (in IST). If so, archives yesterday's state,
+        resets intraday session counters (trades taken, intraday PnL, completed trades list),
+        and rolls over closing capital to the new day's starting baseline.
+        """
+        today_str = ist_date_str()
+        if getattr(self, "current_date", None) == today_str:
+            return False
+
+        old_date = getattr(self, "current_date", "initial")
+        logger.info(f"[STATE] 🌅 Daily rollover triggered: {old_date} -> {today_str}. Refreshing session state for today.")
+        self.current_date = today_str
+
+        # Check if today's ledger already exists in SQLite (e.g. if service restarted mid-day)
+        if self.storage:
+            ledger = self.storage.load_daily_ledger(today_str)
+            if ledger:
+                self.trades_taken_today = int(ledger.get("trades_taken_today") or 0)
+                self.consecutive_losses = int(ledger.get("consecutive_losses") or 0)
+                self.realized_pnl = float(ledger.get("realized_pnl") or 0.0)
+                self.total_brokerage = float(ledger.get("total_brokerage") or 0.0)
+                self.net_pnl = float(ledger.get("net_pnl") or 0.0)
+                self.daily_pnl = self.net_pnl
+                self.paper_capital = float(ledger.get("paper_capital") or self.paper_capital)
+                self.paper_starting_capital = float(ledger.get("paper_starting_capital") or self.paper_capital)
+                self.paper_available_margin = self.paper_capital
+                self.paper_realized_pnl = float(ledger.get("paper_realized_pnl") or 0.0)
+                self.paper_total_brokerage = float(ledger.get("paper_total_brokerage") or 0.0)
+                self.paper_net_pnl = float(ledger.get("paper_net_pnl") or 0.0)
+                self.paper_daily_pnl = self.paper_net_pnl
+                self.paper_trades_taken = int(ledger.get("paper_trades_taken") or 0)
+            else:
+                # Brand new day: reset daily metrics, carry forward closing capital
+                self.trades_taken_today = 0
+                self.consecutive_losses = 0
+                self.realized_pnl = 0.0
+                self.total_brokerage = 0.0
+                self.net_pnl = 0.0
+                self.daily_pnl = 0.0
+                self.daily_drawdown_pct = 0.0
+                self.starting_equity = self.equity
+
+                self.paper_starting_capital = self.paper_capital
+                self.paper_available_margin = self.paper_capital
+                self.paper_realized_pnl = 0.0
+                self.paper_total_brokerage = 0.0
+                self.paper_net_pnl = 0.0
+                self.paper_daily_pnl = 0.0
+                self.paper_drawdown_pct = 0.0
+                self.paper_trades_taken = 0
+
+            # Reload strictly today's orders & trades
+            self.orders = {ord_obj.order_id: ord_obj for ord_obj in self.storage.load_todays_orders(limit=50)}
+            self.completed_trades = self.storage.load_todays_trades(is_paper=False)
+            self.paper_completed_trades = self.storage.load_todays_trades(is_paper=True)
+            self._sync_ledger_to_storage()
+        else:
+            self.trades_taken_today = 0
+            self.consecutive_losses = 0
+            self.realized_pnl = 0.0
+            self.total_brokerage = 0.0
+            self.net_pnl = 0.0
+            self.daily_pnl = 0.0
+            self.daily_drawdown_pct = 0.0
+            self.starting_equity = self.equity
+
+            self.paper_starting_capital = self.paper_capital
+            self.paper_available_margin = self.paper_capital
+            self.paper_realized_pnl = 0.0
+            self.paper_total_brokerage = 0.0
+            self.paper_net_pnl = 0.0
+            self.paper_daily_pnl = 0.0
+            self.paper_drawdown_pct = 0.0
+            self.paper_trades_taken = 0
+            self.orders = {}
+            self.completed_trades = []
+            self.paper_completed_trades = []
+
+        if self.is_panic_active:
+            logger.info("[STATE] 🌅 Resetting panic state from previous session on daily rollover.")
+            self.is_panic_active = False
+            self.is_halted = False
+            self.strategy_status = "Scanning for Liquidity Sweep"
+
+        self._recalculate_portfolio()
+        self.broadcast_state()
+        return True
+
     def persist_position(self, pos: PositionEvent):
+
         """Persists current state of a position (e.g. SL moved to breakeven, partial exit)."""
         if self.storage:
             is_paper = (self.execution_mode == "PAPER") or getattr(pos, "is_paper", False)
@@ -188,6 +470,7 @@ class StateManager:
         self.paper_agent_status = "RUNNING"
         self.real_agent_status = "PAUSED"
         self.is_halted = False
+        self.is_panic_active = False
         self.strategy_status = "Paper Agent: Scanning for Liquidity Sweep"
         logger.info("[AGENT] Paper Trading Agent STARTED.")
         self._sync_ledger_to_storage()
@@ -267,10 +550,16 @@ class StateManager:
                 "m2mrealized": float(rms_data.get("m2mrealized", 0.0) or 0.0),
                 "is_live_synced": True
             }
-            self.available_margin = avail
-            self.equity = net
-            self.starting_equity = net
-            logger.info(f"[STATE] Angel One RMS updated: Net=₹{net:.2f}, Cash=₹{avail:.2f}, Collateral=₹{collateral:.2f}")
+            if self.execution_mode == "LIVE":
+                self.available_margin = avail
+                self.equity = net
+                self.starting_equity = net
+            else:
+                self.available_margin = self.paper_available_margin
+                self.starting_equity = self.paper_starting_capital
+                self.equity = round(self.starting_equity + self.daily_pnl, 2)
+
+            logger.info(f"[STATE] Angel One RMS updated: Net=₹{net:.2f}, Cash=₹{avail:.2f}, Collateral=₹{collateral:.2f} (Mode: {self.execution_mode})")
 
             # Safety Governor: Auto-pause Real Agent if running and live cash is below min_capital
             if self.real_agent_status == "RUNNING" and avail < min_capital:
@@ -291,6 +580,8 @@ class StateManager:
         self.broadcast_state()
 
     def trigger_panic(self):
+        if self.is_panic_active and self.is_halted:
+            return
         self.is_panic_active = True
         self.is_halted = True
         self.strategy_status = "EMERGENCY PANIC TRIGGERED - HALTED"
@@ -309,6 +600,8 @@ class StateManager:
             current = self.spot_levels[underlying]
             current["spot"] = spot
             current["vwap"] = vwap
+            if pdh > 0 and pdl > 0 and pdh < pdl:
+                pdh, pdl = pdl, pdh
             if pdh > 0: current["pdh"] = pdh
             if pdl > 0: current["pdl"] = pdl
             if high > 0: current["high"] = max(current["high"], high)
@@ -319,12 +612,32 @@ class StateManager:
         # If tick matches any active open position, update unrealized P&L
         updated = False
         for symbol, pos in list(self.positions.items()):
-            if pos.token == event.token and pos.is_open:
-                pos.current_ltp = event.ltp
-                price_diff = event.ltp - pos.entry_price
-                pos.unrealized_pnl = round(price_diff * pos.quantity, 2)
-                pos.unrealized_pnl_pct = round((price_diff / pos.entry_price) * 100, 2) if pos.entry_price > 0 else 0.0
-                updated = True
+            if not pos.is_open:
+                continue
+            if getattr(pos, "execution_strategy", "NAKED") == "DEBIT_SPREAD":
+                pos_updated = False
+                if pos.token == event.token:
+                    pos.current_ltp = event.ltp
+                    pos_updated = True
+                elif getattr(pos, "hedge_symboltoken", "") == event.token:
+                    pos.hedge_current_ltp = event.ltp
+                    pos_updated = True
+                
+                if pos_updated:
+                    long_p = pos.current_ltp if pos.current_ltp > 0 else pos.entry_price
+                    short_p = pos.hedge_current_ltp if pos.hedge_current_ltp > 0 else getattr(pos, "hedge_entry_price", 0.0)
+                    spread_val = max(0.0, round(long_p - short_p, 2))
+                    net_deb = getattr(pos, "net_debit", pos.entry_price)
+                    pos.unrealized_pnl = round((spread_val - net_deb) * pos.quantity, 2)
+                    pos.unrealized_pnl_pct = round(((spread_val - net_deb) / net_deb) * 100, 2) if net_deb > 0 else 0.0
+                    updated = True
+            else:
+                if pos.token == event.token:
+                    pos.current_ltp = event.ltp
+                    price_diff = event.ltp - pos.entry_price
+                    pos.unrealized_pnl = round(price_diff * pos.quantity, 2)
+                    pos.unrealized_pnl_pct = round((price_diff / pos.entry_price) * 100, 2) if pos.entry_price > 0 else 0.0
+                    updated = True
         
         if updated:
             self._recalculate_portfolio()
@@ -332,8 +645,10 @@ class StateManager:
     async def _on_order_update(self, event: OrderEvent):
         self.orders[event.order_id] = event
         if self.storage:
-            is_paper = (self.execution_mode == "PAPER") or ("PAPER" in event.order_id or "ORD_NIFTY_" in event.order_id or "ORD_BANKNIFTY_" in event.order_id or "MANUAL_EXIT_" in event.order_id)
-            self.storage.save_order(event, is_paper=is_paper)
+            is_paper = getattr(event, "is_paper", None)
+            if is_paper is None:
+                is_paper = (self.execution_mode == "PAPER") or ("PAPER" in event.order_id or "ORD_NIFTY_" in event.order_id or "ORD_BANKNIFTY_" in event.order_id or "ORD_SENSEX_" in event.order_id or "MANUAL_EXIT_" in event.order_id)
+            self.storage.save_order(event, is_paper=bool(is_paper))
         self.broadcast_state()
 
     async def _on_fill(self, event: FillEvent):
@@ -341,6 +656,11 @@ class StateManager:
         self.broadcast_state()
 
     async def _on_position_update(self, event: PositionEvent):
+        existing = self.positions.get(event.symbol)
+        if existing and getattr(existing, "entry_time", "") and not getattr(event, "entry_time", ""):
+            event.entry_time = existing.entry_time
+        elif not getattr(event, "entry_time", ""):
+            event.entry_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.positions[event.symbol] = event
         if self.storage:
             is_paper = (self.execution_mode == "PAPER") or getattr(event, "is_paper", False)
@@ -349,16 +669,44 @@ class StateManager:
 
     def _recalculate_portfolio(self):
         """Recalculates equity, unrealized P&L, daily drawdown %."""
-        total_unrealized = sum(p.unrealized_pnl for p in self.positions.values() if p.is_open)
+        # Auto-retire any positions where quantity is zero
+        for p in list(self.positions.values()):
+            if p.is_open and p.quantity <= 0:
+                p.is_open = False
+                if self.storage:
+                    self.storage.mark_position_closed(p.symbol, realized_pnl=p.realized_pnl)
+
+        total_unrealized = sum(p.unrealized_pnl for p in self.positions.values() if p.is_open and p.quantity > 0)
         self.unrealized_pnl = round(total_unrealized, 2)
-        self.daily_pnl = round(self.realized_pnl + self.unrealized_pnl, 2)
-        self.equity = round(self.starting_equity + self.daily_pnl, 2)
-        
+
+        # Always update paper metrics so Paper Trading Hub displays accurate data
+        paper_base = self.paper_starting_capital if self.paper_starting_capital > 0 else 50000.0
+        self.paper_daily_pnl = round(self.paper_net_pnl + (self.unrealized_pnl if self.execution_mode == "PAPER" else 0.0), 2)
+        self.paper_capital = round(paper_base + self.paper_daily_pnl, 2)
+        self.paper_available_margin = self.paper_capital
+        if paper_base > 0:
+            self.paper_drawdown_pct = max(0.0, round((paper_base - self.paper_capital) / paper_base * 100, 2))
+        else:
+            self.paper_drawdown_pct = 0.0
+
+        is_paper = (self.execution_mode == "PAPER")
+        if is_paper:
+            self.paper_unrealized_pnl = self.unrealized_pnl
+            self.daily_pnl = self.paper_daily_pnl
+            self.equity = self.paper_capital
+            self.daily_drawdown_pct = self.paper_drawdown_pct
+        else:
+            self.daily_pnl = round(self.realized_pnl + self.unrealized_pnl, 2)
+            base_eq = self.starting_equity if self.starting_equity > 0 else 50000.0
+            self.equity = round(base_eq + self.daily_pnl, 2)
+            if base_eq > 0:
+                drawdown = (base_eq - self.equity) / base_eq
+                self.daily_drawdown_pct = max(0.0, round(drawdown * 100, 2))
+            else:
+                self.daily_drawdown_pct = 0.0
+
         if self.equity > self.peak_equity:
             self.peak_equity = self.equity
-
-        drawdown = (self.starting_equity - self.equity) / self.starting_equity
-        self.daily_drawdown_pct = max(0.0, round(drawdown * 100, 2))
 
     def record_completed_trade(
         self,
@@ -371,9 +719,13 @@ class StateManager:
         is_paper: bool = False,
         strike_price: float = 0.0,
         option_type: str = "",
-        exit_reason: str = ""
+        exit_reason: str = "",
+        is_partial: bool = False,
+        strategy_name: str = "",
+        pos: Optional[Any] = None,
+        entry_time: str = ""
     ):
-        """Called when a position is closed. Computes brokerage and updates net ledger."""
+        """Called when a position or partial lot is closed. Computes brokerage and updates net ledger."""
         charges = {"brokerage": 40.0, "total_charges": 65.0}
         if entry_price > 0 and exit_price > 0 and quantity > 0:
             charges = calculate_option_charges(entry_price, exit_price, quantity, exchange)
@@ -386,9 +738,11 @@ class StateManager:
         resolved_opt = option_type or ""
         if symbol:
             import re
-            m = re.search(r'(\d+)\s*(CE|PE)', symbol, re.IGNORECASE)
+            m = re.search(r'(\d{5})\s*(CE|PE)$', symbol, re.IGNORECASE)
+            if not m:
+                m = re.search(r'(\d{4})\s*(CE|PE)$', symbol, re.IGNORECASE)
             if m:
-                if resolved_strike == 0.0:
+                if resolved_strike == 0.0 or resolved_strike > 100000:
                     try:
                         resolved_strike = float(m.group(1))
                     except Exception:
@@ -396,10 +750,24 @@ class StateManager:
                 if not resolved_opt:
                     resolved_opt = m.group(2).upper()
 
+        if resolved_strike > 100000:
+            resolved_strike = resolved_strike % 100000
+
+        # Retrieve strategy name, execution structure, and entry time from position if not provided
+        if not pos and symbol:
+            pos = self.positions.get(symbol)
+        resolved_strat = strategy_name or (getattr(pos, "strategy_name", "ILSME_Sniper") if pos else "ILSME_Sniper")
+        exec_strat = getattr(pos, "execution_strategy", None) or ("DEBIT_SPREAD" if "[SPREAD]" in (symbol or "") else "NAKED")
+        resolved_entry_time = entry_time or (getattr(pos, "entry_time", "") if pos else "") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
         trade_num = len(self.completed_trades) + len(self.paper_completed_trades) + 1
+        is_paper_trade = bool(is_paper or self.execution_mode == "PAPER")
+        today_date_str = datetime.now().strftime("%Y-%m-%d")
         trade_record = {
             "id": f"TR_{datetime.now().strftime('%m%d')}_{trade_num:03d}",
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "entry_time": resolved_entry_time,
+            "date": today_date_str,
             "symbol": symbol or "OPTIDX",
             "strike_price": resolved_strike,
             "option_type": resolved_opt,
@@ -410,37 +778,79 @@ class StateManager:
             "brokerage": charges.get("brokerage", 40.0),
             "total_charges": total_fee,
             "net_pnl": net,
-            "is_paper": is_paper,
-            "exit_reason": exit_reason
+            "is_paper": 1 if is_paper_trade else 0,
+            "exit_reason": exit_reason,
+            "is_partial": 1 if is_partial else 0,
+            "strategy_name": resolved_strat,
+            "execution_strategy": exec_strat
         }
 
-        if is_paper or self.execution_mode == "PAPER":
+        if is_paper_trade:
             self.paper_realized_pnl += round(pnl, 2)
             self.paper_total_brokerage += total_fee
             self.paper_net_pnl += net
-            self.paper_capital += net
-            self.paper_trades_taken += 1
+            if not is_partial:
+                self.paper_trades_taken += 1
+                if pnl < 0:
+                    self.consecutive_losses += 1
+                else:
+                    self.consecutive_losses = 0
             self.paper_completed_trades.append(trade_record)
         else:
             self.realized_pnl += round(pnl, 2)
             self.total_brokerage += total_fee
             self.net_pnl += net
-            self.trades_taken_today += 1
+            if not is_partial:
+                self.trades_taken_today += 1
+                if pnl < 0:
+                    self.consecutive_losses += 1
+                else:
+                    self.consecutive_losses = 0
             self.completed_trades.append(trade_record)
-            if pnl < 0:
-                self.consecutive_losses += 1
-            else:
-                self.consecutive_losses = 0
 
         self.trade_history.insert(0, trade_record)
 
         if self.storage:
             self.storage.save_trade(trade_record)
             self.storage.mark_position_closed(symbol, realized_pnl=pnl)
-            self._sync_ledger_to_storage()
-
         self._recalculate_portfolio()
+        if self.storage:
+            self._sync_ledger_to_storage()
         self.broadcast_state()
+
+        # Systematic Health & Scaling Governance Audit
+        if hasattr(self, "notifier") and self.notifier and not is_paper_trade:
+            total_real = len(self.completed_trades)
+            # 1. Scale-Up Milestone (Every 30 trades or when reaching green light criteria)
+            if total_real >= 30 and (total_real % 15 == 0):
+                wins = sum(1 for t in self.completed_trades if float(t.get("net_pnl", 0)) > 0)
+                gross_w = sum(float(t.get("gross_pnl", 0)) for t in self.completed_trades if float(t.get("gross_pnl", 0)) > 0)
+                gross_l = sum(abs(float(t.get("gross_pnl", 0))) for t in self.completed_trades if float(t.get("gross_pnl", 0)) < 0)
+                pf = (gross_w / max(1.0, gross_l)) if gross_l > 0 else 1.5
+                winrate = (wins / total_real * 100.0)
+                
+                if pf >= 1.30 and winrate >= 28.0 and self.daily_drawdown_pct < 18.0:
+                    self.notifier.notify_scaling_advisory({
+                        "total_trades": total_real,
+                        "profit_factor": pf,
+                        "win_rate": winrate,
+                        "max_drawdown_pct": self.daily_drawdown_pct,
+                        "avg_slippage": 0.8
+                    })
+
+            # 2. Hard Discard / Quarantine Check
+            if self.consecutive_losses >= 8:
+                self.notifier.notify_discard_alert("8 Consecutive Losses Reached", {
+                    "drawdown_pct": self.daily_drawdown_pct,
+                    "consecutive_losses": self.consecutive_losses,
+                    "avg_slippage": 1.2
+                })
+            elif self.daily_drawdown_pct >= 18.0:
+                self.notifier.notify_discard_alert("Max Drawdown Threshold (18%) Breached", {
+                    "drawdown_pct": self.daily_drawdown_pct,
+                    "consecutive_losses": self.consecutive_losses,
+                    "avg_slippage": 1.2
+                })
 
     def remove_paper_trade(self, trade_id: str = ""):
         """Removes a paper trade by ID or removes the latest if empty."""
@@ -461,6 +871,7 @@ class StateManager:
             if self.storage:
                 self.storage.delete_paper_trade(target.get("id"))
             self._recalculate_paper_ledger()
+            self._recalculate_portfolio()
             if self.storage:
                 self._sync_ledger_to_storage()
             self.broadcast_state()
@@ -475,6 +886,12 @@ class StateManager:
         self.paper_daily_pnl = 0.0
         self.paper_capital = float(self.paper_starting_capital)
         self.paper_available_margin = float(self.paper_starting_capital)
+        self.paper_drawdown_pct = 0.0
+        if self.execution_mode == "PAPER":
+            self.consecutive_losses = 0
+            self.daily_drawdown_pct = 0.0
+            self.daily_pnl = 0.0
+            self.equity = float(self.paper_starting_capital)
         paper_order_ids = [oid for oid, ord_obj in self.orders.items() if getattr(ord_obj, "order_id", "").startswith(("ORD_NIFTY_", "ORD_BANKNIFTY_", "MANUAL_EXIT_"))]
         for oid in paper_order_ids:
             self.orders.pop(oid, None)
@@ -498,13 +915,30 @@ class StateManager:
         self.paper_total_brokerage = round(brokerage, 2)
         self.paper_net_pnl = round(net, 2)
         self.paper_daily_pnl = round(net, 2)
-        self.paper_capital = round(self.paper_starting_capital + net, 2)
+        base_eq = self.paper_starting_capital if self.paper_starting_capital > 0 else 50000.0
+        self.paper_capital = round(base_eq + net, 2)
         self.paper_available_margin = self.paper_capital
-        self.paper_trades_taken = len(self.paper_completed_trades)
+        if base_eq > 0:
+            self.paper_drawdown_pct = max(0.0, round((base_eq - self.paper_capital) / base_eq * 100, 2))
+        else:
+            self.paper_drawdown_pct = 0.0
+        self.paper_trades_taken = sum(1 for t in self.paper_completed_trades if not (t.get("is_partial") or "Partial" in str(t.get("exit_reason", ""))))
+
+        streak = 0
+        for tr in reversed(self.paper_completed_trades):
+            if tr.get("is_partial") or "Partial" in str(tr.get("exit_reason", "")):
+                continue
+            if float(tr.get("gross_pnl", 0.0)) < 0:
+                streak += 1
+            else:
+                break
+        if self.execution_mode == "PAPER":
+            self.consecutive_losses = streak
 
 
     def get_snapshot(self) -> Dict[str, Any]:
         """Provides full serializable system snapshot for dashboard."""
+        self.check_and_perform_daily_rollover()
         live_net = float(self.broker_rms.get("net", 0.0) or 0.0)
         live_cash = float(self.broker_rms.get("availablecash", 0.0) or 0.0)
 
@@ -529,7 +963,9 @@ class StateManager:
             "is_panic_active": self.is_panic_active,
             "is_halted": self.is_halted,
             "strategy_status": self.strategy_status,
-            "positions": [pos.to_dict() for pos in self.positions.values() if pos.is_open],
+            "positions": [pos.to_dict() for pos in self.positions.values() if pos.is_open and pos.quantity > 0],
+            "real_positions": [pos.to_dict() for pos in self.positions.values() if pos.is_open and pos.quantity > 0 and not getattr(pos, 'is_paper', False) and getattr(pos, 'execution_mode', '') == 'LIVE'],
+            "paper_positions": [pos.to_dict() for pos in self.positions.values() if pos.is_open and pos.quantity > 0 and (getattr(pos, 'is_paper', False) or getattr(pos, 'execution_mode', '') == 'PAPER')],
             "orders": [ord.to_dict() for ord in list(self.orders.values())[-20:]], # recent 20
             "completed_trades": self.completed_trades[-20:],
             "trade_history": self.trade_history[:50],
@@ -557,13 +993,9 @@ class StateManager:
 
     @staticmethod
     def is_market_open() -> bool:
-        """Checks if current IST time is within active market hours (Mon-Fri 09:15-15:30 IST)."""
-        from datetime import timezone, timedelta, time
-        ist = timezone(timedelta(hours=5, minutes=30))
-        now_ist = datetime.now(ist)
-        if now_ist.weekday() >= 5:
-            return False
-        return time(9, 15) <= now_ist.time() <= time(15, 30)
+        """Checks if current IST time is within active market hours (Mon-Fri 09:15-15:30 IST, non-holiday)."""
+        return is_market_hours()
+
 
     def broadcast_state(self):
         """Enqueues a SystemStateEvent onto the event bus."""

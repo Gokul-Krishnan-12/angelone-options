@@ -1,225 +1,322 @@
-# SmartAPI Low-Frequency Index Options Algorithmic Trading Framework
-### Institutional Liquidity Sweep & Momentum Expansion (ILSME) Sniper Engine with Operator Control Plane
+# 🎯 SmartAPI Algorithmic Options Trading Suite
+### Institutional Index Sniper (Nifty / Sensex) + AI Stock Options Engine (200+ F&O Universe)
+#### Powered by Angel One SmartAPI, Google Gemini 2.5 Flash, React 18 & FastAPI
 
-A production-grade, asynchronous quantitative trading system designed for naked index options buying on Indian derivatives (**Nifty 50**, **Bank Nifty**, and **BSE Sensex**) using Angel One's SmartAPI.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-green.svg)](https://www.python.org/)
+[![Node: 18+](https://img.shields.io/badge/Node-18%2B-orange.svg)](https://nodejs.org/)
+[![FastAPI](https://img.shields.io/badge/Backend-FastAPI%20%7C%20Uvicorn-009688.svg)](https://fastapi.tiangolo.com/)
+[![React](https://img.shields.io/badge/Frontend-React%20%7C%20Vite-61DAFB.svg)](https://react.dev/)
+[![Angel One SmartAPI](https://img.shields.io/badge/Broker-Angel%20One%20SmartAPI-F58220.svg)](https://smartapi.angelbroking.com/)
 
----
-
-## 1. Architectural Highlights
-
-- **Decoupled Dual-Mode Execution Framework**: Complete behavioral parity between simulated **PAPER** execution and **LIVE** exchange routing via the `ExecutionEngine(ABC)` interface abstraction.
-- **Microstructure & Slippage Modeling**:
-  - Buy fill price: $\text{Fill Price}_{\text{Paper, Buy}} = \text{Ask}_{\text{Live}} + (\text{Spread} \times \kappa)$ with $\kappa = 0.20$
-  - Sell fill price: $\text{Fill Price}_{\text{Paper, Sell}} = \text{Bid}_{\text{Live}} - (\text{Spread} \times \kappa)$
-  - Artificial network and matching engine latency simulation (150–300 ms).
-- **Asynchronous Pub/Sub Event Bus**: Unidirectional event pipeline (`TICK` $\rightarrow$ `BAR` $\rightarrow$ `SIGNAL` $\rightarrow$ `ORDER_SUBMIT` $\rightarrow$ `FILL` $\rightarrow$ `POSITION_UPDATE` $\rightarrow$ `TELEMETRY`).
-- **Resilient Instrument Master Loader**: Streams the 37+ MB Angel One `OpenAPIScripMaster.json`, caches locally in SQLite with sub-millisecond strike and ATM lookup queries.
-- **SmartWebSocketV2 Streamer**: Dynamic subscription, heartbeat management (10s ping), automatic reconnection with exponential backoff, and synthetic paper tick generation.
-- **Cyberpunk / Warm Obsidian FinTech UI**: Styled using Gokul Krishnan's personal design identity (`--bg-dark: #121110;`, `--bg-dark-card: #1c1a18;`, and signature burnt orange accent `--accent-orange: #ed4c22;` with glowing indicators).
-- **Navigation & Page Architecture (Inspired by `angelone-swing`)**:
-  - `Overview / Dashboard` (`/`): Telemetry HUD, Spot Radar, Sniper State Machine, Active Positions, Orders.
-  - `Orders & Positions` (`/orders`): Tabs for Active Positions, Order Book, and Completed Trade History with surgical liquidation.
-  - `Paper Trade Agent Hub` (`/paper`): Dedicated Paper Trading Agent with separate Start/Pause controls and simulated microstructure parameters.
-  - `Real Trade Agent Hub` (`/agent`): Dedicated Real Money Agent with separate Start/Pause controls directly executing on Angel One RMS.
-  - `Settings & Broker` (`/settings`): Angel One SmartAPI credentials, live balance fetch & test connection, risk configuration.
-  - `Activity Logs` (`/logs`): Streaming execution audit trail with level filters and keyword search.
-- **Dedicated Dual Agent Controls**:
-  - Separate `Start Paper Agent` / `Pause Paper Agent` buttons.
-  - Separate `Start Real Agent` / `Pause Real Agent` buttons.
-  - Both agents execute the **exact same quantitative principles** (ILSME Sniper strategy, 1.5% sizing, 3% drawdown stop).
-- **Live Angel One RMS Balance Fetching**: Direct query to Angel One's `rmsLimit()` endpoint (`net`, `availablecash`, `collateral`, `utiliseddebits`) with manual or auto-sync.
+A production-ready algorithmic trading and risk management platform designed for the Indian derivatives market (NSE & BSE). The system integrates **low-frequency quantitative index options buying** with an **autonomous LLM-powered stock options engine** capable of scanning, planning, and executing defined-risk intraday option setups.
 
 ---
 
-## 2. Directory Layout
+## 📑 Table of Contents
+1. [System Architecture & Capabilities](#-system-architecture--capabilities)
+2. [Required Keys & Credentials (Complete Guide)](#-required-keys--credentials-complete-guide)
+3. [Quickstart & Installation](#-quickstart--installation)
+4. [How to Use the App (Step-by-Step Guide)](#-how-to-use-the-app-step-by-step-guide)
+5. [The Two Trading Systems Explained](#-the-two-trading-systems-explained)
+6. [Telegram Copilot & Remote Controls](#-telegram-copilot--remote-controls)
+7. [Production Deployment & Server Commands](#-production-deployment--server-commands)
+8. [Risk Rules & Circuit Breakers](#-risk-rules--circuit-breakers)
+9. [Troubleshooting & FAQs](#-troubleshooting--faqs)
+
+---
+
+## 🏛️ System Architecture & Capabilities
+
+The platform operates two independent, friction-hardened trading engines sharing a centralized risk controller:
 
 ```
-options/
-├── frontend/                  # Modern React UI (Vite, Vanilla CSS, Lucide Icons)
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── Header.jsx         # Controls, heartbeat, mode switch & panic switch
-│   │   │   ├── MetricsHud.jsx     # Real-time P&L, Equity, Margin, Risk Drawdown gauge
-│   │   │   ├── MarketRadar.jsx    # Spot NIFTY, BANKNIFTY, SENSEX, VWAP & levels
-│   │   │   ├── SniperMonitor.jsx  # ILSME state machine & trigger simulator
-│   │   │   ├── PositionsTable.jsx # Derivatives positions with surgical liquidation
-│   │   │   ├── OrdersTable.jsx    # Working & filled orders audit trail
-│   │   │   ├── EventConsole.jsx   # Live event console with search filter
-│   │   │   └── Modals.jsx         # Mode switch & panic confirmation modals
-│   │   ├── App.jsx                # Reactive WebSocket telemetry coordinator
-│   │   └── index.css              # Cyber-fintech dark glassmorphism design system
-│   ├── vite.config.js         # Proxy configuration to FastAPI backend (port 8000)
-│   └── package.json
-├── smartapi_trader/
-│   ├── config/
-│   │   ├── settings.yaml      # Broker credentials, risk limits, trading parameters
-│   │   └── symbols.yaml       # Index tokens, lot sizes, exchange segments
-│   ├── core/
-│   │   ├── event_bus.py       # Async pub/sub event router
-│   │   ├── events.py          # Event dataclasses (Tick, Bar, Signal, Order, Fill)
-│   │   └── state_manager.py   # Centralized position, order, and P&L state tracker
-│   ├── data/
-│   │   ├── instrument_loader.py # Resilient scrip master loader & SQLite indexer
-│   │   ├── stream_client.py   # SmartWebSocketV2 wrapper with auto-reconnect
-│   │   └── candle_builder.py  # Real-time tick-to-ohlcv aggregator (3m, 15m, VWAP)
-│   ├── strategy/
-│   │   ├── base_strategy.py   # Abstract strategy class
-│   │   └── sniper_ilsme.py    # Institutional Liquidity Sweep & Momentum Expansion logic
-│   ├── risk/
-│   │   └── risk_manager.py    # Position sizing, daily drawdown, hard limits, circuit breakers
-│   ├── execution/
-│   │   ├── base_engine.py     # Abstract execution engine interface
-│   │   ├── paper_engine.py    # In-memory execution simulation with slippage/latency modeling
-│   │   └── live_smartapi.py   # Production Angel One REST API integration (<=10 req/s)
-│   ├── web/
-│   │   └── app.py             # FastAPI server with WebSocket state streaming & React serving
-│   └── utils/
-│       ├── auth.py            # TOTP auto-generation and JWT session refresher
-│       └── logger.py          # Loguru structured logging with daily file rotation
-├── main.py                    # Orchestration entry point
-└── requirements.txt
+                                  ┌───────────────────────────────┐
+                                  │      Angel One SmartAPI       │
+                                  │   (WebSocket V2 + REST RMS)   │
+                                  └───────────────┬───────────────┘
+                                                  │
+                 ┌────────────────────────────────┴────────────────────────────────┐
+                 ▼                                                                 ▼
+   ┌─────────────────────────────┐                                   ┌─────────────────────────────┐
+   │    Index Options Sniper     │                                   │   AI Stock Options Engine   │
+   │  (NIFTY 50 / BSE SENSEX)    │                                   │     (200+ NSE F&O Stocks)   │
+   ├─────────────────────────────┤                                   ├─────────────────────────────┤
+   │ • 15m Macro Liquidity Sweep │                                   │ • Gemini 2.5 Flash / GPT-4o │
+   │ • 3m MSS & VWAP Cross       │                                   │ • Overnight Strategy Plan   │
+   │ • Displacement Stop-Limits  │                                   │ • Real-Time Intraday Scans  │
+   │ • Breakeven & Dynamic Trail │                                   │ • Sector & Volume Confluence│
+   │ • SEBI 0-DTE Morning Guard  │                                   │ • High-Beta 1:2.0 R:R Rules │
+   └──────────────┬──────────────┘                                   └──────────────┬──────────────┘
+                  │                                                                 │
+                  └───────────────────────────────┬─────────────────────────────────┘
+                                                  ▼
+                                  ┌───────────────────────────────┐
+                                  │   Centralized Risk Manager    │
+                                  │  • 4.5% Daily Drawdown Circuit│
+                                  │  • Max 2 Trades / 2 SL Losses │
+                                  │  • Capital Floor & Sizing Math│
+                                  │  • Emergency Global Panic Stop│
+                                  └───────────────┬───────────────┘
+                                                  │
+                 ┌────────────────────────────────┴────────────────────────────────┐
+                 ▼                                                                 ▼
+   ┌─────────────────────────────┐                                   ┌─────────────────────────────┐
+   │    Cyberpunk Web Control    │                                   │   Telegram Copilot & Bot    │
+   │    (React 18 SPA HUD)       │                                   │  (Live Alerts + OTP Auth)   │
+   └─────────────────────────────┘                                   └─────────────────────────────┘
 ```
 
 ---
 
-## 3. Quantitative Strategy Mechanics: ILSME Sniper
+## 🔑 Required Keys & Credentials (Complete Guide)
 
-Naked options buying during consolidation suffers from negative expectancy due to rapid theta decay ($\Theta = \partial V / \partial t$) and bid-ask friction. The **Institutional Liquidity Sweep and Momentum Expansion (ILSME)** framework targets low-frequency, high-impulse turning points:
+Before running the application, you need three sets of credentials:
 
-1. **15-Minute Macro Timeframe**:
-   - Monitors Previous Day High (PDH), Previous Day Low (PDL), and Session Extremes.
-   - **Liquidity Sweep**: Price breaches the extreme to trigger stop orders and breakout buyers/sellers, but closes back inside the prior range with a prominent rejection wick ($\text{wick} \ge 30\%$ of total candle range).
-2. **3-Minute Micro Timeframe**:
-   - **Market Structure Shift (MSS)**: Strong displacement bar crossing the session Volume-Weighted Average Price (VWAP) in the reversal direction.
-   - **Fair Value Gap (FVG)**: Imbalance where Candle 3 does not overlap Candle 1:
-     - Bullish FVG: $\text{Candle 3 Low} > \text{Candle 1 High}$
-     - Bearish FVG: $\text{Candle 3 High} < \text{Candle 1 Low}$
-   - **Limit Entry**: Enters on price retracement into the FVG boundary.
-3. **Volume Filter**:
-   - Target option contract tick volume must exceed $1.8 \times$ its 20-period moving average.
-4. **Dynamic Strike Selection & SEBI Compliance**:
-   - Targets ATM or immediate ITM options with delta $\Delta \in [0.48, 0.60]$.
-   - **Nifty 50**: Weekly expiries (Lot size: 65)
-   - **Bank Nifty**: Monthly contracts exclusively (Lot size: 30)
-   - **Sensex**: Weekly expiries (Lot size: 20)
-   - **Morning 0-DTE Protection**: On expiration days, trading 0-DTE contracts before 13:00 IST is blocked to prevent morning theta crush; orders automatically roll to the subsequent contract cycle.
+### 1. Angel One SmartAPI (Broker Connectivity)
+| Setting Key | Description | Where to Get It |
+| :--- | :--- | :--- |
+| `api_key` | SmartAPI Trading Application Key | Create an app on [smartapi.angelbroking.com](https://smartapi.angelbroking.com/) |
+| `client_code` | Your Angel One Client ID | E.g. `AACI163472` (from your Angel One profile) |
+| `pin` | 4-Digit Login PIN | Your Angel One account MPIN |
+| `totp_secret` | 2FA Base32 Secret Key | See below on how to obtain |
+
+#### 💡 How to Get Your `totp_secret`:
+1. Log into your Angel One mobile app or web portal.
+2. Go to **Security / Enable Authenticator (TOTP)**.
+3. Angel One will show a QR code. Click on **"Can't scan QR?"** or **"Copy Key"**.
+4. You will receive a 16–32 character alphanumeric string (e.g. `JBSWY3DPEHPK3PXP`).
+5. Paste this key into `totp_secret`. The system generates time-based OTPs automatically on every login.
 
 ---
 
-## 4. Risk Engineering & Capital Preservation
+### 2. AI Brain API Keys (Stock Options Analysis)
+You can choose either **Google Gemini** (Recommended: free tier, fastest) or **OpenAI**:
 
-Sustainable account growth requires minimizing portfolio variance ($\sigma^2$) to eliminate volatility drag:
+| Provider | Setting Key | Default Model | Where to Get It |
+| :--- | :--- | :--- | :--- |
+| **Google Gemini** *(Recommended)* | `gemini_api_key` | `gemini-2.5-flash` | Get a free API key at [aistudio.google.com](https://aistudio.google.com/) |
+| **OpenAI** | `openai_api_key` | `gpt-4o-mini` | Generate an API key at [platform.openai.com](https://platform.openai.com/api-keys) |
 
-$$R_{\text{compound}} \approx \mu - \frac{\sigma^2}{2}$$
-
-### Position Sizing Formulation
-For liquid capital $C_t$ and risk fraction $\alpha = 0.015$ (1.5% of equity):
-
-$$R_{\text{trade}} = C_t \times \alpha$$
-$$\text{Unit Risk} = P_{\text{entry}} - P_{\text{stop}}$$
-$$N = \left\lfloor \frac{R_{\text{trade}}}{\text{Unit Risk} \times L} \right\rfloor$$
-
-If $N = 0$, the risk manager rejects the order.
-
-### Multi-Stage Position Management
-- **Initial Hard Stop-Loss**: Placed at displacement candle invalidation (~10%–15% option premium decline).
-- **Stage 1 (Breakeven Trigger)**: At $+1.0R$ profit, the stop-loss moves to the entry price ($P_{\text{entry}}$), eliminating all downside risk.
-- **Stage 2 (Partial Profit Booking)**: At $+2.0R$ profit, 60% of open lots are closed via marketable limit order.
-- **Stage 3 (Swing Trailing)**: The remaining 40% trail closed 3-minute candle swings until target invalidation or market close.
-
-### Hard Account Circuit Breakers
-| Risk Parameter | Enforcement Boundary | Automated System Action |
-|---|---|---|
-| **Max Trades Per Day** | Exactly 2 completed trades | Halts signal evaluation for the session |
-| **Max Daily Drawdown** | 3.0% of starting equity | Liquidates positions, cancels orders, shuts down engine |
-| **Consecutive Loss Circuit**| 2 consecutive losses | Locks order generation until the next trading day |
-| **Midday Chop Filter** | 11:15 to 13:30 IST | Rejects new entries; manages existing positions only |
-| **Mandatory EOD Square-Off**| 15:12 IST | Cancels open orders, closes all positions at market |
-| **Slippage Threshold** | $> 2.0\%$ deviation | Aborts entry to avoid chasing spikes |
+> [!TIP]
+> Google Gemini 2.5 Flash is recommended. It delivers comprehensive market reasoning, calculates support/resistance triggers, and evaluates sectoral momentum in under 1.5 seconds.
 
 ---
 
-## 5. Quickstart & Installation
+### 3. Telegram Bot (Alerts & Mobile Control)
+| Setting Key | Description | Where to Get It |
+| :--- | :--- | :--- |
+| `bot_token` | Telegram Bot Token | Create a bot via [@BotFather](https://t.me/botfather) on Telegram |
+| `chat_id` | Your Personal Telegram Numeric ID | Message [@userinfobot](https://t.me/userinfobot) to get your chat ID |
 
-### Step 1: Create Virtual Environment & Install Dependencies
+The bot provides real-time notifications for trade entries, target hits, stop-loss movements, 2FA OTP verification, and commands to pause/start or trigger panic liquidation remotely.
+
+---
+
+## 🚀 Quickstart & Installation
+
+### Step 1: Clone Repository & Setup Virtual Environment
 ```bash
+git clone https://github.com/Gokul-Krishnan-12/angelone-options.git
+cd angelone-options
+
+# Create Python virtual environment
 python3 -m venv venv
 source venv/bin/activate
+
+# Install backend dependencies
 pip install -r requirements.txt
 ```
 
-### Step 2: Configure Settings
-Edit `smartapi_trader/config/settings.yaml` with your Angel One SmartAPI credentials:
+### Step 2: Configure Credentials
+Copy the example configuration:
+```bash
+cp smartapi_trader/config/settings.example.yaml smartapi_trader/config/settings.yaml
+```
+
+Edit `smartapi_trader/config/settings.yaml` and enter your keys:
 ```yaml
 broker:
-  api_key: "YOUR_SMARTAPI_API_KEY"
+  api_key: "YOUR_SMARTAPI_KEY"
   client_code: "YOUR_CLIENT_CODE"
-  pin: "YOUR_PIN"
+  pin: "YOUR_4_DIGIT_PIN"
   totp_secret: "YOUR_BASE32_TOTP_SECRET"
 
+ai:
+  provider: "GEMINI"              # GEMINI or OPENAI
+  model: "gemini-2.5-flash"
+  gemini_api_key: "YOUR_GEMINI_API_KEY"
+  openai_api_key: ""
+
+telegram:
+  enabled: true
+  bot_token: "YOUR_TELEGRAM_BOT_TOKEN"
+  chat_id: "YOUR_TELEGRAM_CHAT_ID"
+
 execution:
-  execution_mode: "PAPER"   # Set to "PAPER" for simulation or "LIVE" for broker routing
+  execution_mode: "PAPER"         # "PAPER" for simulation, "LIVE" for broker execution
 ```
 
-> **Note**: If left with placeholder credentials, the system automatically runs in high-fidelity simulated **PAPER** mode with simulated tick streaming so you can explore all features immediately.
+Alternatively, you can configure these keys dynamically directly through the web UI under **Settings (`/settings`)**.
 
-### Step 3: Launch Engine & Operator Web Dashboard
+### Step 3: Launch the Application
 
-#### Unified Production Server (FastAPI + Built React SPA)
+#### Option A: Unified Production Server (Recommended)
+This serves both the FastAPI REST/WebSocket backend and the compiled React production frontend on a single port:
 ```bash
-python main.py
+# Build frontend bundle
+cd frontend && npm install && npm run build && cd ..
+
+# Launch backend & dashboard
+./venv/bin/python main.py
 ```
-Open **`http://localhost:8000`** in your browser.
+Open **`http://localhost:5000`** in your browser.
 
-#### Vite React Development Server (Hot Module Reloading)
-In a separate terminal:
+#### Option B: Development Mode (Hot Reloading)
 ```bash
+# Terminal 1: Backend
+./venv/bin/python main.py
+
+# Terminal 2: React Dev Server
 cd frontend
 npm run dev
 ```
-Open **`http://localhost:3000`** (requests to `/api` and `/ws` automatically proxy to the Python backend on port 8000).
+Open **`http://localhost:5173`** in your browser (proxies API & WebSocket calls to port 5000).
 
-To rebuild the React production bundle after making frontend changes:
-```bash
-cd frontend
-npm run build
+---
+
+## 🖥️ How to Use the App (Step-by-Step Guide)
+
+### 1. Dashboard Overview (`/`)
+* **Real-time Telemetry HUD**: Shows today's Net P&L, Account Equity, Available Margin, and the 4.5% Daily Drawdown circuit gauge.
+* **Spot Market Radar**: Live spot levels, session VWAP, and Previous Day High/Low for Nifty 50 and Sensex.
+* **Sniper State Machine**: Shows the live algorithmic phase: `Scanning` $\rightarrow$ `Sweep Detected` $\rightarrow$ `Displacement Armed` $\rightarrow$ `In Trade`.
+* **Surgical Panic Button**: One-click kill switch to halt all engines, cancel resting exchange orders, and liquidate open positions immediately.
+
+### 2. Paper vs Live Agent Controls
+The app features isolated agent controls in the navigation bar:
+* **Paper Trading Hub (`/paper`)**: Executes trades in a realistic virtual sandbox modeled with bid-ask spread slippage (0.2x spread) and simulated order latency (150–250ms).
+* **Live Trading Hub (`/agent`)**: Routes native RMS orders directly to Angel One's matching engines with strict pre-trade checks.
+* Both engines adhere to the same quantitative discipline, risk limits, and exit rules.
+
+### 3. Stock Options AI Hub (`/stock-options-paper-trading` & `/stock-options-trading`)
+* **⚡ Scan Live Markets Now**: Triggers the AI scanner to analyze 200+ NSE F&O stocks against live market breadth, VWAP confluence, sector momentum, and OI buildup.
+* **Armed Candidates**: Setups waiting for breakout or dip confirmation (e.g., "Waiting for breakout: Spot ₹991.00 < Trigger ₹995.00"). Once triggered, the trade executes automatically.
+* **Expected Profit & Max Risk Math**: Cards clearly display the contract (strike + type), entry premium, stop-loss (-12%), Target 1 (+1.8R to +2.0R), expected INR profit, and maximum INR risk.
+
+### 4. Overnight AI Planner (`/overnight-ai-planner`)
+* Run before market open (08:30–09:00 IST) or after market close.
+* Scans the full F&O universe, identifies multi-day trend continuations, and formulates high-conviction trade cards ready for the opening bell.
+
+### 5. Architectural Workflow (`/workflow`)
+* Explains the entire mathematical mechanics of both quantitative index trading and AI stock options.
+* Illustrates trade lifecycles, retest validation rules, and circuit breaker logic.
+
+### 6. Settings (`/settings`)
+* Live broker balance sync (Cash, Collateral, Net Equity).
+* Test broker connectivity and refresh session.
+* Configure risk parameters (risk per trade, max loss, trailing buffers).
+
+---
+
+## 📊 The Two Trading Systems Explained
+
+### System 1: Index Options Quantitative Sniper
+* **Underlyings**: Nifty 50, BSE Sensex, Bank Nifty.
+* **Methodology**: Low-frequency institutional setup.
+  1. **15-Minute Macro Sweep**: Spot breaches Previous Day High (PDH) or Low (PDL) and rejects with a long wick ($\ge 30\%$).
+  2. **3-Minute MSS & Displacement**: Aggressive expansion candle displacing across Session VWAP.
+  3. **Stop-Limit Entry**: Order placed at the breakout boundary; eliminates chasing and adverse selection.
+  4. **Dynamic Trade Management**:
+     * Protective Hard SL (-12% premium).
+     * Breakeven shift armed once profit reaches **$\ge +0.65\text{R}$ to $+0.85\text{R}$** (preventing premature 1-second noise exits).
+     * Target 1 partial booking (+2.0R) and remainder runner trailing.
+
+### System 2: AI Stock Options Engine
+* **Underlyings**: Top 200+ NSE F&O Stocks.
+* **Methodology**: Autonomous AI multi-factor screener.
+  1. **Sector Alignment**: Stock must align with sector momentum (e.g., FMCG, IT, Auto, Banking).
+  2. **Technical Filtering**: Relative Volume (RVOL) $\ge 1.5\times$, VWAP clearance $\ge 0.5\%$, OI buildup verification.
+  3. **High-Beta Adaptive R:R**: Enforces minimum **1:2.0 Risk-to-Reward** for volatile stocks and **1:1.8** for standard large-caps.
+  4. **Conditional Execution**: Setups are armed with entry triggers (breakout or pullback dip) and structural invalidation levels.
+
+---
+
+## 📱 Telegram Copilot & Remote Controls
+
+Connect your Telegram bot to receive instant alerts and remotely control your bot:
+
+```
+                      TELEGRAM OPERATOR CHAT
+                                │
+          ┌─────────────────────┴─────────────────────┐
+          ▼                                           ▼
+   Real-Time Alerts                           Remote Commands
+   • 🟢 Trade Entry Alert                     • /status   - Strategy & position audit
+   • 🎯 Target 1 Booked                       • /balance  - Angel One cash & margin
+   • 🛡️ Breakeven Shift                        • /report   - Today's detailed P&L
+   • 🛑 Stop-Loss Executed                    • /start_real - Arm live execution
+   • 🔐 2FA OTP Request                       • /pause_real - Halt live trading
+                                              • /panic    - Emergency liquidation
 ```
 
 ---
 
-## 6. Operator Web Control Plane Features
+## 🛠️ Production Deployment & Server Commands
 
-- **Mode Segregation Display**:
-  - `PAPER TRADING [Simulated]` (Cyan)
-  - `LIVE TRADING [Angel One RMS]` (Crimson/Emerald)
-  - Interactive safety confirmation modal before switching to LIVE.
-- **Global Panic / Kill Switch**: Prominent red button that immediately halts the strategy, cancels all pending orders, and liquidates active positions at market.
-- **Real-Time Telemetry HUD**: Live P&L (₹ and %), Account Equity, Available Margin, 3.0% Daily Drawdown Gauge, and Trade Budget Counter ("X of 2 Trades Taken").
-- **Market Radar**: Live spot prices, session VWAP, and PDH/PDL structural levels for NIFTY, BANKNIFTY, and SENSEX.
-- **Sniper State Machine**: Visual state indicator displaying:
-  $$\text{Scanning} \longrightarrow \text{Sweep Detected} \longrightarrow \text{FVG Armed} \longrightarrow \text{In Trade}$$
-- **Interactive Trigger Simulator**: Buttons to fire test sniper setups for Nifty CE/PE and Bank Nifty CE directly from the UI.
-- **Active Positions Table**: Real-time position tracking with individual surgical **Liquidate** buttons.
-- **Live Event Console**: Real-time auto-scrolling log console streaming Loguru telemetry over WebSockets.
+For running 24/7 on an Ubuntu Linux VPS (e.g., AWS EC2, Oracle Cloud):
 
----
-
-## 7. Production Deployment (Linux VPS / systemd)
-
-For production deployment on an Ubuntu 22.04 LTS VPS (e.g. AWS `ap-south-1` in Mumbai with an Elastic IP whitelisted on SmartAPI):
-
-### 1. Install systemd Service
-Copy `smartapi_trader.service` to `/etc/systemd/system/`:
+### 1. Systemd Service Setup
 ```bash
-sudo cp smartapi_trader.service /etc/systemd/system/smartapi_trader.service
+sudo cp smartapi_trader.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable smartapi_trader
 sudo systemctl start smartapi_trader
 ```
 
-### 2. Secure Access via SSH Tunnel
-Access the dashboard securely without exposing ports publicly:
-```bash
-ssh -L 8000:localhost:8000 user@your_vps_ip
-```
-Then navigate to `http://localhost:8000` in your local browser.
+### 2. Common Maintenance Commands
+| Action | Shell Command |
+| :--- | :--- |
+| **Check Status** | `sudo systemctl status smartapi_trader` |
+| **Restart Service** | `sudo systemctl restart smartapi_trader` |
+| **Stop Service** | `sudo systemctl stop smartapi_trader` |
+| **View Live Logs** | `journalctl -u smartapi_trader -f` |
+| **View Application Log** | `tail -f logs/trader_$(date +%F).log` |
+| **Rebuild Frontend** | `cd frontend && npm run build && cd .. && sudo systemctl restart smartapi_trader` |
+| **Run Regression Tests** | `./venv/bin/python scripts/run_regression_tests.py` |
+
+---
+
+## 🛡️ Risk Rules & Circuit Breakers
+
+To guarantee long-term survival, the system enforces non-negotiable capital safety rules:
+
+| Risk Rule | Boundary | System Response |
+| :--- | :--- | :--- |
+| **Max Daily Loss** | ₹5,000 / 4.5% Equity | Shuts down engine, liquidates all open positions |
+| **Daily Trade Quota** | Exactly 2 completed trades | Halts further entries for the day |
+| **Consecutive Losses** | 2 consecutive stop-outs | Freezes new orders until next morning session |
+| **Midday Chop Filter** | 11:30–12:30 IST | Blocks new entries during low-volume lunchtime chop |
+| **EOD Mandatory Square-Off** | 15:12 IST | Liquidates all intraday derivative positions at market |
+| **0-DTE Morning Guard** | Before 13:00 IST | Blocks same-day expiring contracts to avoid morning theta burn |
+| **Noise-Filtered Breakeven** | $\ge 0.65\text{R}$ verified gain | Protects trades from exiting on 10-paise bid-ask jitter |
+
+---
+
+## ❓ Troubleshooting & FAQs
+
+### Q: Why does the system ask for an OTP?
+Angel One requires a daily TOTP handshake. The system handles this automatically using your `totp_secret`. If Angel One triggers an SMS/Telegram 2FA prompt, the bot sends an alert to your Telegram chat with a direct link or prompt to verify.
+
+### Q: Why did the scanner take 0 trades today?
+1. The scanner checks underlying conditions (breakout triggers, VWAP clearance, and volume). If the market is choppy or consolidating, trades are withheld to protect capital.
+2. Orders are armed and wait for the underlying spot to cross the specified entry trigger. If the stock does not reach the trigger, it expires safely without entering.
+
+### Q: Can I run both Paper and Live trading simultaneously?
+Yes. Paper trading operates in an isolated virtual sandbox, allowing you to test AI discoveries and index triggers without routing orders to the exchange.
+
+---
+
+## ⚖️ Disclaimer
+
+*This software is intended for educational, quantitative research, and paper-simulation purposes. Trading derivatives, options, and futures involves substantial risk of loss. Always perform comprehensive backtesting and paper simulation before allocating live capital. The authors assume no responsibility for financial losses incurred through the use of this system.*

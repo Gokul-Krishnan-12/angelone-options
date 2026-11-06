@@ -26,14 +26,15 @@ pnpm-debug.log*
 
 # SQLite & Data caches
 *.db
+*.db-*
 *.sqlite3
 data/*.db
+data/*.db-*
 data/instruments.db
 data/trading_storage.db
 
 # Frontend dependencies & build artifacts
 frontend/node_modules/
-frontend/dist/
 frontend/dist-ssr/
 frontend/.oxlint_cache/
 
