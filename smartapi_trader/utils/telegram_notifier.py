@@ -23,8 +23,8 @@ class TelegramNotifier:
         self._executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=3, thread_name_prefix="TelegramNotifier"
         )
-        self.bot_token = str(self.config.get("bot_token", "8834022656:AAGsTEx46GIgP7XBar5Z4URNP2oEvZGfojM")).strip()
-        self.chat_id = str(self.config.get("chat_id", "650527213")).strip()
+        self.bot_token = str(self.config.get("bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN", "")).strip()
+        self.chat_id = str(self.config.get("chat_id") or os.environ.get("TELEGRAM_CHAT_ID", "")).strip()
         self.enabled = bool(self.config.get("enabled", True))
         self._last_panic_alert_time = 0.0
         self._last_panic_reason = ""

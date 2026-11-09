@@ -5,6 +5,7 @@ Live Trading Agent, and Paper Trading Agent.
 """
 
 from datetime import datetime
+from smartapi_trader.utils.tz import now_ist
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Optional
@@ -272,7 +273,7 @@ async def test_ai_connection():
     shortlist = so_ctx.market_data.rank_and_shortlist_stocks(candidate_symbols=["RELIANCE", "TCS"], max_shortlist=2)
     res = await so_ctx.ai_service.analyze(
         run_type="INTRADAY_SCAN",
-        intended_date="2026-10-30",
+        intended_date=now_ist().strftime("%Y-%m-%d"),
         stock_data=shortlist,
         market_context={"test": True},
         max_candidates=2
