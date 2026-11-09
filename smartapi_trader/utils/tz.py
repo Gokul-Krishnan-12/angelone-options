@@ -5,12 +5,10 @@ Provides dynamic synchronization with official NSE holiday calendars and persist
 """
 
 import json
-import logging
 from datetime import datetime, timezone, timedelta, time
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
-
-logger = logging.getLogger("smartapi_trader.tz")
+from smartapi_trader.utils.logger import logger
 
 # Indian Standard Time (IST) is UTC+05:30 with no daylight saving time
 IST = timezone(timedelta(hours=5, minutes=30), name="IST")
