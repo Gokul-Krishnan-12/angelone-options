@@ -19,9 +19,19 @@ NSE_HOLIDAYS = {
     # 2026
     "2026-01-26", "2026-02-15", "2026-03-03", "2026-03-20", "2026-04-03",
     "2026-04-14", "2026-05-01", "2026-05-27", "2026-06-25", "2026-08-15",
-    "2026-09-14", "2026-10-02", "2026-10-20", "2026-11-08", "2026-11-09",
+    "2026-09-14", "2026-10-02", "2026-10-20",
     "2026-11-24", "2026-12-25"
 }
+
+
+def add_holiday(date_str: str) -> None:
+    """Dynamically register a date string (YYYY-MM-DD) as an exchange holiday."""
+    NSE_HOLIDAYS.add(date_str)
+
+
+def remove_holiday(date_str: str) -> None:
+    """Dynamically remove a date string (YYYY-MM-DD) from exchange holidays if incorrectly flagged."""
+    NSE_HOLIDAYS.discard(date_str)
 
 
 def now_ist() -> datetime:

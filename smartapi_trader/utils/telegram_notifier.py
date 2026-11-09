@@ -10,7 +10,7 @@ import urllib.request
 import urllib.error
 import concurrent.futures
 from typing import Any, Dict, List, Optional, Tuple
-from smartapi_trader.utils.tz import now_ist
+from smartapi_trader.utils.tz import now_ist, is_trading_day
 from smartapi_trader.utils.logger import logger
 
 class TelegramNotifier:
@@ -586,7 +586,7 @@ class TelegramBotController:
 
     def _cmd_health(self) -> str:
         """Detailed server and stream diagnostic health check."""
-        from smartapi_trader.utils.tz import now_ist
+        from smartapi_trader.utils.tz import now_ist, is_trading_day
         now = now_ist()
         now_t = now.time()
         is_weekday = (now.weekday() < 5)
@@ -686,7 +686,16 @@ class TelegramBotController:
             if so_live or so_paper:
                 so_live_st = getattr(so_live, "status", "IDLE") if so_live else "N/A"
                 so_paper_st = getattr(so_paper, "status", "IDLE") if so_paper else "N/A"
-                so_scanner_st = "RUNNING" if getattr(so_scanner, "is_active", False) else "IDLE"
+                if getattr(so_scanner, "is_active", False):
+                    now = now_ist()
+                    if not is_trading_day(now):
+                        so_scanner_st = "HOLIDAY"
+                    elif hasattr(so_scanner, "session_start") and hasattr(so_scanner, "session_end") and not (so_scanner.session_start <= now.time() <= so_scanner.session_end):
+                        so_scanner_st = "OFF-HOURS"
+                    else:
+                        so_scanner_st = "SCANNING"
+                else:
+                    so_scanner_st = "IDLE"
                 so_status_line = f"🎯 <b>Stock Options:</b> Live={so_live_st} | Paper={so_paper_st} | Radar={so_scanner_st}\n"
 
         return (
@@ -1008,7 +1017,16 @@ class TelegramBotController:
         if not self.orchestrator or not hasattr(self.orchestrator, "intraday_scanner") or not self.orchestrator.intraday_scanner:
             return "❌ Stock Options Scanner not initialized."
         scanner = self.orchestrator.intraday_scanner
-        status_badge = "🟢 RUNNING" if scanner.is_active else "🟡 IDLE"
+        now = now_ist()
+        if not scanner.is_active:
+            status_badge = "🟡 IDLE"
+        elif not is_trading_day(now):
+            status_badge = "🏖️ PAUSED (NSE Trading Holiday / Weekend)"
+        elif hasattr(scanner, "session_start") and hasattr(scanner, "session_end") and not (scanner.session_start <= now.time() <= scanner.session_end):
+            status_badge = f"🌙 STANDBY (Outside Session: Active {scanner.session_start.strftime('%H:%M')}–{scanner.session_end.strftime('%H:%M')} IST)"
+        else:
+            status_badge = "🟢 RUNNING (Active Market Session)"
+
         scanning_badge = "⏳ Scanning..." if scanner.is_scanning else "Sleeping"
         last_scan_str = "Never"
         if scanner._last_scan_time > 0:

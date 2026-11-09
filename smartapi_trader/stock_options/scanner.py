@@ -148,6 +148,7 @@ class IntradayAIScanner:
 
     async def _scanner_loop(self):
         """Continuous scheduled loop running at configured intervals."""
+        last_logged_hour = -1
         while self.is_active:
             try:
                 now = now_ist()
@@ -163,6 +164,14 @@ class IntradayAIScanner:
 
                     if elapsed_secs >= target_interval_secs:
                         await self.execute_scan(is_manual=False)
+                else:
+                    # Provide informative telemetry so operator/logs show why radar isn't scanning
+                    if now.hour != last_logged_hour and dt_time(9, 0) <= now.time() <= dt_time(15, 30):
+                        last_logged_hour = now.hour
+                        if not is_trading_day(now):
+                            logger.info(f"[INTRADAY_SCANNER] Scanner paused: Today ({now.strftime('%Y-%m-%d')}) is an exchange holiday or weekend.")
+                        else:
+                            logger.info(f"[INTRADAY_SCANNER] Scanner standby: Current time {now.strftime('%H:%M:%S')} is outside active session ({self.session_start.strftime('%H:%M')} - {self.session_end.strftime('%H:%M')} IST).")
 
                 # Sleep in short increments to allow rapid stop/pause response
                 await asyncio.sleep(10)
