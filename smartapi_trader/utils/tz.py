@@ -67,8 +67,41 @@ NSE_HOLIDAYS = set(NSE_HOLIDAYS_MAP.keys())
 HOLIDAYS_CACHE_FILE = Path(__file__).resolve().parent.parent.parent / "data" / "nse_holidays.json"
 
 
+def now_ist() -> datetime:
+    """Returns the current datetime in Indian Standard Time (IST)."""
+    return datetime.now(IST)
+
+
+def ist_time() -> time:
+    """Returns the current time of day in Indian Standard Time (IST)."""
+    return datetime.now(IST).time()
+
+
+def ist_date_str(fmt: str = "%Y-%m-%d") -> str:
+    """Returns today's date formatted in Indian Standard Time (IST)."""
+    return datetime.now(IST).strftime(fmt)
+
+
+def _seed_fixed_national_holidays(year: int):
+    """
+    Seeds perpetual Indian statutory national market holidays for a given year.
+    These dates are legally fixed and do not vary across future years (2027, 2028, 2029+).
+    """
+    fixed = {
+        f"{year}-01-26": "Republic Day",
+        f"{year}-05-01": "Maharashtra Day",
+        f"{year}-08-15": "Independence Day",
+        f"{year}-10-02": "Mahatma Gandhi Jayanti",
+        f"{year}-12-25": "Christmas",
+    }
+    for d, desc in fixed.items():
+        if d not in NSE_HOLIDAYS_MAP:
+            NSE_HOLIDAYS_MAP[d] = desc
+            NSE_HOLIDAYS.add(d)
+
+
 def _load_cached_holidays():
-    """Loads locally cached holidays from disk if available."""
+    """Loads locally cached holidays from disk if available and seeds perpetual national holidays."""
     global NSE_HOLIDAYS_MAP, NSE_HOLIDAYS
     if HOLIDAYS_CACHE_FILE.exists():
         try:
@@ -84,6 +117,11 @@ def _load_cached_holidays():
                     logger.debug(f"[TZ] Loaded {len(NSE_HOLIDAYS_MAP)} trading holidays from local cache.")
         except Exception as e:
             logger.warning(f"[TZ] Failed reading cached holidays: {e}")
+
+    # Ensure current and next calendar years have perpetual national holidays seeded
+    cur_yr = now_ist().year
+    _seed_fixed_national_holidays(cur_yr)
+    _seed_fixed_national_holidays(cur_yr + 1)
 
 
 def _save_cached_holidays(last_synced: Optional[str] = None):
@@ -106,21 +144,6 @@ def _save_cached_holidays(last_synced: Optional[str] = None):
 
 # Initialize cache on module import
 _load_cached_holidays()
-
-
-def now_ist() -> datetime:
-    """Returns the current datetime in Indian Standard Time (IST)."""
-    return datetime.now(IST)
-
-
-def ist_time() -> time:
-    """Returns the current time of day in Indian Standard Time (IST)."""
-    return datetime.now(IST).time()
-
-
-def ist_date_str(fmt: str = "%Y-%m-%d") -> str:
-    """Returns today's date formatted in Indian Standard Time (IST)."""
-    return datetime.now(IST).strftime(fmt)
 
 
 def is_market_holiday(dt: Optional[datetime] = None) -> bool:

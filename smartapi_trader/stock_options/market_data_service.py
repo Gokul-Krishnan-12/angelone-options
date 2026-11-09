@@ -112,7 +112,8 @@ class StockMarketDataService:
         )
 
         strike_val = contract.get("strike", spot) if contract else spot
-        expiry_str = contract.get("expiry", "26-NOV-2026") if contract else "26-NOV-2026"
+        default_exp = (datetime.now() + timedelta(days=25)).strftime("%d-%b-%Y").upper()
+        expiry_str = contract.get("expiry", default_exp) if contract else default_exp
 
         # Try to query live option LTP and Open Interest from Angel One if connected
         live_opt_ltp = 0.0
