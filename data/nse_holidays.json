@@ -1,0 +1,158 @@
+{
+  "last_synced": "2026-11-09T19:17:19.913529+05:30",
+  "count": 38,
+  "holidays": {
+    "2025-01-26": {
+      "description": "Republic Day",
+      "weekday": "Sunday"
+    },
+    "2025-02-26": {
+      "description": "Mahashivratri",
+      "weekday": "Wednesday"
+    },
+    "2025-03-14": {
+      "description": "Holi",
+      "weekday": "Friday"
+    },
+    "2025-03-31": {
+      "description": "Id-Ul-Fitr (Ramadan Eid)",
+      "weekday": "Monday"
+    },
+    "2025-04-06": {
+      "description": "Shri Ram Navami",
+      "weekday": "Sunday"
+    },
+    "2025-04-10": {
+      "description": "Shri Mahavir Jayanti",
+      "weekday": "Thursday"
+    },
+    "2025-04-14": {
+      "description": "Dr. Baba Saheb Ambedkar Jayanti",
+      "weekday": "Monday"
+    },
+    "2025-04-18": {
+      "description": "Good Friday",
+      "weekday": "Friday"
+    },
+    "2025-05-01": {
+      "description": "Maharashtra Day",
+      "weekday": "Thursday"
+    },
+    "2025-06-07": {
+      "description": "Bakri Id",
+      "weekday": "Saturday"
+    },
+    "2025-07-06": {
+      "description": "Muharram",
+      "weekday": "Sunday"
+    },
+    "2025-08-15": {
+      "description": "Independence Day / Parsi New Year",
+      "weekday": "Friday"
+    },
+    "2025-08-27": {
+      "description": "Shri Ganesh Chaturthi",
+      "weekday": "Wednesday"
+    },
+    "2025-10-02": {
+      "description": "Mahatma Gandhi Jayanti/Dussehra",
+      "weekday": "Thursday"
+    },
+    "2025-10-21": {
+      "description": "Diwali Laxmi Pujan",
+      "weekday": "Tuesday"
+    },
+    "2025-10-22": {
+      "description": "Balipratipada",
+      "weekday": "Wednesday"
+    },
+    "2025-11-05": {
+      "description": "Prakash Gurpurb Sri Guru Nanak Dev",
+      "weekday": "Wednesday"
+    },
+    "2025-12-25": {
+      "description": "Christmas",
+      "weekday": "Thursday"
+    },
+    "2026-01-15": {
+      "description": "Municipal Corporation Election - Maharashtra",
+      "weekday": "Thursday"
+    },
+    "2026-01-26": {
+      "description": "Republic Day",
+      "weekday": "Monday"
+    },
+    "2026-02-15": {
+      "description": "Mahashivratri",
+      "weekday": "Sunday"
+    },
+    "2026-03-03": {
+      "description": "Holi",
+      "weekday": "Tuesday"
+    },
+    "2026-03-21": {
+      "description": "Id-Ul-Fitr (Ramadan Eid)",
+      "weekday": "Saturday"
+    },
+    "2026-03-26": {
+      "description": "Shri Ram Navami",
+      "weekday": "Thursday"
+    },
+    "2026-03-31": {
+      "description": "Shri Mahavir Jayanti",
+      "weekday": "Tuesday"
+    },
+    "2026-04-03": {
+      "description": "Good Friday",
+      "weekday": "Friday"
+    },
+    "2026-04-14": {
+      "description": "Dr. Baba Saheb Ambedkar Jayanti",
+      "weekday": "Tuesday"
+    },
+    "2026-05-01": {
+      "description": "Maharashtra Day",
+      "weekday": "Friday"
+    },
+    "2026-05-28": {
+      "description": "Bakri Id",
+      "weekday": "Thursday"
+    },
+    "2026-06-26": {
+      "description": "Muharram",
+      "weekday": "Friday"
+    },
+    "2026-08-15": {
+      "description": "Independence Day",
+      "weekday": "Saturday"
+    },
+    "2026-09-14": {
+      "description": "Ganesh Chaturthi",
+      "weekday": "Monday"
+    },
+    "2026-10-02": {
+      "description": "Mahatma Gandhi Jayanti",
+      "weekday": "Friday"
+    },
+    "2026-10-20": {
+      "description": "Dussehra",
+      "weekday": "Tuesday"
+    },
+    "2026-11-08": {
+      "description": "Diwali Laxmi Pujan*",
+      "weekday": "Sunday"
+    },
+    "2026-11-10": {
+      "description": "Diwali-Balipratipada",
+      "weekday": "Tuesday"
+    },
+    "2026-11-24": {
+      "description": "Prakash Gurpurb Sri Guru Nanak Dev",
+      "weekday": "Tuesday"
+    },
+    "2026-12-25": {
+      "description": "Christmas",
+      "weekday": "Friday"
+    }
+  }
+}

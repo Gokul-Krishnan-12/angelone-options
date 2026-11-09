@@ -425,6 +425,28 @@ class TelegramNotifier:
 
         return overall_success, overall_detail
 
+    def notify_market_holiday(self, dt: Optional[datetime.datetime] = None, holiday_name: str = "Exchange Holiday"):
+        """Dispatches 09:00 AM IST Telegram reminder on weekday exchange market holidays."""
+        now = dt if dt is not None else now_ist()
+        date_str = now.strftime("%A, %d %B %Y")
+        now_str = now.strftime("%H:%M:%S")
+
+        message = (
+            f"🏖️ <b>MARKET HOLIDAY REMINDER</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📅 <b>Date:</b> {date_str}\n"
+            f"🎉 <b>Occasion:</b> <b>{holiday_name}</b>\n\n"
+            f"🏛️ <b>NSE & BSE markets are CLOSED today for trading.</b>\n\n"
+            f"🛡️ <b>Engine Status:</b>\n"
+            f"  • Live Execution: ⏸️ PAUSED\n"
+            f"  • Stock Options Radar: ⏸️ PAUSED\n"
+            f"  • Capital & Margin: 100% Protected\n\n"
+            f"Autonomous trade execution and intraday AI scanning will resume on the next official trading session.\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⏱ <i>Dispatched at {now_str} IST</i>"
+        )
+        self.send_message_async(message)
+
 
 class TelegramBotController:
     """
@@ -576,6 +598,8 @@ class TelegramBotController:
             return self._cmd_stop(args)
         elif cmd in ("/squareoff", "squareoff", "/panic", "panic"):
             return self._cmd_squareoff()
+        elif cmd in ("/holidays", "holidays", "/holiday", "holiday"):
+            return self._cmd_holidays(args)
         elif cmd in ("/help", "help"):
             return self._cmd_help()
         else:
@@ -1087,6 +1111,54 @@ class TelegramBotController:
             f"Stock Options positions closed: {so_positions}"
         )
 
+    def _cmd_holidays(self, args: List[str]) -> str:
+        """Remote handler for /holidays command."""
+        from smartapi_trader.utils.tz import (
+            now_ist, is_market_holiday,
+            get_holiday_description, get_upcoming_holidays,
+            sync_nse_holidays, NSE_HOLIDAYS
+        )
+
+        sub = args[0].lower() if args else ""
+        if sub in ("sync", "refresh", "update"):
+            success = sync_nse_holidays()
+            if success:
+                return (
+                    f"✅ <b>NSE Trading Holidays Synchronized!</b>\n"
+                    f"Indexed <code>{len(NSE_HOLIDAYS)}</code> official exchange holidays for current and upcoming years."
+                )
+            else:
+                return "⚠️ Could not reach NSE API; retained local cached holiday database."
+
+        now = now_ist()
+        is_today_holiday = is_market_holiday(now)
+        today_desc = get_holiday_description(now)
+
+        if is_today_holiday:
+            today_badge = f"🏖️ <b>CLOSED</b> ({today_desc})"
+        elif now.weekday() >= 5:
+            today_badge = "🏖️ <b>CLOSED</b> (Weekend)"
+        else:
+            today_badge = "🟢 <b>OPEN</b> (Normal Trading Session)"
+
+        upcoming = get_upcoming_holidays(limit=6)
+        up_lines = []
+        for h in upcoming:
+            d_obj = datetime.datetime.strptime(h["date"], "%Y-%m-%d")
+            d_fmt = d_obj.strftime("%d-%b-%Y (%a)")
+            up_lines.append(f"• <b>{d_fmt}</b>: {h['description']}")
+
+        up_text = "\n".join(up_lines) if up_lines else "No upcoming holidays recorded."
+
+        return (
+            f"📅 <b>NSE TRADING HOLIDAYS & CALENDAR</b>\n\n"
+            f"🚦 <b>Today ({now.strftime('%d-%b-%Y')}):</b> {today_badge}\n\n"
+            f"📌 <b>Next Upcoming Holidays:</b>\n"
+            f"{up_text}\n\n"
+            f"🔄 <i>Dynamic Sync is Active ({len(NSE_HOLIDAYS)} cached dates).</i>\n"
+            f"Send <code>/holidays sync</code> to refresh directly from NSE."
+        )
+
     def _cmd_help(self) -> str:
         return (
             "🤖 <b>OPTIONS SNIPER TELEGRAM COMMANDS</b>\n\n"
@@ -1095,7 +1167,8 @@ class TelegramBotController:
             "• <code>/health</code> — Server diagnostics, stream latency, market checks\n"
             "• <code>/positions</code> — Live active open contracts & unrealized P&L\n"
             "• <code>/trades</code> — Today's completed trades with charges\n"
-            "• <code>/eod</code> — Generate and send End of Day performance report\n\n"
+            "• <code>/eod</code> — Generate and send End of Day performance report\n"
+            "• <code>/holidays</code> — View upcoming NSE market holidays or sync calendar\n\n"
             "🕹 <b>Remote Engine Control:</b>\n"
             "• <code>/start paper</code> — Start paper trading agent (Index + Stock Options)\n"
             "• <code>/start live</code> — Arm real live Angel One execution\n"

@@ -288,10 +288,14 @@ class TradingOrchestrator:
     async def _eod_monitor_loop(self):
         """Monitors clock and dispatches daily EOD report to Telegram at 15:15 IST on active trading days."""
         last_sent_date = None
+        last_holiday_alert_date = None
         while True:
             try:
                 await asyncio.sleep(15)
-                from smartapi_trader.utils.tz import now_ist, is_trading_day
+                from smartapi_trader.utils.tz import (
+                    now_ist, is_trading_day, is_market_holiday,
+                    get_holiday_description, sync_nse_holidays
+                )
                 now = now_ist()
                 now_str = now.strftime("%Y-%m-%d")
 
@@ -315,6 +319,23 @@ class TradingOrchestrator:
                         if hasattr(self, "risk_manager") and self.risk_manager:
                             self.risk_manager.reset_daily_limits()
                             logger.info("[ORCHESTRATOR] 🌅 Risk manager daily limits successfully reset for new session.")
+
+                        # Dynamic background holiday sync on daily rollover
+                        try:
+                            asyncio.create_task(asyncio.to_thread(sync_nse_holidays))
+                        except Exception as sync_err:
+                            logger.debug(f"[ORCHESTRATOR] Rollover holiday sync dispatch error: {sync_err}")
+
+                # Weekday exchange holiday reminder at 09:00 IST (Mon-Fri only, excludes weekends)
+                if now.weekday() < 5 and is_market_holiday(now):
+                    if (now.hour == 9 and now.minute >= 0) or (9 < now.hour < 16):
+                        if last_holiday_alert_date != now_str:
+                            holiday_name = get_holiday_description(now) or "Exchange Trading Holiday"
+                            logger.info(f"[HOLIDAY] Weekday holiday detected ({holiday_name} on {now_str}). Sending 09:00 AM Telegram reminder...")
+                            if self.notifier:
+                                self.notifier.notify_market_holiday(now, holiday_name)
+                            last_holiday_alert_date = now_str
+                    continue
 
                 # Automated daily EOD reports only run on active trading days (Mon-Fri, non-holiday)
                 if not is_trading_day(now):
@@ -430,6 +451,13 @@ class TradingOrchestrator:
                 logger.warning(f"[ORCHESTRATOR] Could not auto-resume scanner: {e}")
 
         logger.info(f"[ORCHESTRATOR] System ready! Active Execution Mode: {self.mode}")
+
+        # Dispatch background NSE holiday sync to ensure current and next year calendars are fresh
+        try:
+            from smartapi_trader.utils.tz import sync_nse_holidays
+            asyncio.create_task(asyncio.to_thread(sync_nse_holidays))
+        except Exception as e:
+            logger.debug(f"[ORCHESTRATOR] Holiday background sync launch error: {e}")
 
     async def shutdown(self):
         """Gracefully halts all components and flushes event buffers."""
