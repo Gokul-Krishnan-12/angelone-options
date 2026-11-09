@@ -197,6 +197,55 @@ class TradingOrchestrator:
         from smartapi_trader.stock_options.routes import bind_dispatch_callbacks
         bind_dispatch_callbacks()
 
+    def _notify_regulatory_sync_if_any(self, idx_changes: Optional[Dict[str, Any]] = None, fo_changes: Optional[Dict[str, Any]] = None):
+        """Dispatches an institutional Telegram alert if SEBI or NSE circular changes are detected."""
+        has_idx = bool(idx_changes)
+        lot_changes = fo_changes.get("lot_size_changes", {}) if fo_changes else {}
+        added = fo_changes.get("added_stocks", []) if fo_changes else []
+        removed = fo_changes.get("removed_stocks", []) if fo_changes else []
+
+        if not (has_idx or lot_changes or added or removed):
+            return
+
+        lines = [
+            "📋 <b>REGULATORY & F&O UNIVERSE SYNC</b>",
+            "━━━━━━━━━━━━━━━━━━━━━━━"
+        ]
+
+        if has_idx:
+            lines.append("🏛 <b>SEBI Index Lot Size Revisions:</b>")
+            for k, v in idx_changes.items():
+                lines.append(f"• <b>{k}:</b> {v.get('old')} ➔ <b>{v.get('new')}</b> (Expiry: {v.get('expiry')})")
+            lines.append("")
+
+        if lot_changes:
+            lines.append(f"📦 <b>NSE Stock Option Lot Size Revisions ({len(lot_changes)} stocks):</b>")
+            for sym, v in list(lot_changes.items())[:10]:
+                lines.append(f"• <b>{sym}:</b> {v.get('old')} ➔ <b>{v.get('new')}</b>")
+            if len(lot_changes) > 10:
+                lines.append(f"<i>...and {len(lot_changes) - 10} more stocks.</i>")
+            lines.append("")
+
+        if added:
+            lines.append(f"🆕 <b>Newly Added F&O Stocks ({len(added)} stocks):</b>")
+            lines.append(f"• {', '.join(added[:15])}")
+            if len(added) > 15:
+                lines.append(f"<i>...and {len(added) - 15} more.</i>")
+            lines.append("")
+
+        if removed:
+            lines.append(f"🚫 <b>Excluded F&O Stocks ({len(removed)} stocks):</b>")
+            lines.append(f"• {', '.join(removed)}")
+            lines.append("")
+
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("<i>All scanners, validators, order execution engines, and symbols.yaml are synchronized.</i>")
+
+        msg = "\n".join(lines)
+        logger.info(f"[REGULATORY] Dispatching regulatory sync alert to Telegram:\n{msg}")
+        if self.notifier:
+            self.notifier.send_message_async(msg)
+
 
     async def _on_position_update(self, event: Any):
         """Dynamically registers WebSocket feed subscription for any opened options contract."""
@@ -326,6 +375,18 @@ class TradingOrchestrator:
                         except Exception as sync_err:
                             logger.debug(f"[ORCHESTRATOR] Rollover holiday sync dispatch error: {sync_err}")
 
+                        # Automated Regulatory & Universe Rollover Check (SEBI index lots + NSE quarterly review)
+                        try:
+                            idx_changes = self.instrument_loader.load_instruments(force_refresh=True)
+                            fo_changes = self.stock_universe.sync_fo_universe()
+                            if idx_changes:
+                                self.symbols = load_yaml(self.symbols_file)
+                                if hasattr(self, "strategy") and self.strategy:
+                                    self.strategy.symbols_config = self.symbols
+                            self._notify_regulatory_sync_if_any(idx_changes, fo_changes)
+                        except Exception as reg_err:
+                            logger.error(f"[ORCHESTRATOR] Rollover regulatory sync error: {reg_err}")
+
                 # Weekday exchange holiday reminder at 09:00 IST (Mon-Fri only, excludes weekends)
                 if now.weekday() < 5 and is_market_holiday(now):
                     if (now.hour == 9 and now.minute >= 0) or (9 < now.hour < 16):
@@ -365,9 +426,15 @@ class TradingOrchestrator:
         logger.info("[ORCHESTRATOR] Initializing SmartAPI Index Options Engine...")
         self.event_bus.start()
 
-        # Load & index scrip master
-        logger.info("[ORCHESTRATOR] Loading scrip master index...")
-        self.instrument_loader.load_instruments()
+        # Load & index scrip master and synchronize regulatory lot sizes
+        logger.info("[ORCHESTRATOR] Loading scrip master index and verifying regulatory lot sizes...")
+        idx_changes = self.instrument_loader.load_instruments()
+        fo_changes = self.stock_universe.sync_fo_universe()
+        if idx_changes:
+            self.symbols = load_yaml(self.symbols_file)
+            if hasattr(self, "strategy") and self.strategy:
+                self.strategy.symbols_config = self.symbols
+        self._notify_regulatory_sync_if_any(idx_changes, fo_changes)
 
         # Subscribe to spot indices from symbols.yaml
         for sym_name, sym_info in self.symbols.get("indices", {}).items():

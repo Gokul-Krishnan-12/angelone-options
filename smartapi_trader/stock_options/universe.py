@@ -5,10 +5,38 @@ lot sizes, strike intervals, and contract resolvers for stock options.
 """
 
 import os
+import json
 import sqlite3
+from pathlib import Path
+from collections import Counter
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from smartapi_trader.utils.logger import logger
+
+UNIVERSE_CACHE_FILE = Path(__file__).resolve().parent.parent.parent / "data" / "fo_stocks_cache.json"
+
+def _load_universe_cache():
+    """Loads cached F&O universe additions and lot size revisions into NSE_FO_STOCKS in-place."""
+    if not UNIVERSE_CACHE_FILE.exists():
+        return
+    try:
+        with open(UNIVERSE_CACHE_FILE, "r", encoding="utf-8") as f:
+            cached_data = json.load(f)
+        if isinstance(cached_data, dict):
+            for sym, meta in cached_data.items():
+                if isinstance(meta, dict):
+                    NSE_FO_STOCKS[sym] = meta
+    except Exception as e:
+        logger.debug(f"[STOCK_UNIVERSE] Error loading universe cache: {e}")
+
+def _save_universe_cache():
+    """Persists the live NSE_FO_STOCKS universe to disk."""
+    try:
+        UNIVERSE_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(UNIVERSE_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(NSE_FO_STOCKS, f, indent=2)
+    except Exception as e:
+        logger.error(f"[STOCK_UNIVERSE] Error saving universe cache: {e}")
 
 # Top liquid NSE F&O underlying stocks
 NSE_FO_STOCKS: Dict[str, Dict[str, Any]] = {
@@ -575,6 +603,11 @@ class StockUniverseManager:
     def __init__(self, db_path: str = "data/instruments.db"):
         self.db_path = db_path
         self._ensure_stock_options_indexed()
+        self.sync_fo_universe()
+
+    def sync_fo_universe(self) -> Dict[str, Any]:
+        """Runs universe synchronization against the instruments database."""
+        return sync_fo_universe_with_instruments(self.db_path)
 
     def _get_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
@@ -676,11 +709,11 @@ class StockUniverseManager:
         """Returns metadata for all or shortlisted eligible NSE stocks."""
         stocks = []
         if selected_symbols and len(selected_symbols) == 1 and selected_symbols[0].upper() in ("ALL_FO", "ALL", "AUTO_DISCOVER"):
-            target_keys = list(NSE_FO_STOCKS.keys())
+            target_keys = [s for s, m in NSE_FO_STOCKS.items() if m.get("is_active", True)]
         elif selected_symbols:
             target_keys = [s.upper().strip() for s in selected_symbols if s.strip()]
         else:
-            target_keys = list(NSE_FO_STOCKS.keys())
+            target_keys = [s for s, m in NSE_FO_STOCKS.items() if m.get("is_active", True)]
 
         for sym in target_keys:
             if sym in NSE_FO_STOCKS:
@@ -696,7 +729,8 @@ class StockUniverseManager:
                     "strike_step": 10.0,
                     "tick_size": 0.05,
                     "base_price": 1000.0,
-                    "token_nse": ""
+                    "token_nse": "",
+                    "is_active": True
                 })
         return stocks
 
@@ -860,7 +894,166 @@ class StockUniverseManager:
         sym = symbol.upper().strip()
         target_sector = cls.get_sector_for_stock(sym)
         return [
-            s for s in NSE_FO_STOCKS.keys()
-            if cls.get_sector_for_stock(s) == target_sector and s != sym
+            s for s, m in NSE_FO_STOCKS.items()
+            if m.get("is_active", True) and cls.get_sector_for_stock(s) == target_sector and s != sym
         ]
+
+
+def sync_fo_universe_with_instruments(db_path: str = "data/instruments.db") -> Dict[str, Any]:
+    """
+    Synchronizes the NSE F&O universe with the latest exchange instruments:
+    1. Updates lot sizes for all existing stocks from actual exchange contracts (e.g. bonus / splits / quarterly revisions).
+    2. Auto-discovers and registers newly added NSE F&O stocks with inferred strike steps & cash tokens.
+    3. Excludes stocks dropped by NSE quarterly circulars.
+    4. Persists the synchronized universe to data/fo_stocks_cache.json.
+    """
+    summary: Dict[str, Any] = {
+        "lot_size_changes": {},
+        "added_stocks": [],
+        "removed_stocks": [],
+        "total_active": 0
+    }
+
+    if not os.path.exists(db_path):
+        return summary
+
+    try:
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        # Check if table has OPTSTK records
+        cursor.execute("SELECT COUNT(*) as cnt FROM instruments WHERE instrumenttype = 'OPTSTK'")
+        row = cursor.fetchone()
+        if not row or row["cnt"] == 0:
+            conn.close()
+            return summary
+
+        # 1. Fetch NSE cash tokens for underlying spot prices
+        cursor.execute("SELECT name, token, symbol FROM instruments WHERE exch_seg = 'NSE' AND symbol LIKE '%-EQ'")
+        cash_tokens: Dict[str, str] = {str(r["name"]).upper(): str(r["token"]) for r in cursor.fetchall()}
+
+        # 2. Group all OPTSTK contracts by name and expiry
+        cursor.execute("""
+            SELECT name, expiry, strike, lotsize
+            FROM instruments
+            WHERE instrumenttype = 'OPTSTK' AND expiry != '' AND lotsize > 0
+            ORDER BY name, strike ASC
+        """)
+        all_contracts = cursor.fetchall()
+        conn.close()
+
+        # Build stock_expiries map: stock -> expiry -> list of dict
+        stock_data: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+        for r in all_contracts:
+            sym = str(r["name"]).upper()
+            exp = str(r["expiry"]).strip()
+            if sym not in stock_data:
+                stock_data[sym] = {}
+            if exp not in stock_data[sym]:
+                stock_data[sym][exp] = []
+            stock_data[sym][exp].append({
+                "strike": float(r["strike"]),
+                "lotsize": int(r["lotsize"])
+            })
+
+        today_date = datetime.now().date()
+        active_exchange_symbols = set()
+
+        for sym, expiries_map in stock_data.items():
+            valid_expiries = []
+            for exp in expiries_map.keys():
+                try:
+                    exp_dt = datetime.strptime(exp, "%d%b%Y").date()
+                    if exp_dt >= today_date:
+                        valid_expiries.append((exp_dt, exp))
+                except Exception:
+                    continue
+
+            if not valid_expiries:
+                target_expiry = list(expiries_map.keys())[0]
+            else:
+                valid_expiries.sort(key=lambda x: x[0])
+                target_expiry = valid_expiries[0][1]
+
+            contracts = expiries_map[target_expiry]
+            if not contracts:
+                continue
+
+            active_lot = contracts[0]["lotsize"]
+            strikes = sorted(set(c["strike"] for c in contracts))
+
+            # Infer strike step from consecutive strike deltas
+            deltas = [round(strikes[i+1] - strikes[i], 2) for i in range(len(strikes)-1) if strikes[i+1] > strikes[i]]
+            if deltas:
+                inferred_step = Counter(deltas).most_common(1)[0][0]
+            else:
+                inferred_step = 10.0
+
+            median_strike = strikes[len(strikes) // 2] if strikes else 1000.0
+            cash_tok = cash_tokens.get(sym, "")
+
+            active_exchange_symbols.add(sym)
+
+            if sym in NSE_FO_STOCKS:
+                curr_meta = NSE_FO_STOCKS[sym]
+                old_lot = curr_meta.get("lot_size")
+                if old_lot != active_lot:
+                    logger.info(f"[STOCK_UNIVERSE] 🔄 NSE Regulatory Lot Size revision for {sym}: {old_lot} -> {active_lot}")
+                    summary["lot_size_changes"][sym] = {"old": old_lot, "new": active_lot}
+                    curr_meta["lot_size"] = active_lot
+
+                # Update cash token if missing
+                if cash_tok and not curr_meta.get("token_nse"):
+                    curr_meta["token_nse"] = cash_tok
+
+                curr_meta["is_active"] = True
+            else:
+                # Newly added stock via quarterly circular (e.g. ZOMATO, PNBHOUSING, KFINTECH)
+                new_entry = {
+                    "name": f"{sym} Ltd",
+                    "sector": StockUniverseManager.get_sector_for_stock(sym),
+                    "lot_size": active_lot,
+                    "strike_step": inferred_step,
+                    "tick_size": 0.05,
+                    "base_price": round(median_strike, 2),
+                    "token_nse": cash_tok,
+                    "is_active": True,
+                    "auto_discovered": True
+                }
+                NSE_FO_STOCKS[sym] = new_entry
+                summary["added_stocks"].append(sym)
+                logger.info(f"[STOCK_UNIVERSE] 🆕 NSE Quarterly Circular: Added new F&O stock {sym} (Lot: {active_lot}, Step: {inferred_step})")
+
+        # Check for excluded stocks (only if database contains a full universe > 100 stocks)
+        if len(active_exchange_symbols) > 100:
+            for sym, meta in NSE_FO_STOCKS.items():
+                if sym not in active_exchange_symbols:
+                    if meta.get("is_active", True) is not False:
+                        meta["is_active"] = False
+                        summary["removed_stocks"].append(sym)
+                        logger.warning(f"[STOCK_UNIVERSE] 🚫 NSE Circular: Stock {sym} excluded from F&O segment. Deactivated.")
+
+        summary["total_active"] = sum(1 for m in NSE_FO_STOCKS.values() if m.get("is_active", True))
+
+        # Save synchronized universe cache
+        _save_universe_cache()
+
+        if summary["lot_size_changes"] or summary["added_stocks"] or summary["removed_stocks"]:
+            logger.info(
+                f"[STOCK_UNIVERSE] Regulatory Sync Completed: "
+                f"{len(summary['lot_size_changes'])} lot size revisions, "
+                f"{len(summary['added_stocks'])} new stocks added, "
+                f"{len(summary['removed_stocks'])} stocks excluded. Total active: {summary['total_active']}"
+            )
+
+    except Exception as e:
+        logger.error(f"[STOCK_UNIVERSE] Error synchronizing F&O universe: {e}")
+
+    return summary
+
+
+# Load persisted quarterly revisions & additions into NSE_FO_STOCKS on module import
+_load_universe_cache()
+
 

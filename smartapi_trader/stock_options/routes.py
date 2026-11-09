@@ -672,6 +672,21 @@ async def get_stock_universe():
         raise HTTPException(status_code=503, detail="Universe manager not initialized.")
     return so_ctx.universe_mgr.get_eligible_stocks()
 
+@router.post("/universe/sync")
+async def trigger_universe_sync():
+    """
+    Manually triggers F&O universe synchronization with exchange scrip records,
+    detecting SEBI lot size revisions and quarterly NSE circular additions/exclusions.
+    """
+    if not so_ctx.universe_mgr:
+        raise HTTPException(status_code=503, detail="Universe manager not initialized.")
+    res = so_ctx.universe_mgr.sync_fo_universe()
+    return {
+        "status": "success",
+        "message": "F&O Universe synchronized with exchange instruments.",
+        **res
+    }
+
 @router.get("/universe/day-start-movers")
 async def get_day_start_movers():
     """
