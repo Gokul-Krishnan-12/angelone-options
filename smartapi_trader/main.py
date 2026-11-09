@@ -6,7 +6,7 @@ import signal
 import time
 from datetime import datetime, time as dtime
 import uvicorn
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 
 from smartapi_trader.utils.logger import logger
 from smartapi_trader.utils.auth import AngelAuthManager
