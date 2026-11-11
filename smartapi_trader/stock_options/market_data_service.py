@@ -8,7 +8,7 @@ import time
 import math
 import random
 from datetime import datetime, timedelta
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from smartapi_trader.stock_options.universe import StockUniverseManager, NSE_FO_STOCKS, HIGH_BETA_SYMBOLS, is_high_beta_stock
 from smartapi_trader.utils.logger import logger
 
@@ -19,11 +19,13 @@ class StockMarketDataService:
     and option contract pricing for shortlisted NSE F&O stocks.
     """
 
-    def __init__(self, universe_mgr: Optional[StockUniverseManager] = None, smart_api: Optional[Any] = None):
+    def __init__(self, universe_mgr: Optional[StockUniverseManager] = None, smart_api: Optional[Any] = None, stream_client: Optional[Any] = None):
         self.universe_mgr = universe_mgr or StockUniverseManager()
         self.smart_api = smart_api
+        self.stream_client = stream_client
         self._price_cache: Dict[str, Dict[str, Any]] = {}
         self._last_cache_time = 0.0
+        self._ltp_cache: Dict[str, Tuple[float, float]] = {}  # token -> (ltp, timestamp)
 
     def get_stock_technical_summary(self, symbol: str) -> Optional[Dict[str, Any]]:
         """
@@ -444,28 +446,66 @@ class StockMarketDataService:
             return self.smart_api
         return None
 
+    def _get_active_stream_client(self):
+        """Resolves active WebSocket StreamClient directly or through orchestrator context."""
+        if self.stream_client:
+            return self.stream_client
+        try:
+            from smartapi_trader.web.app import ctx
+            if ctx.orchestrator and getattr(ctx.orchestrator, "stream_client", None):
+                self.stream_client = ctx.orchestrator.stream_client
+                return self.stream_client
+        except Exception:
+            pass
+        return None
+
     def get_spot_ltp(self, symbol: str) -> float:
-        """Returns underlying stock spot price from SmartAPI or universe base price."""
+        """Returns underlying stock spot price from WebSocket stream, cached rate-limited REST, or universe base price."""
         sym = symbol.upper().strip()
         meta = NSE_FO_STOCKS.get(sym, {})
         base_p = meta.get("base_price", 1000.0)
+        token = str(meta.get("token_nse") or "").strip()
+
+        # 1. First check WebSocket live tick stream
+        stream = self._get_active_stream_client()
+        if stream and token:
+            ws_ltp = stream.get_latest_ltp(token)
+            if ws_ltp and ws_ltp > 0:
+                meta["base_price"] = ws_ltp
+                self._ltp_cache[f"NSE_{token}"] = (ws_ltp, time.time())
+                return round(ws_ltp, 2)
+
+        # 2. Check 3-second cache to avoid hitting broker REST rate limits
+        now = time.time()
+        cache_key = f"NSE_{token}" if token else f"NSE_{sym}"
+        cached = self._ltp_cache.get(cache_key)
+        if cached and (now - cached[1]) < 3.0:
+            return round(cached[0], 2)
+
+        # 3. Query broker REST
         smart_conn = self._get_active_smart_api()
-        if smart_conn and meta.get("token_nse"):
+        if smart_conn and token:
             try:
                 res = smart_conn.ltpData(
                     exchange="NSE",
                     tradingsymbol=f"{sym}-EQ",
-                    symboltoken=str(meta["token_nse"])
+                    symboltoken=token
                 )
                 if res and isinstance(res, dict) and res.get("status") and res.get("data"):
                     ltp = float(res["data"].get("ltp") or 0.0)
                     if ltp > 0:
                         meta["base_price"] = ltp
+                        self._ltp_cache[cache_key] = (ltp, now)
                         return round(ltp, 2)
                 elif res and isinstance(res, dict) and not res.get("status"):
                     logger.debug(f"[MARKET_DATA] SmartAPI ltpData error for {sym}: {res.get('message')} ({res.get('errorcode')})")
             except Exception as e:
                 logger.debug(f"[MARKET_DATA] Live spot query for {sym} failed: {e}")
+
+        # If recent cache exists (> 3s old), prefer it over hardcoded base_p
+        if cached and cached[0] > 0:
+            return round(cached[0], 2)
+
         return base_p
 
     def get_option_ltp(
@@ -474,14 +514,18 @@ class StockMarketDataService:
         underlying: str,
         token: Optional[str] = None,
         strike: Optional[float] = None,
-        option_type: Optional[str] = None
+        option_type: Optional[str] = None,
+        allow_modeled: bool = True
     ) -> float:
         """
         Retrieves real-time or modeled market LTP for a stock option contract.
-        1. Resolves true exchange instrument metadata if loose or unformatted.
-        2. Queries Angel One SmartAPI ltpData directly (or AuthManager).
-        3. If broker quote is unavailable, calculates dynamic option premium using
-           underlying spot price + intrinsic/extrinsic time decay model.
+        1. Checks active WebSocket stream for real-time tick.
+        2. Checks recent 3-second REST cache.
+        3. Queries Angel One SmartAPI ltpData directly (or AuthManager).
+        4. If broker quote is unavailable:
+           - If allow_modeled is False (e.g. active position trailing stop/target evaluation): returns 0.0 (NEVER fake exits!).
+           - If allow_modeled is True: calculates dynamic option premium using
+             underlying spot price + intrinsic/extrinsic time decay model for candidate screening.
         """
         symbol = str(symbol or "").strip()
         underlying = str(underlying or "").upper().strip()
@@ -522,13 +566,30 @@ class StockMarketDataService:
             except Exception as ex:
                 logger.debug(f"[MARKET_DATA] Contract resolution failed for {symbol}: {ex}")
 
-        # 1. Try real broker quote from Angel One (only for valid numeric exchange tokens)
         tok_str = str(token).strip() if token else ""
+
+        # 1. Check WebSocket live tick
+        stream = self._get_active_stream_client()
+        if stream and tok_str and tok_str.isdigit():
+            ws_ltp = stream.get_latest_ltp(tok_str)
+            if ws_ltp and ws_ltp > 0:
+                self._ltp_cache[f"NFO_{tok_str}"] = (ws_ltp, time.time())
+                return round(ws_ltp, 2)
+
+        # 2. Check 3-second cache to protect against REST rate limiting
+        now = time.time()
+        cache_key = f"NFO_{tok_str}" if tok_str else f"NFO_{symbol}"
+        cached = self._ltp_cache.get(cache_key)
+        if cached and (now - cached[1]) < 3.0:
+            return round(cached[0], 2)
+
+        # 3. Query broker REST (AuthManager or SmartAPI)
         auth_mgr = self._get_active_auth_mgr()
         if auth_mgr and tok_str and tok_str.isdigit():
             try:
                 live_ltp = auth_mgr.get_token_ltp("NFO", symbol, tok_str)
                 if live_ltp and live_ltp > 0:
+                    self._ltp_cache[cache_key] = (float(live_ltp), now)
                     return round(float(live_ltp), 2)
             except Exception as e:
                 logger.debug(f"[MARKET_DATA] auth_mgr get_token_ltp query for {symbol} ({tok_str}) failed: {e}")
@@ -540,11 +601,21 @@ class StockMarketDataService:
                 if res and isinstance(res, dict) and res.get("status") and res.get("data"):
                     live_ltp = float(res["data"].get("ltp") or 0.0)
                     if live_ltp > 0:
+                        self._ltp_cache[cache_key] = (live_ltp, now)
                         return round(live_ltp, 2)
             except Exception as e:
                 logger.debug(f"[MARKET_DATA] Broker ltpData query for {symbol} ({tok_str}) failed: {e}")
 
-        # 2. Dynamic spot-anchored pricing model
+        # If broker query failed but we have a recently cached LTP (< 60s), use it
+        if cached and cached[0] > 0 and (now - cached[1]) < 60.0:
+            return round(cached[0], 2)
+
+        # If live quote unavailable and modeled pricing is NOT allowed (e.g. trailing stops / profit targets)
+        if not allow_modeled:
+            logger.warning(f"[MARKET_DATA] Real broker quote unavailable for {symbol} ({tok_str}) and allow_modeled=False. Refusing synthetic price.")
+            return 0.0
+
+        # 4. Dynamic spot-anchored pricing model (ONLY for screening / indicative pricing)
         spot = self.get_spot_ltp(underlying) if underlying else 0.0
         if spot <= 0 and strike_val > 0:
             spot = strike_val

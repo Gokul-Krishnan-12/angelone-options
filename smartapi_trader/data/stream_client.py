@@ -31,6 +31,7 @@ class SmartStreamClient:
         self.auth_manager = auth_manager
         
         self.subscribed_tokens: Dict[str, Dict[str, Any]] = {} # token -> info
+        self.latest_ticks: Dict[str, TickEvent] = {} # token -> latest TickEvent
         self.is_connected = False
         self.running = False
         self.last_tick_time: float = 0.0
@@ -238,7 +239,15 @@ class SmartStreamClient:
             )
             self.last_tick_time = time.time()
             self.total_ticks_received += 1
+            self.latest_ticks[str(token)] = tick
             self.bus.publish_nowait(tick)
+
+    def get_latest_ltp(self, token: str) -> Optional[float]:
+        """Returns the most recent tick LTP received via WebSocket."""
+        tick = self.latest_ticks.get(str(token))
+        if tick and getattr(tick, "ltp", 0.0) > 0:
+            return round(float(tick.ltp), 2)
+        return None
 
     @staticmethod
     def is_market_open() -> bool:
