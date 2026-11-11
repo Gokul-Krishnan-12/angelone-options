@@ -283,6 +283,89 @@ class TelegramNotifier:
         )
         self.send_message_async(message)
 
+    def notify_scan_no_trades(
+        self,
+        session_id: str,
+        scan_count: int,
+        interval_mins: int,
+        stocks_evaluated: int,
+        reason: str,
+        provider: str = "AI",
+        model: str = ""
+    ):
+        """Sends proactive status when an AI scan completes with 0 qualified setups (capital preserved in cash)."""
+        if not self.enabled:
+            return
+
+        now_str = now_ist().strftime("%H:%M:%S")
+        message = (
+            f"🛡️ <b>AI SCAN COMPLETED: 0 Setups Qualified</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 <b>Session:</b> <code>{session_id}</code> (Scan #{scan_count})\n"
+            f"⏱ <b>Interval:</b> {interval_mins}m | <b>Provider:</b> {provider} ({model})\n"
+            f"🔍 <b>Evaluated:</b> <code>{stocks_evaluated}</code> eligible F&O stocks\n\n"
+            f"💡 <b>Market Regime & Decision:</b>\n"
+            f"<i>{reason}</i>\n\n"
+            f"💰 <b>Capital Status:</b> 100% Cash / Capital Protected.\n"
+            f"⏱ <b>Timestamp:</b> {now_str} IST"
+        )
+        self.send_message_async(message)
+
+    def notify_candidate_rejected(
+        self,
+        symbol: str,
+        reason: str,
+        setup_type: str = "Breakout",
+        spot: Optional[float] = None
+    ):
+        """Notifies operator when a setup is screened out by quantitative safety filters (e.g. Sector Divergence)."""
+        if not self.enabled:
+            return
+
+        # Throttle duplicate rejections for the same symbol within 10 minutes
+        now_ts = time.time()
+        last_rej_cache = getattr(self, "_last_rejected_cache", {})
+        last_time = last_rej_cache.get(symbol, 0.0)
+        if now_ts - last_time < 600.0:
+            return
+        last_rej_cache[symbol] = now_ts
+        self._last_rejected_cache = last_rej_cache
+
+        now_str = now_ist().strftime("%H:%M:%S")
+        spot_str = f" | Spot: ₹{spot:.2f}" if spot and spot > 0 else ""
+        message = (
+            f"🚫 <b>SETUP REJECTED BY SAFETY ENGINE</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📌 <b>Stock:</b> <b>{symbol}</b> ({setup_type}{spot_str})\n"
+            f"⚠️ <b>Filter Rejection:</b>\n<i>{reason}</i>\n\n"
+            f"🛡️ <b>Safety Action:</b> Order aborted to protect capital against false breakouts.\n"
+            f"⏱ <b>Timestamp:</b> {now_str} IST"
+        )
+        self.send_message_async(message)
+
+    def notify_broker_rate_limit(self, endpoint: str, details: str = ""):
+        """Sends high-priority operational alert when broker API rate limit (HTTP 429) is hit."""
+        if not self.enabled:
+            return
+
+        now_ts = time.time()
+        last_alert = getattr(self, "_last_rate_limit_alert_time", 0.0)
+        # Throttle to at most once every 15 minutes to prevent alert storms
+        if now_ts - last_alert < 900.0:
+            return
+        self._last_rate_limit_alert_time = now_ts
+
+        now_str = now_ist().strftime("%H:%M:%S")
+        message = (
+            f"⚠️ <b>BROKER API ALERT: RATE LIMIT DETECTED</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔌 <b>Endpoint:</b> <code>{endpoint}</code>\n"
+            f"🛑 <b>Broker Response:</b> HTTP 429 (Access rate limit exceeded)\n"
+            f"🛡️ <b>Automatic Safeguard:</b> Switched to cached quotes & WebSocket stream. Synthetic exits are blocked.\n"
+            f"⏱ <b>Timestamp:</b> {now_str} IST"
+        )
+        self.send_message_async(message)
+
     def notify_panic_triggered(self, reason: str = "Operator Manual Panic"):
         """Emergency circuit breaker notification with anti-spam throttling."""
         if not self.enabled:

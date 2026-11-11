@@ -385,6 +385,26 @@ class IntradayAIScanner:
                                 f"Notice: <code>{ai_response.no_trade_reason}</code>\n\n"
                                 f"🛡️ <i>Safety Action: No trades entered without AI validation. Capital is 100% safe. Will automatically retry next scan.</i>"
                             )
+                        elif not final_candidates:
+                            no_trade_msg = ai_response.no_trade_reason or "Market regime consolidated / No setups meet high-probability risk-reward criteria (1:1.5+ R:R)."
+                            if hasattr(self.notifier, "notify_scan_no_trades"):
+                                self.notifier.notify_scan_no_trades(
+                                    session_id=session_key,
+                                    scan_count=session_state.get('scans_count', 1),
+                                    interval_mins=self.interval_mins,
+                                    stocks_evaluated=len(self.selected_universe),
+                                    reason=no_trade_msg,
+                                    provider=ai_response.provider,
+                                    model=ai_response.model
+                                )
+                            else:
+                                self.notifier.send_message(
+                                    f"🛡️ <b>AI SCAN COMPLETED: 0 Setups Qualified</b>\n\n"
+                                    f"Session: <code>{session_key}</code> (Scan #{session_state.get('scans_count', 1)})\n"
+                                    f"Evaluated: <b>{len(self.selected_universe)} F&O stocks</b>\n"
+                                    f"Decision: <i>{no_trade_msg}</i>\n\n"
+                                    f"💰 <i>Capital 100% in cash. Waiting for clear trend displacement.</i>"
+                                )
                     except Exception as e:
                         logger.warning(f"[INTRADAY_SCANNER] Telegram dispatch error: {e}")
 

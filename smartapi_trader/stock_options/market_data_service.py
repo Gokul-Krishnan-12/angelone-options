@@ -459,6 +459,18 @@ class StockMarketDataService:
             pass
         return None
 
+    def _notify_rate_limit_if_detected(self, err_msg: Any, endpoint: str):
+        """Dispatches throttled Telegram alert when Angel One HTTP 429 rate limit is encountered."""
+        err_str = str(err_msg or "")
+        if any(w in err_str.lower() for w in ("exceeding access rate", "429", "rate limit")):
+            try:
+                from smartapi_trader.web.app import ctx
+                notifier = getattr(ctx.orchestrator, "notifier", None)
+                if notifier and hasattr(notifier, "notify_broker_rate_limit"):
+                    notifier.notify_broker_rate_limit(endpoint=endpoint, details=err_str)
+            except Exception:
+                pass
+
     def get_spot_ltp(self, symbol: str) -> float:
         """Returns underlying stock spot price from WebSocket stream, cached rate-limited REST, or universe base price."""
         sym = symbol.upper().strip()
@@ -498,8 +510,11 @@ class StockMarketDataService:
                         self._ltp_cache[cache_key] = (ltp, now)
                         return round(ltp, 2)
                 elif res and isinstance(res, dict) and not res.get("status"):
-                    logger.debug(f"[MARKET_DATA] SmartAPI ltpData error for {sym}: {res.get('message')} ({res.get('errorcode')})")
+                    err_msg = res.get('message') or ""
+                    self._notify_rate_limit_if_detected(err_msg, f"NSE spot ({sym})")
+                    logger.debug(f"[MARKET_DATA] SmartAPI ltpData error for {sym}: {err_msg} ({res.get('errorcode')})")
             except Exception as e:
+                self._notify_rate_limit_if_detected(str(e), f"NSE spot ({sym})")
                 logger.debug(f"[MARKET_DATA] Live spot query for {sym} failed: {e}")
 
         # If recent cache exists (> 3s old), prefer it over hardcoded base_p
@@ -604,6 +619,7 @@ class StockMarketDataService:
                         self._ltp_cache[cache_key] = (live_ltp, now)
                         return round(live_ltp, 2)
             except Exception as e:
+                self._notify_rate_limit_if_detected(str(e), f"NFO option ({symbol})")
                 logger.debug(f"[MARKET_DATA] Broker ltpData query for {symbol} ({tok_str}) failed: {e}")
 
         # If broker query failed but we have a recently cached LTP (< 60s), use it

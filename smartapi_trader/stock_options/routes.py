@@ -23,6 +23,7 @@ class StockOptionsContext:
     live_agent: Optional[Any] = None
     paper_agent: Optional[Any] = None
     universe_mgr: Optional[Any] = None
+    notifier: Optional[Any] = None
 
 so_ctx = StockOptionsContext()
 
@@ -115,7 +116,17 @@ async def auto_dispatch_candidates(candidates: List[Dict[str, Any]], plan_or_sca
                     dispatched_targets.append("PAPER_ARMED")
                     logger.info(f"[AUTO_BOT] ⏳ Setup for {sym} ARMED in Paper Agent: {res.get('message')}")
                 else:
-                    logger.info(f"[AUTO_BOT] Paper trade for {sym} status: {res.get('reason') or res.get('message')}")
+                    rej_reason = res.get("reason") or res.get("message") or "Validation criteria not met"
+                    logger.info(f"[AUTO_BOT] Paper trade for {sym} status: {rej_reason}")
+                    active_notifier = so_ctx.notifier or getattr(so_ctx.paper_agent, "notifier", None)
+                    if active_notifier and hasattr(active_notifier, "notify_candidate_rejected"):
+                        try:
+                            tech_info = cand.get("technical", {})
+                            stype = cand.get("setup_type", "Breakout")
+                            ref_spot = float(tech_info.get("reference_price") or 0.0)
+                            active_notifier.notify_candidate_rejected(symbol=sym, reason=rej_reason, setup_type=stype, spot=ref_spot)
+                        except Exception:
+                            pass
             except Exception as e:
                 logger.error(f"[AUTO_BOT] Error in paper auto-execution for {sym}: {e}")
 

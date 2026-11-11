@@ -194,6 +194,7 @@ class TradingOrchestrator:
         so_ctx.live_agent = self.stock_live_agent
         so_ctx.paper_agent = self.stock_paper_agent
         so_ctx.universe_mgr = self.stock_universe
+        so_ctx.notifier = self.notifier
         from smartapi_trader.stock_options.routes import bind_dispatch_callbacks
         bind_dispatch_callbacks()
 
