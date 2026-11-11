@@ -429,6 +429,10 @@ class StockMarketDataService:
 
     def _get_active_smart_api(self):
         """Resolves connected SmartAPI instance directly or through orchestrator context."""
+        auth = self._get_active_auth_mgr()
+        if auth and getattr(auth, "smart_api", None):
+            self.smart_api = auth.smart_api
+            return self.smart_api
         try:
             from smartapi_trader.web.app import ctx
             if ctx.orchestrator and getattr(ctx.orchestrator, "smart_api", None):
@@ -437,10 +441,6 @@ class StockMarketDataService:
         except Exception:
             pass
         if self.smart_api:
-            return self.smart_api
-        auth = self._get_active_auth_mgr()
-        if auth and getattr(auth, "smart_api", None):
-            self.smart_api = auth.smart_api
             return self.smart_api
         return None
 
@@ -462,6 +462,8 @@ class StockMarketDataService:
                     if ltp > 0:
                         meta["base_price"] = ltp
                         return round(ltp, 2)
+                elif res and isinstance(res, dict) and not res.get("status"):
+                    logger.debug(f"[MARKET_DATA] SmartAPI ltpData error for {sym}: {res.get('message')} ({res.get('errorcode')})")
             except Exception as e:
                 logger.debug(f"[MARKET_DATA] Live spot query for {sym} failed: {e}")
         return base_p

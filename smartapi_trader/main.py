@@ -356,6 +356,11 @@ class TradingOrchestrator:
                             logger.info("[ORCHESTRATOR] 🌅 Daily rollover: Refreshing Angel One authentication session...")
                             try:
                                 self.auth_manager.initialize_session()
+                                self.smart_api = self.auth_manager.smart_api
+                                self.jwt_token = self.auth_manager.jwt_token
+                                self.feed_token = self.auth_manager.feed_token
+                                if hasattr(self, "stock_market_data") and self.stock_market_data:
+                                    self.stock_market_data.smart_api = self.auth_manager.smart_api
                                 if hasattr(self, "stream_client") and self.stream_client:
                                     self.stream_client.update_tokens(self.auth_manager.jwt_token, self.auth_manager.feed_token)
                                 if hasattr(self, "live_engine") and self.live_engine:

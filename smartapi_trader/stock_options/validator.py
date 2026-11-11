@@ -27,9 +27,8 @@ def check_trigger_status(
     entry_trigger = float(tech.get("entry_trigger", 0.0))
     inval_level = float(tech.get("invalidation_level", 0.0))
 
-    # Guard against false invalidation if current_spot is a static fallback base_price
-    base_price = NSE_FO_STOCKS.get(sym, {}).get("base_price", 0.0)
-    if ref_spot > 0 and (current_spot <= 0 or (current_spot == base_price and abs(ref_spot - base_price) / max(1.0, ref_spot) > 0.01)):
+    # Guard against false invalidation if current_spot is unpriced (<= 0)
+    if current_spot <= 0 and ref_spot > 0:
         current_spot = ref_spot
 
     if inval_level <= 0:
