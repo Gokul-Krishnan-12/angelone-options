@@ -197,6 +197,10 @@ class StockOptionsPaperAgent:
         is_testing = ("unittest" in sys.modules or "pytest" in sys.modules or os.environ.get("TESTING") == "1")
         is_past_cutoff = (not is_testing and is_market_hours(cur_ist) and cur_ist.time() >= dt_time(14, 30))
 
+        # Strict 09:15 - 09:20 IST Opening Bell Stabilization Lock: Avoid opening gap noise & whip traps
+        if not is_testing and is_market_hours(cur_ist) and dt_time(9, 15) <= cur_ist.time() < dt_time(9, 20):
+            return
+
         symbols_to_remove = []
         for sym, item in list(self.armed_candidates.items()):
             candidate = item.get("candidate", {})
@@ -474,6 +478,36 @@ class StockOptionsPaperAgent:
                     )
                     continue
 
+            # 4c. Stagnation / Time-Decay Exit (60m holding without momentum displacement)
+            # Option buyers lose edge when positions stall. If held >= 60 minutes and hasn't hit Target,
+            # and floating PnL is stagnant (-8.0% <= PnL <= +8.0%), cut position to preserve capital & margin.
+            entry_time_str = pos.get("entry_time") or pos.get("created_at") or ""
+            holding_mins = 0.0
+            if entry_time_str:
+                try:
+                    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+                        try:
+                            et = datetime.strptime(str(entry_time_str)[:19], fmt[:19])
+                            holding_mins = (cur_ist - et).total_seconds() / 60.0
+                            break
+                        except ValueError:
+                            continue
+                except Exception:
+                    pass
+
+            max_stagnation_mins = float(self.storage.get_setting("stock_options_max_holding_mins") or 60.0)
+            if holding_mins >= max_stagnation_mins and -8.0 <= unrealized_pnl_pct <= 8.0:
+                logger.info(
+                    f"[PAPER_AGENT] ⏳ STAGNATION EXIT (Time-Decay Guard): {sym} held for {int(holding_mins)}m "
+                    f"(PnL: {unrealized_pnl_pct:+.2f}%). Auto-liquidating virtual position to prevent theta decay."
+                )
+                self.close_simulated_position(
+                    symbol=sym,
+                    exit_nominal_price=current_ltp,
+                    reason=f"Stagnation / Time-Decay Exit ({int(holding_mins)}m, PnL: {unrealized_pnl_pct:+.1f}%)"
+                )
+                continue
+
             # EOD Auto Square-off at 15:15 IST
             if is_eod_time:
                 logger.info(f"[PAPER_AGENT] ⏰ AUTO EOD SQUARE-OFF (15:15 IST): Liquidating {sym} @ ₹{current_ltp}.")
@@ -562,9 +596,15 @@ class StockOptionsPaperAgent:
 
             # 2. Check conditional trigger confirmation unless force_immediate is True
             if not force_immediate:
-                # 14:30 IST Entry Cutoff Guard: Block late afternoon entries during live market hours
                 now_dt = datetime.now()
                 is_testing = ("unittest" in sys.modules or "pytest" in sys.modules or os.environ.get("TESTING") == "1")
+
+                # 09:15 - 09:20 IST Opening Bell Stabilization Lock: Hold in armed state to avoid opening gap whipsaws
+                if not is_testing and is_market_hours(now_dt) and dt_time(9, 15) <= now_dt.time() < dt_time(9, 20):
+                    logger.info(f"[PAPER_AGENT] ⏳ Setup for {sym} held in armed state: Opening bell stabilization lock active (09:15-09:20 IST). Awaiting 09:20 range settlement.")
+                    return self.arm_candidate(candidate, plan_id=plan_id, current_spot=spot, reason="Opening bell stabilization (09:15-09:20 IST)")
+
+                # 14:30 IST Entry Cutoff Guard: Block late afternoon entries during live market hours
                 if not is_testing and is_market_hours(now_dt) and now_dt.time() >= dt_time(14, 30):
                     logger.warning(f"[PAPER_AGENT] Rejected {sym}: Entry cutoff reached (14:30 IST). Intraday option buying is closed to prevent late-session theta decay.")
                     return {"status": "rejected", "reason": "Entry cutoff reached (14:30 IST). Intraday option buying is closed."}

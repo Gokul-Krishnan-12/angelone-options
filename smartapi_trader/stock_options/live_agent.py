@@ -143,6 +143,10 @@ class StockOptionsLiveAgent:
         cur_ist = datetime.now()
         is_past_cutoff = (is_market_hours(cur_ist) and cur_ist.time() >= dt_time(14, 30))
 
+        # Strict 09:15 - 09:20 IST Opening Bell Stabilization Lock: Avoid opening gap noise & whip traps
+        if is_market_hours(cur_ist) and dt_time(9, 15) <= cur_ist.time() < dt_time(9, 20):
+            return
+
         symbols_to_remove = []
         for sym, item in list(self.armed_candidates.items()):
             candidate = item.get("candidate", {})
@@ -372,8 +376,14 @@ class StockOptionsLiveAgent:
 
             # 2. Check conditional trigger confirmation unless force_immediate is True
             if not force_immediate:
-                # 14:30 IST Entry Cutoff Guard: Block late afternoon entries during live market hours
                 now_dt = datetime.now()
+
+                # 09:15 - 09:20 IST Opening Bell Stabilization Lock: Hold in armed state to avoid opening gap whipsaws
+                if is_market_hours(now_dt) and dt_time(9, 15) <= now_dt.time() < dt_time(9, 20):
+                    logger.info(f"[LIVE_AGENT] ⏳ Setup for {sym} held in armed state: Opening bell stabilization lock active (09:15-09:20 IST). Awaiting 09:20 range settlement.")
+                    return self.arm_candidate(candidate, plan_id=plan_id, current_spot=spot, reason="Opening bell stabilization (09:15-09:20 IST)")
+
+                # 14:30 IST Entry Cutoff Guard: Block late afternoon entries during live market hours
                 if is_market_hours(now_dt) and now_dt.time() >= dt_time(14, 30):
                     logger.warning(f"[LIVE_AGENT] Rejected {sym}: Entry cutoff reached (14:30 IST). Intraday option buying is closed to prevent late-session theta decay.")
                     return {"status": "rejected", "reason": "Entry cutoff reached (14:30 IST). Intraday option buying is closed."}

@@ -479,6 +479,56 @@ class SniperILSMEStrategy(BaseStrategy):
         sample = trs[-period:]
         return sum(sample) / len(sample) if sample else 0.0
 
+    def _calculate_adx(self, token: str, period: int = 14) -> float:
+        """Calculates rolling 14-period Average Directional Index (ADX) from closed 3m bars."""
+        closed = self.bars.get(token, {}).get("3m", [])
+        if len(closed) < (period + 2):
+            return 25.0  # Default neutral/trending threshold if insufficient bars
+
+        tr_list = []
+        pdm_list = []
+        mdm_list = []
+        for i in range(1, len(closed)):
+            h = closed[i].high
+            l = closed[i].low
+            prev_h = closed[i - 1].high
+            prev_l = closed[i - 1].low
+            prev_c = closed[i - 1].close
+
+            tr = max(h - l, abs(h - prev_c), abs(l - prev_c))
+            up_move = h - prev_h
+            down_move = prev_l - l
+
+            pdm = up_move if (up_move > down_move and up_move > 0) else 0.0
+            mdm = down_move if (down_move > up_move and down_move > 0) else 0.0
+
+            tr_list.append(tr)
+            pdm_list.append(pdm)
+            mdm_list.append(mdm)
+
+        if len(tr_list) < period:
+            return 25.0
+
+        dx_list = []
+        for i in range(period, len(tr_list) + 1):
+            sub_tr = sum(tr_list[i - period:i])
+            if sub_tr <= 0:
+                continue
+            sub_pdm = sum(pdm_list[i - period:i])
+            sub_mdm = sum(mdm_list[i - period:i])
+            pdi = 100.0 * (sub_pdm / sub_tr)
+            mdi = 100.0 * (sub_mdm / sub_tr)
+            di_sum = pdi + mdi
+            if di_sum > 0:
+                dx = 100.0 * abs(pdi - mdi) / di_sum
+                dx_list.append(dx)
+
+        if not dx_list:
+            return 25.0
+
+        adx_sample = dx_list[-period:] if len(dx_list) >= period else dx_list
+        return sum(adx_sample) / len(adx_sample)
+
     def _check_macro_liquidity_clearance(
         self,
         underlying: str,
@@ -829,15 +879,20 @@ class SniperILSMEStrategy(BaseStrategy):
                     recent_pullback_bars = closed_3m[-4:-1] if len(closed_3m) >= 5 else []
                     ema_test_tol = max(4.0 if underlying == "NIFTY" else (15.0 if underlying == "SENSEX" else 10.0), atr_val * 0.35 if atr_val > 1.0 else 5.0)
                     near_ema_max = max(25.0 if underlying == "NIFTY" else (75.0 if underlying == "SENSEX" else 50.0), atr_val * 2.0 if atr_val > 1.0 else 25.0)
-                    pullback_max_vd_bull = max(max_vd_bull * 3.5, 220.0 if underlying == "NIFTY" else (650.0 if underlying == "SENSEX" else 450.0))
-                    pullback_max_vd_bear = max(max_vd_bear * 3.5, 220.0 if underlying == "NIFTY" else (650.0 if underlying == "SENSEX" else 450.0))
+                    pullback_max_vd_bull = min(max_vd_bull * 1.35, 55.0 if underlying == "NIFTY" else (160.0 if underlying == "SENSEX" else 110.0))
+                    pullback_max_vd_bear = min(max_vd_bear * 1.35, 55.0 if underlying == "NIFTY" else (160.0 if underlying == "SENSEX" else 110.0))
+
+                    # ADX Chop Guard: require ADX >= 20 to ensure market is in an active directional trend
+                    adx_val = self._calculate_adx(token, period=14)
+                    min_adx = float(self.cfg.get("min_adx_trend_threshold", 20.0))
+                    is_trending_adx = (adx_val >= min_adx)
 
                     # Volume check
                     vol_ok = True
                     if self.cfg.get("require_volume_expansion", True) and len(closed_3m) >= 20:
                         vol_sma = sum(b.volume for b in closed_3m[-20:]) / 20.0
-                        # For pullbacks, require volume >= vol_sma or higher than prior candle
-                        vol_ok = (curr_bar.volume >= (vol_sma * 1.0)) or (curr_bar.volume > closed_3m[-2].volume)
+                        # For pullbacks, require volume >= 1.1x vol_sma or higher than prior candle
+                        vol_ok = (curr_bar.volume >= (vol_sma * 1.1)) or (curr_bar.volume > closed_3m[-2].volume * 1.05)
 
                     # 1. BULLISH 9 EMA PULLBACK BOUNCE
                     is_bullish_pullback = False
@@ -846,6 +901,7 @@ class SniperILSMEStrategy(BaseStrategy):
                         and ema_fast > ema_slow
                         and curr_bar.close > vwap
                         and pass_or_bull
+                        and is_trending_adx
                         and (min_vd <= vwap_dist_bull <= pullback_max_vd_bull)
                         and any(b.low <= (ema_fast + ema_test_tol) for b in recent_pullback_bars)
                         and min(b.low for b in recent_pullback_bars) >= (ema_slow - ema_test_tol)
@@ -865,6 +921,7 @@ class SniperILSMEStrategy(BaseStrategy):
                         and ema_fast < ema_slow
                         and curr_bar.close < vwap
                         and pass_or_bear
+                        and is_trending_adx
                         and (min_vd <= vwap_dist_bear <= pullback_max_vd_bear)
                         and any(b.high >= (ema_fast - ema_test_tol) for b in recent_pullback_bars)
                         and max(b.high for b in recent_pullback_bars) <= (ema_slow + ema_test_tol)
