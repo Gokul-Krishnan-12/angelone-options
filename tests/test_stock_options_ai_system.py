@@ -816,6 +816,76 @@ class TestStockOptionsAISystem(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Sector Divergence", reason)
         self.assertIn("BANKNIFTY is bearish", reason)
 
+    # 24. Institutional AI Confidence Gate (>= 8.5 / 10)
+    def test_24_confidence_gate_rejection(self):
+        """Verifies validator rejects mediocre B-grade candidates with confidence < 8.5."""
+        val = StockOptionsValidator(self.universe_mgr)
+
+        mediocre_cand = {
+            "symbol": "INFY",
+            "bias": "BULLISH",
+            "confidence_score": 0.70,  # 7.0 / 10 is below 8.5 threshold
+            "technical": {"reference_price": 1850.0, "entry_trigger": 1855.0},
+            "primary_contract": {"strike_price": 1860.0, "option_type": "CE", "indicative_premium": 25.0},
+            "trade_management": {"stop_loss": 20.0, "target_1": 35.0}
+        }
+
+        is_valid, reason, _ = val.validate_candidate_for_execution(
+            candidate=mediocre_cand,
+            current_spot=1856.0,
+            current_option_ltp=25.0,
+            bid_price=24.8,
+            ask_price=25.2,
+            is_paper=True
+        )
+        self.assertFalse(is_valid)
+        self.assertIn("Confidence Gate Rejection", reason)
+        self.assertIn("below minimum institutional threshold", reason)
+
+        # High confidence A+ candidate (>= 8.5) must pass
+        aplus_cand = dict(mediocre_cand)
+        aplus_cand["confidence_score"] = 0.90
+        is_valid, reason, _ = val.validate_candidate_for_execution(
+            candidate=aplus_cand,
+            current_spot=1856.0,
+            current_option_ltp=25.0,
+            bid_price=24.8,
+            ask_price=25.2,
+            is_paper=True
+        )
+        self.assertTrue(is_valid, f"Should pass: {reason}")
+
+    # 25. Gemini AI Sentinel Index Regime Guard
+    async def test_25_index_gemini_sentinel_guard(self):
+        """Verifies SniperILSMEStrategy blocks breakout signals under RANGEBOUND_CHOP regime."""
+        from smartapi_trader.strategy.sniper_ilsme import SniperILSMEStrategy
+        from smartapi_trader.core.state_manager import StateManager
+
+        mock_loader = MagicMock()
+        mock_state_mgr = StateManager(self.event_bus)
+
+        strat = SniperILSMEStrategy(
+            event_bus=self.event_bus,
+            state_manager=mock_state_mgr,
+            instrument_loader=mock_loader,
+            config={"strategy": {"active_indices": ["NIFTY"]}, "risk": {}},
+            symbols_config={"indices": {"NIFTY": {"spot_token": "99926000"}}}
+        )
+
+        strat.index_regime = "RANGEBOUND_CHOP"
+        strat._regime_reason = "Index oscillating in tight range"
+
+        # Try generating breakout signal
+        mock_fvg = {"source": "MOMENTUM_ORB"}
+        published_signals = []
+        async def mock_publish(evt):
+            published_signals.append(evt)
+        strat.bus.publish = mock_publish
+
+        await strat._generate_sniper_signal("NIFTY", "BUY_CE", 25150.0, mock_fvg)
+        # Should be blocked
+        self.assertEqual(len(published_signals), 0, "Breakout signal must be blocked during RANGEBOUND_CHOP.")
+
 
 if __name__ == "__main__":
     unittest.main()

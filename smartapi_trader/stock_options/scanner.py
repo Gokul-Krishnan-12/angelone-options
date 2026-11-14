@@ -257,12 +257,58 @@ class IntradayAIScanner:
                 for s in shortlisted:
                     self._last_spot_snapshots[s["symbol"]] = s["spot"]
 
-                # 3. Formulate context
+                # 3. Formulate rich market context with live NIFTY & BANKNIFTY macro telemetry
+                macro_nifty = None
+                macro_banknifty = None
+                try:
+                    from smartapi_trader.web.app import ctx
+                    if ctx.state_manager and hasattr(ctx.state_manager, "spot_levels"):
+                        macro_nifty = ctx.state_manager.spot_levels.get("NIFTY")
+                        macro_banknifty = ctx.state_manager.spot_levels.get("BANKNIFTY")
+                except Exception:
+                    pass
+
+                if not macro_nifty and self.market_data:
+                    try:
+                        stream = getattr(self.market_data, "_get_active_stream_client", lambda: None)()
+                        if stream:
+                            tick_n = stream.latest_ticks.get("99926000")
+                            if tick_n and getattr(tick_n, "ltp", 0) > 0:
+                                macro_nifty = {
+                                    "spot": tick_n.ltp,
+                                    "open": tick_n.open,
+                                    "vwap": tick_n.open,
+                                    "day_change_pct": round(((tick_n.ltp - tick_n.close) / tick_n.close) * 100.0, 2) if tick_n.close else 0.0
+                                }
+                            tick_bn = stream.latest_ticks.get("99926009")
+                            if tick_bn and getattr(tick_bn, "ltp", 0) > 0:
+                                macro_banknifty = {
+                                    "spot": tick_bn.ltp,
+                                    "open": tick_bn.open,
+                                    "vwap": tick_bn.open,
+                                    "day_change_pct": round(((tick_bn.ltp - tick_bn.close) / tick_bn.close) * 100.0, 2) if tick_bn.close else 0.0
+                                }
+                    except Exception:
+                        pass
+
+                # Derive market regime for AI guidance
+                macro_regime = "NEUTRAL_CONSOLIDATION"
+                if macro_nifty and macro_nifty.get("spot", 0) > 0:
+                    n_spot = macro_nifty["spot"]
+                    n_vwap = macro_nifty.get("vwap") or n_spot
+                    n_open = macro_nifty.get("open") or n_spot
+                    if n_spot < n_vwap and n_spot < n_open:
+                        macro_regime = "BEARISH_DOWNTREND (NIFTY below VWAP & Open)"
+                    elif n_spot > n_vwap and n_spot > n_open:
+                        macro_regime = "BULLISH_UPTREND (NIFTY above VWAP & Open)"
+
                 market_context = {
                     "scan_id": scan_id,
                     "timestamp": now.isoformat(),
                     "session_time_ist": now.strftime("%H:%M:%S"),
-                    "market_regime": "Active Intraday Session",
+                    "market_regime": macro_regime,
+                    "macro_nifty": macro_nifty or "Telemetry unavailable",
+                    "macro_banknifty": macro_banknifty or "Telemetry unavailable",
                     "interval_mins": self.interval_mins,
                     "max_candidate_limit": clamped_max
                 }

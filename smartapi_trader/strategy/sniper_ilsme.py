@@ -1,4 +1,6 @@
 import math
+import asyncio
+import time as sys_time
 from datetime import datetime, time
 from typing import Dict, List, Optional, Any
 from smartapi_trader.core.events import BarEvent, TickEvent, SignalEvent, EventType
@@ -27,12 +29,17 @@ class SniperILSMEStrategy(BaseStrategy):
         instrument_loader: InstrumentLoader,
         config: Dict[str, Any],
         symbols_config: Dict[str, Any],
-        auth_manager: Optional[Any] = None
+        auth_manager: Optional[Any] = None,
+        ai_service: Optional[Any] = None
     ):
         super().__init__("ILSME_Sniper", event_bus)
         self.state_mgr = state_manager
         self.loader = instrument_loader
         self.auth_mgr = auth_manager
+        self.ai_service = ai_service
+        self.index_regime: str = "NORMAL"  # "TRENDING_BULLISH", "TRENDING_BEARISH", "RANGEBOUND_CHOP", "STANDBY_DEFENSIVE", "NORMAL"
+        self._last_regime_check_time: float = 0.0
+        self._regime_reason: str = "Quantitative indicators nominal."
         self.cfg = config.get("strategy", {})
         self.risk_cfg = config.get("risk", {})
         self.symbols_cfg = symbols_config.get("indices", {})
@@ -313,7 +320,75 @@ class SniperILSMEStrategy(BaseStrategy):
         for idx in self.active_indices:
             self._init_index_state(idx)
         self.state_mgr.set_strategy_status("Scanning for Liquidity Sweep & Momentum Breakouts")
+        self.index_regime = "NORMAL"
+        self._last_regime_check_time = 0.0
         logger.info("[STRATEGY] Daily state reset completed with fresh reference levels.")
+
+    async def evaluate_index_regime_with_ai(self, force: bool = False) -> str:
+        """
+        Queries Gemini AI to evaluate the overarching Index Market Regime.
+        Acts as a macro sentinel: classifies market as TRENDING_BULLISH, TRENDING_BEARISH,
+        RANGEBOUND_CHOP, or STANDBY_DEFENSIVE to protect against false breakout traps.
+        """
+        now = now_ist()
+        now_ts = sys_time.time()
+        if not force and (now_ts - self._last_regime_check_time) < 2700.0 and self.index_regime != "NORMAL":
+            return self.index_regime
+
+        if not self.ai_service or not getattr(self.ai_service, "is_configured", False):
+            return self.index_regime
+
+        try:
+            nifty_st = self.state.get("NIFTY", {})
+            bn_st = self.state.get("BANKNIFTY", {})
+
+            telemetry = {
+                "timestamp": now.isoformat(),
+                "time_ist": now.strftime("%H:%M:%S"),
+                "NIFTY": {
+                    "spot": nifty_st.get("last_spot", 0.0),
+                    "vwap": nifty_st.get("vwap", 0.0),
+                    "pdh": nifty_st.get("pdh", 0.0),
+                    "pdl": nifty_st.get("pdl", 0.0),
+                    "or_high": nifty_st.get("or_high", 0.0),
+                    "or_low": nifty_st.get("or_low", 0.0),
+                    "or_settled": nifty_st.get("or_settled", False),
+                },
+                "BANKNIFTY": {
+                    "spot": bn_st.get("last_spot", 0.0),
+                    "vwap": bn_st.get("vwap", 0.0),
+                    "pdh": bn_st.get("pdh", 0.0),
+                    "pdl": bn_st.get("pdl", 0.0),
+                    "or_high": bn_st.get("or_high", 0.0),
+                    "or_low": bn_st.get("or_low", 0.0),
+                    "or_settled": bn_st.get("or_settled", False),
+                }
+            }
+
+            res = await self.ai_service.analyze(
+                run_type="INTRADAY_SCAN",
+                intended_date=now.strftime("%Y-%m-%d"),
+                stock_data=[],
+                market_context={"index_sentinel_request": True, "telemetry": telemetry},
+                max_candidates=1
+            )
+            regime = getattr(res, "market_summary", "") or ""
+            if "BEARISH" in regime.upper():
+                self.index_regime = "TRENDING_BEARISH"
+            elif "BULLISH" in regime.upper():
+                self.index_regime = "TRENDING_BULLISH"
+            elif "CHOP" in regime.upper() or "RANGE" in regime.upper():
+                self.index_regime = "RANGEBOUND_CHOP"
+            else:
+                self.index_regime = "NORMAL"
+
+            self._regime_reason = res.no_trade_reason or regime or "Sentinel evaluation completed."
+            self._last_regime_check_time = now_ts
+            logger.info(f"[STRATEGY] 🧠 Gemini AI Sentinel evaluated Index Regime: {self.index_regime} ({self._regime_reason})")
+            return self.index_regime
+        except Exception as e:
+            logger.debug(f"[STRATEGY] Gemini AI Sentinel evaluation skipped: {e}")
+            return self.index_regime
 
     def _is_midday_chop(self) -> bool:
         """Checks if current time falls in midday consolidation based on risk settings (e.g. 11:45 - 13:00 or 11:15 - 13:30)."""
@@ -367,6 +442,10 @@ class SniperILSMEStrategy(BaseStrategy):
                 elif now_t > time(9, 30) and not st["or_settled"]:
                     st["or_settled"] = True
                     logger.info(f"[STRATEGY] {sym_name} 15m Opening Range SETTLED -> High: {st['or_high']:.2f} | Low: {st['or_low']:.2f}")
+                    try:
+                        asyncio.create_task(self.evaluate_index_regime_with_ai(force=True))
+                    except Exception:
+                        pass
 
                 self.state_mgr.update_spot_telemetry(
                     sym_name, event.ltp, st["vwap"], st["pdh"], st["pdl"], st["session_high"], st["session_low"]
@@ -1156,6 +1235,23 @@ class SniperILSMEStrategy(BaseStrategy):
         st = self.state[underlying]
         opt_type = "CE" if "CE" in signal_type else "PE"
         strat_source = fvg.get("source", "ILSME_REVERSAL")
+
+        # Gemini AI Sentinel Macro Regime Guard
+        if self.index_regime == "STANDBY_DEFENSIVE":
+            logger.warning(f"[STRATEGY] 🛡️ Gemini AI Sentinel Guard: Blocked {signal_type} for {underlying}. Regime is STANDBY_DEFENSIVE ({self._regime_reason}).")
+            return
+
+        if self.index_regime == "RANGEBOUND_CHOP" and strat_source in ("MOMENTUM_ORB", "DONCHIAN_BREAKOUT"):
+            logger.info(f"[STRATEGY] 🛡️ Gemini AI Sentinel Guard: Blocked breakout {signal_type} for {underlying}. Market classified as RANGEBOUND_CHOP. Breakout traps protected.")
+            return
+
+        if self.index_regime == "TRENDING_BEARISH" and opt_type == "CE":
+            logger.info(f"[STRATEGY] 🛡️ Gemini AI Sentinel Guard: Blocked BUY_CE for {underlying}. Regime is TRENDING_BEARISH ({self._regime_reason}).")
+            return
+
+        if self.index_regime == "TRENDING_BULLISH" and opt_type == "PE":
+            logger.info(f"[STRATEGY] 🛡️ Gemini AI Sentinel Guard: Blocked BUY_PE for {underlying}. Regime is TRENDING_BULLISH ({self._regime_reason}).")
+            return
         
         # Check expiry day theta protection rule:
         cur_ist = now_ist()

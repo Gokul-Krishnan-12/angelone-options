@@ -137,6 +137,21 @@ class StockOptionsValidator:
             except Exception as e:
                 logger.debug(f"[VALIDATOR] Daily cooldown query error: {e}")
 
+        # 2c. Institutional AI Confidence Gate (Minimum 8.5 / 10)
+        # Filters out low/medium confidence B-grade trades, executing only A+ institutional setups
+        conf_val = candidate.get("confidence_score")
+        if conf_val is not None:
+            try:
+                c_num = float(conf_val)
+                if c_num > 1.0:
+                    c_num = c_num / 10.0
+                if c_num < 0.85:
+                    reason = f"Confidence Gate Rejection: AI confidence score {c_num * 10.0:.1f}/10 is below minimum institutional threshold (8.5/10). Only A+ setups permitted."
+                    logger.warning(f"[VALIDATOR] Candidate {sym} rejected: {reason}")
+                    return False, f"Rejection: {reason}", {}
+            except Exception as e:
+                logger.debug(f"[VALIDATOR] Confidence score evaluation skipped for {sym}: {e}")
+
         # 3. Technical & Trigger Validation
         is_trig, is_inval, trig_msg = check_trigger_status(candidate, current_spot)
         if is_inval:

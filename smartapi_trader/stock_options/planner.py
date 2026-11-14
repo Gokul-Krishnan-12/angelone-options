@@ -87,13 +87,28 @@ class OvernightAIPlanner:
                     max_shortlist=6  # Pre-screen to top 6 pools for the AI to select max 3
                 )
 
-                # 2. Market Context Summary
+                # 2. Market Context Summary with live index reference
+                macro_nifty = None
+                macro_banknifty = None
+                if self.market_data:
+                    try:
+                        stream = getattr(self.market_data, "_get_active_stream_client", lambda: None)()
+                        if stream:
+                            tick_n = stream.latest_ticks.get("99926000")
+                            if tick_n and getattr(tick_n, "ltp", 0) > 0:
+                                macro_nifty = {"spot": tick_n.ltp, "close": tick_n.close, "day_change_pct": round(((tick_n.ltp - tick_n.close) / tick_n.close) * 100.0, 2) if tick_n.close else 0.0}
+                            tick_bn = stream.latest_ticks.get("99926009")
+                            if tick_bn and getattr(tick_bn, "ltp", 0) > 0:
+                                macro_banknifty = {"spot": tick_bn.ltp, "close": tick_bn.close, "day_change_pct": round(((tick_bn.ltp - tick_bn.close) / tick_bn.close) * 100.0, 2) if tick_bn.close else 0.0}
+                    except Exception:
+                        pass
+
                 market_context = {
                     "current_timestamp": now.isoformat(),
                     "intended_session_date": intended_date_str,
-                    "market_session_regime": "Post-Market EOD Close",
-                    "nifty_sentiment": "Mild Bullish Consolidation above 24,800",
-                    "india_vix_estimate": 13.8,
+                    "market_session_regime": "Post-Market Research & Planning",
+                    "macro_nifty": macro_nifty or "Telemetry unavailable",
+                    "macro_banknifty": macro_banknifty or "Telemetry unavailable",
                     "max_candidate_limit": clamped_max
                 }
 
