@@ -100,11 +100,27 @@ class RiskManager:
         open_index_positions = [p for p in open_positions if getattr(p, "underlying", "").upper() in index_names]
         open_stock_positions = [p for p in open_positions if getattr(p, "underlying", "").upper() not in index_names]
 
-        if not is_stock_option and len(open_index_positions) >= 1:
+        if self.correlation_guard and open_positions:
+            sig_underlying = getattr(signal, "underlying", "").upper()
+            sig_opt_type = getattr(signal, "option_type", "").upper()
+
+            for p in open_positions:
+                p_underlying = getattr(p, "underlying", "").upper()
+                p_opt_type = getattr(p, "option_type", "").upper()
+                if (sig_underlying in index_names and p_underlying in index_names) and (sig_opt_type == p_opt_type or self.max_open_positions <= 1):
+                    self._raise_alert(
+                        "WARNING",
+                        "CorrelationGuard",
+                        f"Order rejected: Correlated index position already open ({p.symbol} in {p_underlying} with {p_opt_type})."
+                    )
+                    return
+
+        max_idx_allowed = max(1, self.cfg.get("max_index_positions", 1 if self.max_open_positions <= 1 else self.max_open_positions))
+        if not is_stock_option and len(open_index_positions) >= max_idx_allowed:
             self._raise_alert(
                 "WARNING",
                 "MaxPositionsLimit",
-                f"Order rejected: Maximum concurrent index positions reached ({len(open_index_positions)}/1)."
+                f"Order rejected: Maximum concurrent index positions reached ({len(open_index_positions)}/{max_idx_allowed})."
             )
             return
 
@@ -123,21 +139,6 @@ class RiskManager:
                 f"Order rejected: Maximum concurrent open positions limit reached ({len(open_positions)}/{max(2, self.max_open_positions)})."
             )
             return
-
-        if self.correlation_guard and open_positions:
-            sig_underlying = getattr(signal, "underlying", "").upper()
-            sig_opt_type = getattr(signal, "option_type", "").upper()
-
-            for p in open_positions:
-                p_underlying = getattr(p, "underlying", "").upper()
-                p_opt_type = getattr(p, "option_type", "").upper()
-                if (sig_underlying in index_names and p_underlying in index_names) and (sig_opt_type == p_opt_type or self.max_open_positions <= 1):
-                    self._raise_alert(
-                        "WARNING",
-                        "CorrelationGuard",
-                        f"Order rejected: Correlated index position already open ({p.symbol} in {p_underlying} with {p_opt_type})."
-                    )
-                    return
 
         # 3. Consecutive Loss Circuit Breaker
         if self.state_mgr.consecutive_losses >= self.consecutive_loss_limit:
