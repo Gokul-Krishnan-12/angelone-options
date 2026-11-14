@@ -165,7 +165,7 @@ class TradingOrchestrator:
             if not ai_cfg.get("model"):
                 ai_cfg["model"] = self.stock_storage.get_setting("ai_model", "gemini-2.5-flash")
         self.ai_service = AIService(ai_cfg)
-        self.stock_validator = StockOptionsValidator(self.stock_universe)
+        self.stock_validator = StockOptionsValidator(self.stock_universe, storage=self.stock_storage, market_data=self.stock_market_data)
         self.overnight_planner = OvernightAIPlanner(self.ai_service, self.stock_market_data, self.stock_storage, self.notifier)
         self.intraday_scanner = IntradayAIScanner(self.ai_service, self.stock_market_data, self.stock_storage, default_interval_mins=5, notifier=self.notifier)
         self.stock_live_agent = StockOptionsLiveAgent(

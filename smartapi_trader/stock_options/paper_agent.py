@@ -77,10 +77,14 @@ class StockOptionsPaperAgent:
         event_bus: Optional[Any] = None
     ):
         self.storage = storage
-        self.validator = validator or StockOptionsValidator()
+        self.market_data = market_data
+        self.validator = validator or StockOptionsValidator(storage=self.storage, market_data=self.market_data)
+        if self.validator.storage is None:
+            self.validator.storage = self.storage
+        if self.validator.market_data is None:
+            self.validator.market_data = self.market_data
         self.simulation_engine = StockOptionsPaperEngine(initial_capital=initial_capital)
         self.notifier = notifier
-        self.market_data = market_data
         self.event_bus = event_bus
 
         self.status = "RUNNING"  # "RUNNING", "PAUSED", "STOPPED"
@@ -195,7 +199,7 @@ class StockOptionsPaperAgent:
 
         cur_ist = datetime.now()
         is_testing = ("unittest" in sys.modules or "pytest" in sys.modules or os.environ.get("TESTING") == "1")
-        is_past_cutoff = (not is_testing and is_market_hours(cur_ist) and cur_ist.time() >= dt_time(14, 30))
+        is_past_cutoff = (not is_testing and is_market_hours(cur_ist) and cur_ist.time() >= dt_time(13, 45))
 
         # Strict 09:15 - 09:20 IST Opening Bell Stabilization Lock: Avoid opening gap noise & whip traps
         if not is_testing and is_market_hours(cur_ist) and dt_time(9, 15) <= cur_ist.time() < dt_time(9, 20):
@@ -206,9 +210,9 @@ class StockOptionsPaperAgent:
             candidate = item.get("candidate", {})
             plan_id = item.get("plan_id", "")
 
-            # Strict 14:30 IST Cutoff during live market hours: expire un-triggered setups to prevent late-session theta burn
+            # Strict 13:45 IST Cutoff during live market hours: expire un-triggered setups to prevent late-session theta burn
             if is_past_cutoff:
-                logger.info(f"[PAPER_AGENT] ⏰ Armed candidate {sym} expired at 14:30 IST (Entry cutoff to prevent late-session theta decay).")
+                logger.info(f"[PAPER_AGENT] ⏰ Armed candidate {sym} expired at 13:45 IST (Entry cutoff to prevent late-session theta decay).")
                 symbols_to_remove.append(sym)
                 if self.storage and plan_id:
                     try:
@@ -216,6 +220,19 @@ class StockOptionsPaperAgent:
                     except Exception:
                         pass
                 continue
+
+            # Same-day Stop-Loss Cooldown Guard: Discard armed setup if stock was stopped out earlier today
+            if self.storage:
+                try:
+                    stopped_symbols = self.storage.get_stopped_out_underlyings_today()
+                    if sym in stopped_symbols:
+                        logger.warning(f"[PAPER_AGENT] 🛑 Armed setup {sym} INVALIDATED: Daily Cooldown active (stopped out earlier today).")
+                        symbols_to_remove.append(sym)
+                        if plan_id:
+                            self.storage.update_plan_status(plan_id, "DAILY_COOLDOWN_STOPPED_OUT", sym)
+                        continue
+                except Exception:
+                    pass
 
             current_spot = 0.0
             if self.market_data:
@@ -604,10 +621,20 @@ class StockOptionsPaperAgent:
                     logger.info(f"[PAPER_AGENT] ⏳ Setup for {sym} held in armed state: Opening bell stabilization lock active (09:15-09:20 IST). Awaiting 09:20 range settlement.")
                     return self.arm_candidate(candidate, plan_id=plan_id, current_spot=spot, reason="Opening bell stabilization (09:15-09:20 IST)")
 
-                # 14:30 IST Entry Cutoff Guard: Block late afternoon entries during live market hours
-                if not is_testing and is_market_hours(now_dt) and now_dt.time() >= dt_time(14, 30):
-                    logger.warning(f"[PAPER_AGENT] Rejected {sym}: Entry cutoff reached (14:30 IST). Intraday option buying is closed to prevent late-session theta decay.")
-                    return {"status": "rejected", "reason": "Entry cutoff reached (14:30 IST). Intraday option buying is closed."}
+                # 13:45 IST Entry Cutoff Guard: Block late afternoon entries during live market hours
+                if not is_testing and is_market_hours(now_dt) and now_dt.time() >= dt_time(13, 45):
+                    logger.warning(f"[PAPER_AGENT] Rejected {sym}: Entry cutoff reached (13:45 IST). Intraday option buying is closed to prevent late-session theta decay.")
+                    return {"status": "rejected", "reason": "Entry cutoff reached (13:45 IST). Intraday option buying is closed."}
+
+                # Same-day Stop-Loss Cooldown Guard: Block re-entry if stock was stopped out earlier today
+                if self.storage:
+                    try:
+                        stopped_symbols = self.storage.get_stopped_out_underlyings_today()
+                        if sym in stopped_symbols:
+                            logger.warning(f"[PAPER_AGENT] Rejected {sym}: Daily Cooldown active. Stock stopped out earlier today.")
+                            return {"status": "rejected", "reason": f"Daily Cooldown Active: {sym} was stopped out earlier today. Same-day re-entry blocked."}
+                    except Exception:
+                        pass
 
                 # Concurrent open positions cap (default 3)
                 max_sim_positions = int(self.storage.get_setting("max_concurrent_paper_positions") or 3)

@@ -701,6 +701,24 @@ class StockOptionsStorage:
 
     # ---------------- Settings ---------------- #
 
+    def get_stopped_out_underlyings_today(self, date_str: Optional[str] = None) -> List[str]:
+        """Returns list of underlying stock symbols that took a losing stop-loss exit today."""
+        if not date_str:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT DISTINCT underlying FROM stock_options_trades
+                    WHERE (exit_time LIKE ? OR created_at LIKE ?)
+                    AND exit_reason LIKE '%Stop-Loss%'
+                    AND (gross_pnl < 0 OR net_pnl < 0)
+                """, (f"{date_str}%", f"{date_str}%"))
+                return [str(r[0]).upper() for r in cursor.fetchall() if r[0]]
+        except Exception as e:
+            logger.debug(f"[STORAGE] Error querying stopped out underlyings: {e}")
+            return []
+
     def save_setting(self, key: str, value: Any):
         with self._get_connection() as conn:
             val_str = json.dumps(value) if isinstance(value, (dict, list, bool, int, float)) else str(value)

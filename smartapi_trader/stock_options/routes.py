@@ -80,7 +80,7 @@ def ensure_stock_options_initialized():
         from smartapi_trader.stock_options.validator import StockOptionsValidator
         so_ctx.paper_agent = StockOptionsPaperAgent(
             storage=so_ctx.storage,
-            validator=StockOptionsValidator(so_ctx.universe_mgr),
+            validator=StockOptionsValidator(so_ctx.universe_mgr, storage=so_ctx.storage, market_data=so_ctx.market_data),
             market_data=so_ctx.market_data
         )
     if so_ctx.live_agent and so_ctx.market_data and getattr(so_ctx.live_agent, "market_data", None) is None:

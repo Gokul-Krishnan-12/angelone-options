@@ -699,6 +699,123 @@ class TestStockOptionsAISystem(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(is_valid)
         self.assertIn("Sector Divergence", reason)
 
+    # 21. Daily Stop-Loss Cooldown Guard (Anti-Revenge Trading)
+    def test_21_daily_stop_loss_cooldown_rejection(self):
+        """Verifies candidate is rejected if the underlying took a losing stop-loss today."""
+        now = datetime.now()
+        # Record a losing trade for TITAN today
+        with self.storage._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO stock_options_trades
+                (trade_id, symbol, underlying, option_type, strike, quantity, entry_price, exit_price, gross_pnl, charges, net_pnl, entry_time, exit_time, exit_reason, is_paper, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                f"TR_TEST_{int(now.timestamp())}",
+                "TITAN23NOV264850PE",
+                "TITAN",
+                "PE",
+                4850.0,
+                175,
+                70.0,
+                61.0,
+                -1575.0,
+                45.0,
+                -1620.0,
+                now.isoformat(),
+                now.isoformat(),
+                "Auto Stop-Loss Hit (SL: ₹61.82, Exit: ₹61.0)",
+                1,
+                now.isoformat()
+            ))
+
+        # Verify storage identifies TITAN as stopped out
+        stopped = self.storage.get_stopped_out_underlyings_today()
+        self.assertIn("TITAN", stopped)
+
+        # Validator with storage attached must reject new TITAN candidates
+        val = StockOptionsValidator(self.universe_mgr, storage=self.storage)
+        candidate = {
+            "symbol": "TITAN",
+            "bias": "BEARISH",
+            "technical": {"reference_price": 4840.0, "entry_trigger": 4830.0},
+            "primary_contract": {"strike_price": 4850.0, "option_type": "PE", "indicative_premium": 65.0},
+            "trade_management": {"stop_loss": 55.0, "target_1": 80.0}
+        }
+
+        is_valid, reason, _ = val.validate_candidate_for_execution(
+            candidate=candidate,
+            current_spot=4825.0,
+            current_option_ltp=65.0,
+            bid_price=64.5,
+            ask_price=65.5,
+            is_paper=True
+        )
+        self.assertFalse(is_valid)
+        self.assertIn("Daily Cooldown Active", reason)
+        self.assertIn("TITAN was stopped out earlier today", reason)
+
+    # 22. Tier 1: Macro Tide Guard (NIFTY 50 Direction)
+    def test_22_macro_nifty_divergence_rejection(self):
+        """Verifies validator rejects bullish CE if NIFTY is dumping below VWAP & Open."""
+        val = StockOptionsValidator(self.universe_mgr)
+
+        # Bullish candidate when NIFTY is dumping
+        bullish_cand = {
+            "symbol": "COFORGE",
+            "bias": "BULLISH",
+            "technical": {"reference_price": 2060.0, "entry_trigger": 2070.0},
+            "primary_contract": {"strike_price": 2040.0, "option_type": "CE", "indicative_premium": 60.0},
+            "trade_management": {"stop_loss": 50.0, "target_1": 80.0},
+            "macro_confluence": {
+                "spot": 25050.0,
+                "open": 25200.0,
+                "vwap": 25180.0
+            }
+        }
+
+        is_valid, reason, _ = val.validate_candidate_for_execution(
+            candidate=bullish_cand,
+            current_spot=2075.0,
+            current_option_ltp=60.0,
+            bid_price=59.5,
+            ask_price=60.5,
+            is_paper=True
+        )
+        self.assertFalse(is_valid)
+        self.assertIn("Macro Divergence", reason)
+        self.assertIn("NIFTY 50 is bearish", reason)
+
+    # 23. Tier 2: Sector Confluence Guard (BANKNIFTY)
+    def test_23_sector_banknifty_divergence_rejection(self):
+        """Verifies validator rejects banking CE if BANKNIFTY is in a downtrend."""
+        val = StockOptionsValidator(self.universe_mgr)
+
+        banking_cand = {
+            "symbol": "HDFCBANK",
+            "bias": "BULLISH",
+            "technical": {"reference_price": 810.0, "entry_trigger": 815.0},
+            "primary_contract": {"strike_price": 810.0, "option_type": "CE", "indicative_premium": 15.0},
+            "trade_management": {"stop_loss": 12.0, "target_1": 20.0},
+            "macro_confluence": {"spot": 25200.0, "open": 25150.0, "vwap": 25160.0},  # Macro NIFTY is fine
+            "sector_index_confluence": {
+                "spot": 61200.0,
+                "open": 61600.0,
+                "vwap": 61550.0  # BANKNIFTY is dumping below VWAP
+            }
+        }
+
+        is_valid, reason, _ = val.validate_candidate_for_execution(
+            candidate=banking_cand,
+            current_spot=816.0,
+            current_option_ltp=15.0,
+            bid_price=14.8,
+            ask_price=15.2,
+            is_paper=True
+        )
+        self.assertFalse(is_valid)
+        self.assertIn("Sector Divergence", reason)
+        self.assertIn("BANKNIFTY is bearish", reason)
+
 
 if __name__ == "__main__":
     unittest.main()

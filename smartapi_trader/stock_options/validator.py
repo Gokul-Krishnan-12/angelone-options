@@ -83,8 +83,15 @@ class StockOptionsValidator:
     rigorous quantitative pre-trade criteria before order submission.
     """
 
-    def __init__(self, universe_mgr: Optional[StockUniverseManager] = None):
+    def __init__(
+        self,
+        universe_mgr: Optional[StockUniverseManager] = None,
+        storage: Optional[Any] = None,
+        market_data: Optional[Any] = None
+    ):
         self.universe_mgr = universe_mgr or StockUniverseManager()
+        self.storage = storage
+        self.market_data = market_data
 
     def validate_candidate_for_execution(
         self,
@@ -118,6 +125,18 @@ class StockOptionsValidator:
         stock_meta = NSE_FO_STOCKS[sym]
         lot_size = stock_meta["lot_size"]
 
+        # 2b. Same-Day Stop-Loss Cooldown Guard (Anti-Revenge Trading)
+        # Prevents re-entering a symbol that suffered a losing stop-loss today
+        if self.storage:
+            try:
+                stopped_symbols = self.storage.get_stopped_out_underlyings_today()
+                if sym in stopped_symbols:
+                    reason = f"Daily Cooldown Active: {sym} was stopped out earlier today. Same-day re-entry blocked to avoid revenge trading and duplicate losses."
+                    logger.warning(f"[VALIDATOR] Candidate {sym} rejected: {reason}")
+                    return False, f"Rejection: {reason}", {}
+            except Exception as e:
+                logger.debug(f"[VALIDATOR] Daily cooldown query error: {e}")
+
         # 3. Technical & Trigger Validation
         is_trig, is_inval, trig_msg = check_trigger_status(candidate, current_spot)
         if is_inval:
@@ -126,8 +145,104 @@ class StockOptionsValidator:
         if require_trigger and not is_trig:
             return False, f"Rejection: {trig_msg}", {}
 
-        # 3b. Sectoral Confluence Check
+        # 3b. Tier 1: Macro Tide Guard (NIFTY 50 Confluence)
+        contract = candidate.get("primary_contract", {})
+        opt_type = str(contract.get("option_type") or candidate.get("bias") or "CE").upper()
+        is_bullish = ("CE" in opt_type or "BULL" in opt_type)
+        opt_type = "CE" if is_bullish else "PE"
+
+        macro_telemetry = candidate.get("macro_confluence")
+        if not macro_telemetry:
+            try:
+                from smartapi_trader.web.app import ctx
+                if ctx.state_manager and hasattr(ctx.state_manager, "spot_levels"):
+                    macro_telemetry = ctx.state_manager.spot_levels.get("NIFTY")
+            except Exception:
+                pass
+
+        if not macro_telemetry and self.market_data:
+            try:
+                stream = getattr(self.market_data, "_get_active_stream_client", lambda: None)()
+                if stream:
+                    tick = stream.latest_ticks.get("99926000")
+                    if tick and getattr(tick, "ltp", 0) > 0:
+                        macro_telemetry = {
+                            "spot": tick.ltp,
+                            "open": tick.open if tick.open > 0 else tick.ltp,
+                            "vwap": tick.open if tick.open > 0 else tick.ltp,
+                            "close": tick.close
+                        }
+            except Exception:
+                pass
+
+        if macro_telemetry and isinstance(macro_telemetry, dict) and macro_telemetry.get("spot", 0) > 0:
+            n_spot = float(macro_telemetry["spot"])
+            n_vwap = float(macro_telemetry.get("vwap") or n_spot)
+            n_open = float(macro_telemetry.get("open") or n_spot)
+            buf = max(20.0, n_spot * 0.001)
+
+            if opt_type == "CE":
+                if n_spot < (n_vwap - buf) and n_spot < (n_open - buf):
+                    reason = (
+                        f"Macro Divergence: NIFTY 50 is bearish (Spot ₹{n_spot:.1f} < VWAP ₹{n_vwap:.1f} & Open ₹{n_open:.1f}). "
+                        f"Buying CE on {sym} against macro market sell-off is blocked."
+                    )
+                    logger.warning(f"[VALIDATOR] Candidate {sym} rejected: {reason}")
+                    return False, f"Rejection: {reason}", {}
+            elif opt_type == "PE":
+                if n_spot > (n_vwap + buf) and n_spot > (n_open + buf):
+                    reason = (
+                        f"Macro Divergence: NIFTY 50 is bullish (Spot ₹{n_spot:.1f} > VWAP ₹{n_vwap:.1f} & Open ₹{n_open:.1f}). "
+                        f"Buying PE on {sym} against macro market rally is blocked."
+                    )
+                    logger.warning(f"[VALIDATOR] Candidate {sym} rejected: {reason}")
+                    return False, f"Rejection: {reason}", {}
+
+        # 3c. Tier 2: Sector Confluence Guard
+        sector_name = stock_meta.get("sector", "")
+
+        # For Banking and Financial stocks, check BANKNIFTY live trend if available
+        if "Bank" in sector_name or "Financial" in sector_name:
+            bn_telemetry = candidate.get("sector_index_confluence")
+            if not bn_telemetry:
+                try:
+                    from smartapi_trader.web.app import ctx
+                    if ctx.state_manager and hasattr(ctx.state_manager, "spot_levels"):
+                        bn_telemetry = ctx.state_manager.spot_levels.get("BANKNIFTY")
+                except Exception:
+                    pass
+
+            if bn_telemetry and isinstance(bn_telemetry, dict) and bn_telemetry.get("spot", 0) > 0:
+                bn_spot = float(bn_telemetry["spot"])
+                bn_vwap = float(bn_telemetry.get("vwap") or bn_spot)
+                bn_open = float(bn_telemetry.get("open") or bn_spot)
+                bn_buf = max(50.0, bn_spot * 0.001)
+
+                if opt_type == "CE" and bn_spot < (bn_vwap - bn_buf) and bn_spot < (bn_open - bn_buf):
+                    reason = (
+                        f"Sector Divergence: BANKNIFTY is bearish (Spot ₹{bn_spot:.1f} < VWAP ₹{bn_vwap:.1f}). "
+                        f"Buying CE on {sym} against banking downtrend is blocked."
+                    )
+                    logger.warning(f"[VALIDATOR] Candidate {sym} rejected: {reason}")
+                    return False, f"Rejection: {reason}", {}
+                elif opt_type == "PE" and bn_spot > (bn_vwap + bn_buf) and bn_spot > (bn_open + bn_buf):
+                    reason = (
+                        f"Sector Divergence: BANKNIFTY is bullish (Spot ₹{bn_spot:.1f} > VWAP ₹{bn_vwap:.1f}). "
+                        f"Buying PE on {sym} against banking uptrend is blocked."
+                    )
+                    logger.warning(f"[VALIDATOR] Candidate {sym} rejected: {reason}")
+                    return False, f"Rejection: {reason}", {}
+
+        # For all stocks, evaluate Sector Peer Breadth (>= 50% peers aligned)
         sector_confluence = candidate.get("sector_confluence")
+        if not sector_confluence and self.market_data:
+            try:
+                sector_confluence = self.market_data.get_sector_confluence(
+                    sym, intended_bias="BULLISH" if opt_type == "CE" else "BEARISH"
+                )
+            except Exception as e:
+                logger.debug(f"[VALIDATOR] Live sector peer calculation failed for {sym}: {e}")
+
         if sector_confluence and isinstance(sector_confluence, dict):
             if not sector_confluence.get("aligned", True):
                 reason = sector_confluence.get("reason", "Sector divergence detected.")
