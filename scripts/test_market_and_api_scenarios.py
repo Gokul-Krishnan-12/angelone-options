@@ -325,7 +325,10 @@ class TestMarketDynamicsAndScenarios(unittest.IsolatedAsyncioTestCase):
         )
 
         await self.risk_mgr._on_signal(sig)
-        await asyncio.sleep(0.05)
+        for _ in range(20):
+            if len(orders) >= 2:
+                break
+            await asyncio.sleep(0.05)
 
         self.assertEqual(len(orders), 2)
         self.assertEqual(orders[0].transaction_type, "BUY")
@@ -339,7 +342,10 @@ class TestMarketDynamicsAndScenarios(unittest.IsolatedAsyncioTestCase):
         # Liquidation sequence
         orders.clear()
         await self.risk_mgr._exit_position(pos, 130.0, "Target Hit")
-        await asyncio.sleep(0.05)
+        for _ in range(20):
+            if len(orders) >= 2:
+                break
+            await asyncio.sleep(0.05)
 
         self.assertEqual(len(orders), 2)
         self.assertEqual(orders[0].transaction_type, "BUY", "Short hedge leg must be repurchased first")
