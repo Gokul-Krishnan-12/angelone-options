@@ -322,6 +322,23 @@ class StockOptionsValidator:
             if spread_pct > max_allowed_spread_pct:
                 return False, f"Rejection: Bid-ask spread {spread_pct:.1f}% exceeds maximum allowable ({max_allowed_spread_pct}%).", {}
 
+        # 5b. Anti-Chasing Entry Guard:
+        # Prevents buying at the absolute peak of a candle when option premium has spiked excessively
+        # (> 6.0% above the modeled indicative entry).
+        indicative_prem = float(contract.get("indicative_premium", 0.0) or 0.0)
+        tech = candidate.get("technical", {})
+        entry_trig = float(tech.get("entry_trigger", 0.0))
+        ref_s = float(tech.get("reference_price") or current_spot)
+        is_immediate_exec = (entry_trig <= 0 or abs(entry_trig - ref_s) / max(1.0, ref_s) < 0.002)
+        max_chase_pct = 6.0 if is_immediate_exec else 20.0
+
+        if indicative_prem > 0 and current_option_ltp > 0:
+            chase_pct = ((current_option_ltp - indicative_prem) / indicative_prem) * 100.0
+            if chase_pct > max_chase_pct:
+                reason = f"Anti-Chasing Guard: Current option LTP ₹{current_option_ltp:.2f} is +{chase_pct:.1f}% above indicative entry (₹{indicative_prem:.2f}, limit: +{max_chase_pct:.1f}%). Buying candle peak blocked to avoid retest shakeout."
+                logger.warning(f"[VALIDATOR] Candidate {sym} rejected: {reason}")
+                return False, f"Rejection: {reason}", {}
+
         # 6. Stop-Loss, Target, and R:R - Dynamic Institutional Risk Bracket Formulator
         trade_mgmt = candidate.get("trade_management", {})
         planned_sl = float(trade_mgmt.get("stop_loss", 0.0))
@@ -334,11 +351,15 @@ class StockOptionsValidator:
         unit_risk = None
         if planned_sl > 0 and planned_sl < actual_entry:
             implied_risk_pct = (actual_entry - planned_sl) / actual_entry
-            max_allowed_risk_pct = 0.35 if actual_entry < 15.0 else 0.20
-            # Honor planned SL only if within disciplined premium risk band
+            max_allowed_risk_pct = 0.30 if actual_entry < 15.0 else 0.16
+            # Honor planned SL only if within disciplined premium risk band (5% to 16%)
             if 0.05 <= implied_risk_pct <= max_allowed_risk_pct:
                 actual_sl = planned_sl
                 unit_risk = round(actual_entry - planned_sl, 2)
+            elif implied_risk_pct > max_allowed_risk_pct:
+                # Clamp stop-loss dynamically to 12% of actual entry so unit risk does not balloon
+                unit_risk = round(max(0.5, actual_entry * 0.12), 2)
+                actual_sl = round(max(0.1, actual_entry - unit_risk), 2)
 
         if unit_risk is None:
             # Default to institutional 12% option premium stop
@@ -382,7 +403,8 @@ class StockOptionsValidator:
             "target_2": actual_t2,
             "lot_size": lot_size,
             "risk_reward_ratio": recalculated_rr,
-            "unit_risk": unit_risk
+            "unit_risk": unit_risk,
+            "invalidation_level": float(candidate.get("technical", {}).get("invalidation_level", 0.0) or 0.0)
         }
 
         logger.info(f"[VALIDATOR] Candidate {sym} APPROVED for execution: Contract={tradingsymbol} Entry=₹{actual_entry} SL=₹{actual_sl} T1=₹{actual_t1}")

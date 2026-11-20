@@ -235,6 +235,9 @@ stock_options:
   # Scan frequency interval in minutes during market hours
   scan_interval_mins: 5
 
+  # Maximum allowable option premium slippage / chase percentage above AI modeled entry
+  max_entry_chase_pct: 6.0
+
   # Maximum candidate setups to formulate and track per scan
   max_candidates: 3
 

@@ -448,13 +448,35 @@ class StockOptionsPaperAgent:
 
             # 4b. Stop Loss (LTP <= Stop Loss for option buyers)
             if sl > 0 and current_ltp <= sl:
-                logger.warning(f"[PAPER_AGENT] 🛑 AUTO STOP-LOSS TRIGGERED: {sym} LTP ₹{current_ltp} <= SL ₹{sl}. Auto-liquidating virtual position.")
-                self.close_simulated_position(
-                    symbol=sym,
-                    exit_nominal_price=current_ltp,
-                    reason=f"Auto Stop-Loss Hit (SL: ₹{sl}, Exit: ₹{current_ltp})"
-                )
-                continue
+                # Dual-Factor Invalidation Guard:
+                # If breakeven is active (sl >= entry_p), exit immediately to preserve locked capital.
+                # If initial risk phase (sl < entry_p), verify whether spot has actually breached structural invalidation.
+                inval_level = float(pos.get("invalidation_level", 0.0) or 0.0)
+                hard_sl_floor = entry_p * 0.78  # Max 22% hard floor to prevent holding through catastrophic collapse
+                is_be_sl = (sl >= entry_p)
+
+                spot_invalidated = True
+                if not is_be_sl and inval_level > 0 and current_ltp > hard_sl_floor:
+                    try:
+                        spot_p = await self.market_data.get_spot_price(underlying)
+                        if spot_p > 0:
+                            if opt_type == "CE" and spot_p >= inval_level:
+                                spot_invalidated = False
+                                logger.info(f"[PAPER_AGENT] 🛡️ Spot Invalidation Guard for {sym}: Option LTP ₹{current_ltp} touched SL ₹{sl}, but spot ₹{spot_p:.2f} is holding above invalidation level ₹{inval_level:.2f}. Shakeout defended.")
+                            elif opt_type == "PE" and spot_p <= inval_level:
+                                spot_invalidated = False
+                                logger.info(f"[PAPER_AGENT] 🛡️ Spot Invalidation Guard for {sym}: Option LTP ₹{current_ltp} touched SL ₹{sl}, but spot ₹{spot_p:.2f} is holding below invalidation level ₹{inval_level:.2f}. Shakeout defended.")
+                    except Exception as e:
+                        logger.debug(f"[PAPER_AGENT] Spot check error: {e}")
+
+                if spot_invalidated or current_ltp <= hard_sl_floor:
+                    logger.warning(f"[PAPER_AGENT] 🛑 AUTO STOP-LOSS TRIGGERED: {sym} LTP ₹{current_ltp} <= SL ₹{sl}. Auto-liquidating virtual position.")
+                    self.close_simulated_position(
+                        symbol=sym,
+                        exit_nominal_price=current_ltp,
+                        reason=f"Auto Stop-Loss Hit (SL: ₹{sl}, Exit: ₹{current_ltp})"
+                    )
+                    continue
 
             # Multi-Tranche Exits: Partial Profit Booking at Target 1 (1:2.0 R:R)
             if t1 > 0 and current_ltp >= t1:
@@ -764,6 +786,7 @@ class StockOptionsPaperAgent:
                 "stop_loss": exec_sl,
                 "target_1": exec_t1,
                 "target_2": exec_t2,
+                "invalidation_level": float(candidate.get("technical", {}).get("invalidation_level", 0.0) or params.get("invalidation_level", 0.0)),
                 "tranche_stage": 0,
                 "is_open": True,
                 "is_paper": True,

@@ -126,7 +126,8 @@ class StockOptionsStorage:
             for col_sql in (
                 "ALTER TABLE stock_options_positions ADD COLUMN token TEXT DEFAULT ''",
                 "ALTER TABLE stock_options_positions ADD COLUMN target_2 REAL DEFAULT 0.0",
-                "ALTER TABLE stock_options_positions ADD COLUMN tranche_stage INTEGER DEFAULT 0"
+                "ALTER TABLE stock_options_positions ADD COLUMN tranche_stage INTEGER DEFAULT 0",
+                "ALTER TABLE stock_options_positions ADD COLUMN invalidation_level REAL DEFAULT 0.0"
             ):
                 try:
                     conn.execute(col_sql)
@@ -281,8 +282,8 @@ class StockOptionsStorage:
             now = datetime.now().isoformat()
             conn.execute("""
                 INSERT OR REPLACE INTO stock_options_positions
-                (symbol, underlying, option_type, strike, expiry, quantity, lot_size, lots, entry_price, current_ltp, unrealized_pnl, realized_pnl, stop_loss, target_1, token, is_open, is_paper, execution_mode, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (symbol, underlying, option_type, strike, expiry, quantity, lot_size, lots, entry_price, current_ltp, unrealized_pnl, realized_pnl, stop_loss, target_1, token, invalidation_level, is_open, is_paper, execution_mode, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 pos["symbol"],
                 pos.get("underlying", ""),
@@ -299,6 +300,7 @@ class StockOptionsStorage:
                 float(pos.get("stop_loss", 0.0)),
                 float(pos.get("target_1", 0.0)),
                 str(pos.get("token", "")),
+                float(pos.get("invalidation_level", 0.0) or 0.0),
                 1 if pos.get("is_open", True) else 0,
                 1 if pos.get("is_paper", False) else 0,
                 pos.get("execution_mode", "PAPER"),
