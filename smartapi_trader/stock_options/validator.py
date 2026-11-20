@@ -125,17 +125,42 @@ class StockOptionsValidator:
         stock_meta = NSE_FO_STOCKS[sym]
         lot_size = stock_meta["lot_size"]
 
-        # 2b. Same-Day Stop-Loss Cooldown Guard (Anti-Revenge Trading)
+        # 2b. Daily Stop-Loss Blacklist Guard (Anti-Revenge Trading)
         # Prevents re-entering a symbol that suffered a losing stop-loss today
         if self.storage:
             try:
                 stopped_symbols = self.storage.get_stopped_out_underlyings_today()
                 if sym in stopped_symbols:
-                    reason = f"Daily Cooldown Active: {sym} was stopped out earlier today. Same-day re-entry blocked to avoid revenge trading and duplicate losses."
+                    reason = f"Daily Cooldown Active (Stop-Loss Blacklist): {sym} was stopped out earlier today. Same-day re-entry blocked to avoid revenge trading and duplicate losses."
                     logger.warning(f"[VALIDATOR] Candidate {sym} rejected: {reason}")
                     return False, f"Rejection: {reason}", {}
             except Exception as e:
-                logger.debug(f"[VALIDATOR] Daily cooldown query error: {e}")
+                logger.debug(f"[VALIDATOR] Daily stop-loss blacklist query error: {e}")
+
+            # 2b-2. Mandatory 90-Minute Cooldown Guard on Any Exit
+            # Prevents immediate re-entry churn on the same stock
+            try:
+                recent_exits = self.storage.get_recent_exits_within_minutes(minutes=90.0)
+                for exit_item in recent_exits:
+                    if exit_item.get("underlying") == sym:
+                        mins_ago = exit_item.get("minutes_ago", 0.0)
+                        remaining = max(0.1, 90.0 - mins_ago)
+                        reason = f"Mandatory 90-Minute Cooldown Active: {sym} exited {mins_ago:.1f}m ago ({remaining:.1f}m remaining). Same-symbol re-entry blocked to protect capital."
+                        logger.warning(f"[VALIDATOR] Candidate {sym} rejected: {reason}")
+                        return False, f"Rejection: {reason}", {}
+            except Exception as e:
+                logger.debug(f"[VALIDATOR] 90-min cooldown query error: {e}")
+
+        # 2b-3. StateManager Central Cooldown & Blacklist Check (Index & Stock parity)
+        try:
+            from smartapi_trader.web.app import ctx
+            if ctx.state_manager:
+                is_bl, bl_reason = ctx.state_manager.is_symbol_blacklisted(sym, cooldown_mins=90.0)
+                if is_bl:
+                    logger.warning(f"[VALIDATOR] Candidate {sym} rejected by StateManager: {bl_reason}")
+                    return False, f"Rejection: {bl_reason}", {}
+        except Exception:
+            pass
 
         # 2c. Institutional AI Confidence Gate (Minimum 8.5 / 10)
         # Filters out low/medium confidence B-grade trades, executing only A+ institutional setups

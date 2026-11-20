@@ -1,6 +1,6 @@
 import time
 import pyotp
-from typing import Tuple, Dict, Any, Optional
+from typing import Tuple, Dict, Any, Optional, List
 from SmartApi import SmartConnect
 from smartapi_trader.utils.logger import logger
 
@@ -249,6 +249,100 @@ class AngelAuthManager:
         except Exception as e:
             logger.error(f"[AUTH] Error querying liquidity metrics for {token}: {e}")
         return {"valid": True, "oi": 100000, "volume": 100000, "spread_pct": 0.5, "ltp": 0.0}
+
+    def get_vix_metrics(self) -> Dict[str, Any]:
+        """Queries Angel One for live India VIX (token: 99926017 on NSE)."""
+        if not self.smart_api or self.is_simulated:
+            return {"valid": False, "vix": 15.0, "change_pct": 0.0, "is_expanding": True}
+        try:
+            res = self.smart_api.getMarketData(mode="FULL", exchangeTokens={"NSE": ["99926017"]})
+            if res and not res.get("status") and "token" in str(res.get("message", "")).lower():
+                self.initialize_session()
+                res = self.smart_api.getMarketData(mode="FULL", exchangeTokens={"NSE": ["99926017"]})
+
+            if res and res.get("status") and res.get("data", {}).get("fetched"):
+                d = res["data"]["fetched"][0]
+                ltp = float(d.get("ltp", 0.0) or 0.0)
+                close = float(d.get("close", 0.0) or 0.0)
+                chg_pct = float(d.get("percentChange", 0.0) or 0.0)
+                if chg_pct == 0.0 and close > 0:
+                    chg_pct = ((ltp - close) / close) * 100.0
+
+                # Expanding volatility: VIX is positive on the day, or >= 12.0 and not in severe freefall
+                is_expanding = (chg_pct >= -2.0 and ltp >= 12.0)
+                return {
+                    "valid": True,
+                    "vix": ltp,
+                    "change_pct": round(chg_pct, 2),
+                    "open": float(d.get("open", 0.0) or 0.0),
+                    "high": float(d.get("high", 0.0) or 0.0),
+                    "low": float(d.get("low", 0.0) or 0.0),
+                    "close": close,
+                    "is_expanding": is_expanding
+                }
+        except Exception as e:
+            logger.debug(f"[AUTH] Error fetching India VIX: {e}")
+        return {"valid": False, "vix": 15.0, "change_pct": 0.0, "is_expanding": True}
+
+    def get_option_chain_oi_metrics(self, exchange: str, tokens: List[str]) -> Dict[str, Any]:
+        """Queries Angel One FULL market data for a basket of option strikes to compute OI and PCR."""
+        if not self.smart_api or not tokens or self.is_simulated:
+            return {"valid": False, "total_ce_oi": 0, "total_pe_oi": 0, "pcr_oi": 1.0, "pcr_vol": 1.0}
+        try:
+            res = self.smart_api.getMarketData(mode="FULL", exchangeTokens={exchange: [str(t) for t in tokens]})
+            if res and not res.get("status") and "token" in str(res.get("message", "")).lower():
+                self.initialize_session()
+                res = self.smart_api.getMarketData(mode="FULL", exchangeTokens={exchange: [str(t) for t in tokens]})
+
+            if res and res.get("status") and res.get("data", {}).get("fetched"):
+                fetched = res["data"]["fetched"]
+                total_ce_oi = 0
+                total_pe_oi = 0
+                total_ce_vol = 0
+                total_pe_vol = 0
+                total_ce_buy_qty = 0
+                total_ce_sell_qty = 0
+                total_pe_buy_qty = 0
+                total_pe_sell_qty = 0
+
+                for item in fetched:
+                    sym = str(item.get("tradingSymbol", ""))
+                    oi = int(item.get("opnInterest", 0) or 0)
+                    vol = int(item.get("tradeVolume", 0) or 0)
+                    depth = item.get("depth", {})
+                    buys = sum(b.get("quantity", 0) for b in depth.get("buy", []))
+                    sells = sum(s.get("quantity", 0) for s in depth.get("sell", []))
+
+                    if sym.endswith("CE"):
+                        total_ce_oi += oi
+                        total_ce_vol += vol
+                        total_ce_buy_qty += buys
+                        total_ce_sell_qty += sells
+                    elif sym.endswith("PE"):
+                        total_pe_oi += oi
+                        total_pe_vol += vol
+                        total_pe_buy_qty += buys
+                        total_pe_sell_qty += sells
+
+                pcr_oi = round(total_pe_oi / max(1, total_ce_oi), 2)
+                pcr_vol = round(total_pe_vol / max(1, total_ce_vol), 2)
+                return {
+                    "valid": True,
+                    "total_ce_oi": total_ce_oi,
+                    "total_pe_oi": total_pe_oi,
+                    "total_ce_vol": total_ce_vol,
+                    "total_pe_vol": total_pe_vol,
+                    "pcr_oi": pcr_oi,
+                    "pcr_vol": pcr_vol,
+                    "ce_buy_depth": total_ce_buy_qty,
+                    "ce_sell_depth": total_ce_sell_qty,
+                    "pe_buy_depth": total_pe_buy_qty,
+                    "pe_sell_depth": total_pe_sell_qty,
+                    "count": len(fetched)
+                }
+        except Exception as e:
+            logger.debug(f"[AUTH] Error querying option chain OI metrics: {e}")
+        return {"valid": False, "total_ce_oi": 0, "total_pe_oi": 0, "pcr_oi": 1.0, "pcr_vol": 1.0}
 
 def initialize_broker_session(api_key: str, client_code: str, pin: str, totp_secret: str):
     """Convenience helper conforming to architectural blueprint."""

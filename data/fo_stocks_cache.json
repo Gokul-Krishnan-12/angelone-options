@@ -77,7 +77,7 @@
     "tick_size": 0.05,
     "base_price": 930.0,
     "token_nse": "3456",
-    "is_active": false
+    "is_active": true
   },
   "LT": {
     "name": "Larsen & Toubro Ltd",
@@ -292,7 +292,7 @@
   "EICHERMOT": {
     "name": "Eicher Motors Ltd",
     "sector": "Automobile",
-    "lot_size": 100,
+    "lot_size": 175,
     "strike_step": 50.0,
     "tick_size": 0.05,
     "base_price": 7300.0,
@@ -482,7 +482,7 @@
   "HINDALCO": {
     "name": "Hindalco Industries Ltd",
     "sector": "Metals & Mining",
-    "lot_size": 700,
+    "lot_size": 1400,
     "strike_step": 5.0,
     "tick_size": 0.05,
     "base_price": 905.0,

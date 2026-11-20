@@ -719,6 +719,45 @@ class StockOptionsStorage:
             logger.debug(f"[STORAGE] Error querying stopped out underlyings: {e}")
             return []
 
+    def get_recent_exits_within_minutes(self, minutes: float = 90.0, date_str: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Returns list of underlying stock symbols and their exit times for trades closed in the last N minutes."""
+        if not date_str:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+        now = datetime.now()
+        results = []
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT underlying, symbol, exit_time, exit_reason, net_pnl, created_at 
+                    FROM stock_options_trades
+                    WHERE (exit_time LIKE ? OR created_at LIKE ?)
+                    ORDER BY id DESC
+                """, (f"{date_str}%", f"{date_str}%"))
+                rows = cursor.fetchall()
+                for r in rows:
+                    und = str(r[0]).upper()
+                    t_str = str(r[2] or r[5])
+                    try:
+                        # Handle ISO or space-separated timestamp
+                        clean_t = t_str.replace("T", " ")[:19]
+                        exit_dt = datetime.strptime(clean_t, "%Y-%m-%d %H:%M:%S")
+                        elapsed_m = (now - exit_dt).total_seconds() / 60.0
+                        if 0 <= elapsed_m < minutes:
+                            results.append({
+                                "underlying": und,
+                                "symbol": str(r[1]),
+                                "exit_time": clean_t,
+                                "minutes_ago": round(elapsed_m, 1),
+                                "exit_reason": str(r[3]),
+                                "net_pnl": float(r[4] or 0.0)
+                            })
+                    except Exception:
+                        continue
+        except Exception as e:
+            logger.debug(f"[STORAGE] Error querying recent exits: {e}")
+        return results
+
     def save_setting(self, key: str, value: Any):
         with self._get_connection() as conn:
             val_str = json.dumps(value) if isinstance(value, (dict, list, bool, int, float)) else str(value)

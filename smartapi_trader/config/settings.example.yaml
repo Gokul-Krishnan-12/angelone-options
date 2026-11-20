@@ -166,7 +166,11 @@ strategy:
   ema_slow_period: 21
   donchian_lookback_bars: 15
   donchian_require_or_break: true
-  trade_cooldown_minutes: 15.0
+  trade_cooldown_minutes: 90.0
+  min_adx_trend_threshold: 22.0
+  min_pcr_bullish: 0.90
+  max_pcr_bearish: 1.15
+  min_vix_threshold: 12.0
 
   # Bar timeframe settings
   macro_timeframe_minutes: 15

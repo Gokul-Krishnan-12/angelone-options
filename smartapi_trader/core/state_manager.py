@@ -1,6 +1,6 @@
 import asyncio
-from datetime import datetime
-from typing import Dict, Any, List, Optional
+from datetime import datetime, timedelta
+from typing import Dict, Any, List, Optional, Tuple
 from smartapi_trader.core.events import (
     BaseEvent, EventType, TickEvent, OrderEvent, FillEvent, PositionEvent, SystemStateEvent
 )
@@ -73,6 +73,10 @@ class StateManager:
         self.ticks: Dict[str, TickEvent] = {}         # Keyed by token
         self.trade_history: List[Dict[str, Any]] = []
         self.spot_levels: Dict[str, Dict[str, float]] = self._init_dynamic_spot_levels()
+
+        # Institutional Execution Discipline Guards
+        self.symbol_last_exit_times: Dict[str, datetime] = {}
+        self.daily_sl_blacklisted_symbols: set[str] = set()
 
         # Wire up event subscriptions
         self._register_subscribers()
@@ -810,6 +814,17 @@ class StateManager:
 
         self.trade_history.insert(0, trade_record)
 
+        # Record Institutional Cooldown & Daily SL Blacklist
+        resolved_und = getattr(pos, "underlying", "") if pos else ""
+        if not resolved_und and symbol:
+            for cand in ["NIFTY", "BANKNIFTY", "SENSEX", "MIDCPNIFTY"]:
+                if cand in symbol.upper():
+                    resolved_und = cand
+                    break
+        if resolved_und:
+            is_sl = ("stop-loss" in exit_reason.lower() or "sl" in exit_reason.lower() or "hard stop" in exit_reason.lower()) and (pnl < 0)
+            self.record_symbol_exit(resolved_und, is_stop_loss=is_sl)
+
         if self.storage:
             self.storage.save_trade(trade_record)
             self.storage.mark_position_closed(symbol, realized_pnl=pnl)
@@ -817,6 +832,37 @@ class StateManager:
         if self.storage:
             self._sync_ledger_to_storage()
         self.broadcast_state()
+
+    def record_symbol_exit(self, underlying: str, is_stop_loss: bool = False):
+        """Records an exit timestamp and updates daily stop-loss blacklist if applicable."""
+        sym = underlying.upper().strip()
+        self.symbol_last_exit_times[sym] = now_ist()
+        if is_stop_loss:
+            self.daily_sl_blacklisted_symbols.add(sym)
+            logger.warning(f"[STATE] 🚫 Added {sym} to DAILY STOP-LOSS BLACKLIST. Blocked from further trading today.")
+        else:
+            logger.info(f"[STATE] ⏳ Mandatory 90-Minute Cooldown active for {sym} until {(now_ist() + timedelta(minutes=90)).strftime('%H:%M:%S')} IST.")
+
+    def is_symbol_blacklisted(self, underlying: str, cooldown_mins: float = 90.0) -> Tuple[bool, str]:
+        """
+        Checks whether an underlying symbol is restricted due to:
+        1. Daily Stop-Loss Blacklist (stopped out earlier today -> blocked for full session)
+        2. Mandatory 90-Minute Cooldown (exited recently -> blocked for 90 minutes)
+        """
+        sym = underlying.upper().strip()
+        # 1. Daily SL Blacklist Check
+        if sym in self.daily_sl_blacklisted_symbols:
+            return True, f"Daily Stop-Loss Blacklist Active: {sym} was stopped out today. Same-day re-entry blocked to eliminate revenge trading."
+
+        # 2. Mandatory 90-Minute Cooldown Check
+        last_exit = self.symbol_last_exit_times.get(sym)
+        if last_exit:
+            elapsed = (now_ist() - last_exit).total_seconds() / 60.0
+            if elapsed < cooldown_mins:
+                remaining = cooldown_mins - elapsed
+                return True, f"Mandatory 90-Minute Cooldown Active: {sym} exited {elapsed:.1f}m ago ({remaining:.1f}m remaining). Re-entry blocked."
+
+        return False, "OK"
 
         # Systematic Health & Scaling Governance Audit
         if hasattr(self, "notifier") and self.notifier and not is_paper_trade:

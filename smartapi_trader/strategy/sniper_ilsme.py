@@ -1,8 +1,8 @@
 import math
 import asyncio
 import time as sys_time
-from datetime import datetime, time
-from typing import Dict, List, Optional, Any
+from datetime import datetime, time, timedelta
+from typing import Dict, List, Optional, Any, Tuple
 from smartapi_trader.core.events import BarEvent, TickEvent, SignalEvent, EventType
 from smartapi_trader.core.event_bus import EventBus
 from smartapi_trader.core.state_manager import StateManager
@@ -47,8 +47,8 @@ class SniperILSMEStrategy(BaseStrategy):
         
         # State tracking per underlying: "NIFTY", "BANKNIFTY", "SENSEX"
         self.active_indices = self.cfg.get("active_indices", ["NIFTY", "BANKNIFTY", "SENSEX"])
-        self.trade_cooldown_mins = float(self.cfg.get("trade_cooldown_minutes", 15.0))
-        self.directional_loss_cooldown_mins = float(self.risk_cfg.get("directional_loss_cooldown_minutes", 45.0))
+        self.trade_cooldown_mins = float(self.cfg.get("trade_cooldown_minutes", 90.0))
+        self.directional_loss_cooldown_mins = float(self.risk_cfg.get("directional_loss_cooldown_minutes", 90.0))
         self.max_consecutive_trend_bars = int(self.cfg.get("max_consecutive_trend_bars", 4))
         self.max_vwap_atr_mult = float(self.cfg.get("max_vwap_atr_multiplier", 1.6))
         self.donchian_lookback_bars = int(self.cfg.get("donchian_lookback_bars", 15))
@@ -76,6 +76,9 @@ class SniperILSMEStrategy(BaseStrategy):
                 self.state[underlying]["last_exit_time"] = now_ist()
                 pnl = getattr(event, "pnl", 0.0)
                 opt_type = getattr(event, "option_type", "")
+                exit_rsn = str(getattr(event, "exit_reason", "")).lower()
+                is_sl = (pnl < 0) and ("stop" in exit_rsn or "sl" in exit_rsn or getattr(event, "is_stop_loss", False))
+                self.state_mgr.record_symbol_exit(underlying, is_stop_loss=is_sl)
                 if pnl < 0:
                     lockout_duration = self.directional_loss_cooldown_mins
                     self.state[underlying]["last_loss_direction"] = opt_type
@@ -608,6 +611,89 @@ class SniperILSMEStrategy(BaseStrategy):
         adx_sample = dx_list[-period:] if len(dx_list) >= period else dx_list
         return sum(adx_sample) / len(adx_sample)
 
+    def _check_vix_regime(self) -> Tuple[bool, str, float]:
+        """
+        Validates India VIX regime filter for institutional directional option buying:
+        Rule: Directional option buying requires India VIX >= min_vix_threshold (default 12.0)
+        and confirms expanding momentum (not plunging/crashing intraday > 2.5%).
+        """
+        min_vix = float(self.cfg.get("min_vix_threshold", 12.0))
+        if not self.auth_mgr:
+            return True, "AuthManager unavailable; bypassing VIX check.", 15.0
+
+        vix_data = self.auth_mgr.get_vix_metrics()
+        if not vix_data.get("valid", False):
+            return True, "Live VIX data offline; nominal default.", 15.0
+
+        vix_val = float(vix_data.get("vix", 15.0))
+        change_pct = float(vix_data.get("change_pct", 0.0))
+
+        if vix_val < min_vix:
+            return False, f"India VIX too low ({vix_val:.2f} < {min_vix:.1f}). Sub-12 VIX represents severe premium compression and poor option buyer expectancy.", vix_val
+
+        if change_pct < -3.0:
+            return False, f"India VIX contracting sharply ({change_pct:.2f}% drop intraday). Option IV collapse crush in progress.", vix_val
+
+        return True, f"India VIX healthy ({vix_val:.2f}, {change_pct:+.2f}%). Volatility regime nominal.", vix_val
+
+    def _validate_live_option_chain_oi(
+        self, underlying: str, signal_type: str, spot: float, expiry_idx: int = 0
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Institutional Live Option Chain OI Alignment:
+        Trade only when spot direction aligns with massive Put writing / Call unwinding.
+        - BUY_CE (Bullish):
+            Requires Put Writing support. If PCR (Put OI / Call OI) < min_pcr_bullish (default 0.90),
+            Call writers dominate overhead strikes, creating immediate institutional supply walls. Block BUY_CE!
+        - BUY_PE (Bearish):
+            Requires Call Writing resistance. If PCR > max_pcr_bearish (default 1.15),
+            Put writers dominate lower strikes, creating aggressive dip support. Block BUY_PE!
+        """
+        if not self.auth_mgr or not self.loader:
+            return True, "AuthManager/Loader unavailable; bypassing live OI check.", {}
+
+        exch = "BFO" if underlying == "SENSEX" else "NFO"
+        strike_records = self.loader.get_strike_tokens_around_spot(
+            underlying=underlying,
+            spot_price=spot,
+            num_strikes=3,
+            expiry_index=expiry_idx
+        )
+        if not strike_records:
+            return True, f"No option tokens found for {underlying} around spot {spot}.", {}
+
+        tokens = [str(r.get("symboltoken") or r.get("token") or "") for r in strike_records if (r.get("symboltoken") or r.get("token"))]
+        if not tokens:
+            return True, "No valid tokens retrieved for option chain.", {}
+
+        oi_metrics = self.auth_mgr.get_option_chain_oi_metrics(exchange=exch, tokens=tokens)
+        if not oi_metrics.get("valid", False) or (oi_metrics.get("total_ce_oi", 0) == 0 and oi_metrics.get("total_pe_oi", 0) == 0):
+            return True, "Live broker OI unavailable; passing neutral.", oi_metrics
+
+        pcr_oi = oi_metrics.get("pcr_oi", 1.0)
+        total_ce_oi = oi_metrics.get("total_ce_oi", 0)
+        total_pe_oi = oi_metrics.get("total_pe_oi", 0)
+
+        min_pcr_bullish = float(self.cfg.get("min_pcr_bullish", 0.90))
+        max_pcr_bearish = float(self.cfg.get("max_pcr_bearish", 1.15))
+
+        if "CE" in signal_type:
+            if pcr_oi < min_pcr_bullish:
+                return (
+                    False,
+                    f"Option Chain Adverse: PCR {pcr_oi:.2f} < {min_pcr_bullish:.2f} (Call OI: {total_ce_oi:,} vs Put OI: {total_pe_oi:,}). Heavy Call writing resistance overhead blocks institutional upside.",
+                    oi_metrics
+                )
+        elif "PE" in signal_type:
+            if pcr_oi > max_pcr_bearish:
+                return (
+                    False,
+                    f"Option Chain Adverse: PCR {pcr_oi:.2f} > {max_pcr_bearish:.2f} (Put OI: {total_pe_oi:,} vs Call OI: {total_ce_oi:,}). Heavy Put writing support below blocks institutional breakdown.",
+                    oi_metrics
+                )
+
+        return True, f"Option Chain OI Confirmed: PCR {pcr_oi:.2f} aligns with {signal_type} (Put OI: {total_pe_oi:,}, Call OI: {total_ce_oi:,}).", oi_metrics
+
     def _check_macro_liquidity_clearance(
         self,
         underlying: str,
@@ -743,10 +829,11 @@ class SniperILSMEStrategy(BaseStrategy):
                     logger.info(f"[STRATEGY] {status_msg}")
                     return
 
-        # Trade Cooldown Guard: Prevent immediate re-entry churn on the same underlying
+        # Trade Cooldown Guard & Daily SL Blacklist: Prevent immediate re-entry churn on the same underlying
+        is_bl, _ = self.state_mgr.is_symbol_blacklisted(underlying, cooldown_mins=self.trade_cooldown_mins)
         last_exit = st.get("last_exit_time")
-        in_cooldown = False
-        if last_exit:
+        in_cooldown = is_bl
+        if not in_cooldown and last_exit:
             elapsed_cooldown = (now_ist() - last_exit).total_seconds() / 60.0
             if elapsed_cooldown < self.trade_cooldown_mins:
                 in_cooldown = True
@@ -961,9 +1048,9 @@ class SniperILSMEStrategy(BaseStrategy):
                     pullback_max_vd_bull = min(max_vd_bull * 1.35, 55.0 if underlying == "NIFTY" else (160.0 if underlying == "SENSEX" else 110.0))
                     pullback_max_vd_bear = min(max_vd_bear * 1.35, 55.0 if underlying == "NIFTY" else (160.0 if underlying == "SENSEX" else 110.0))
 
-                    # ADX Chop Guard: require ADX >= 20 to ensure market is in an active directional trend
+                    # ADX Chop Guard: require ADX >= 22 to ensure market is in an active directional trend
                     adx_val = self._calculate_adx(token, period=14)
-                    min_adx = float(self.cfg.get("min_adx_trend_threshold", 20.0))
+                    min_adx = float(self.cfg.get("min_adx_trend_threshold", 22.0))
                     is_trending_adx = (adx_val >= min_adx)
 
                     # Volume check
@@ -1232,6 +1319,28 @@ class SniperILSMEStrategy(BaseStrategy):
             logger.warning(f"[STRATEGY] Blocked signal dispatch for {underlying}: System is in PANIC or HALTED state.")
             return
 
+        # 1. Mandatory 90-Minute Cooldown & Daily Stop-Loss Blacklist Guard
+        is_bl, bl_reason = self.state_mgr.is_symbol_blacklisted(underlying, cooldown_mins=self.trade_cooldown_mins)
+        if is_bl:
+            logger.warning(f"[STRATEGY] 🛡️ Institutional Discipline Guard: Blocked {signal_type} for {underlying}. {bl_reason}")
+            return
+
+        # 2. Strict Market Regime Filter: ADX >= 22.0
+        idx_token = self.index_tokens.get(underlying, "")
+        adx_val = 25.0
+        if idx_token:
+            min_adx_thresh = float(self.cfg.get("min_adx_trend_threshold", 22.0))
+            adx_val = self._calculate_adx(idx_token, period=14)
+            if adx_val < min_adx_thresh:
+                logger.warning(f"[STRATEGY] 🛡️ Strict Regime Filter: Blocked {signal_type} for {underlying}. ADX {adx_val:.1f} < {min_adx_thresh:.1f} (sub-trending chop environment).")
+                return
+
+        # 3. Strict Market Regime Filter: India VIX Expanding Momentum
+        vix_ok, vix_msg, vix_val = self._check_vix_regime()
+        if not vix_ok:
+            logger.warning(f"[STRATEGY] 🛡️ Strict Regime Filter: Blocked {signal_type} for {underlying}. {vix_msg}")
+            return
+
         st = self.state[underlying]
         opt_type = "CE" if "CE" in signal_type else "PE"
         strat_source = fvg.get("source", "ILSME_REVERSAL")
@@ -1283,6 +1392,12 @@ class SniperILSMEStrategy(BaseStrategy):
 
         if not option_contract:
             logger.error(f"[STRATEGY] Failed to find ATM {opt_type} option for {underlying}")
+            return
+
+        # 4. Live Option Chain OI Alignment Guard (Put writing support / Call writing resistance)
+        oi_ok, oi_msg, oi_metrics = self._validate_live_option_chain_oi(underlying, signal_type, spot, expiry_idx=expiry_idx)
+        if not oi_ok:
+            logger.warning(f"[STRATEGY] 🛡️ Live Option Chain OI Guard: Blocked {signal_type} for {underlying}. {oi_msg}")
             return
 
         # Liquidity & Open Interest (OI) Filter + Top-of-Book Bid-Ask Spread Filter
@@ -1426,7 +1541,7 @@ class SniperILSMEStrategy(BaseStrategy):
                 reason=reason_text,
                 execution_strategy="NAKED"
             )
-            logger.info(f"[STRATEGY] ===> DISPATCHING NAKED SIGNAL [{strat_label}]: {signal_naked.signal_type} {signal_naked.tradingsymbol} Entry=₹{entry_price} SL=₹{stop_loss} T1=₹{target_1} (Structural Level: {swing_inval}, Buffer: {dyn_inval_buf}pt)")
+            logger.info(f"[STRATEGY] ===> DISPATCHING NAKED SIGNAL [{strat_label}]: {signal_naked.signal_type} {signal_naked.tradingsymbol} Entry=₹{entry_price} SL=₹{stop_loss} T1=₹{target_1} (Structural Level: {swing_inval}, Buffer: {dyn_inval_buf}pt, PCR: {oi_metrics.get('pcr_oi', 'N/A')}, VIX: {vix_val:.2f}, ADX: {adx_val:.1f})")
             await self.bus.publish(signal_naked)
 
         # 2. Dispatch Debit Spread Signal if selected

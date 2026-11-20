@@ -462,3 +462,50 @@ class InstrumentLoader:
 
         logger.warning(f"[INSTRUMENTS] Could not resolve {strikes_otm}-strike OTM {option_type} option for {underlying} @ {spot_price}")
         return None
+
+    def get_strike_tokens_around_spot(
+        self,
+        underlying: str,
+        spot_price: float,
+        num_strikes: int = 3,
+        expiry_index: int = 0
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieves ATM +/- num_strikes CE and PE option records for live Option Chain OI analysis.
+        Sub-millisecond SQLite retrieval using indexed strike queries.
+        """
+        underlying = underlying.upper()
+        atm = self.get_atm_option(underlying, spot_price, "CE", expiry_index=expiry_index)
+        if not atm:
+            return []
+
+        target_expiry = atm["expiry"]
+        exch_seg = atm["exchange"]
+        atm_strike = float(atm["strike"])
+
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT DISTINCT strike FROM instruments
+            WHERE name = ? AND expiry = ? AND exch_seg = ? AND strike > 0
+            ORDER BY ABS(strike - ?) ASC
+            LIMIT ?
+        """, (underlying, target_expiry, exch_seg, atm_strike, (num_strikes * 2) + 1))
+
+        strikes = [r["strike"] for r in cursor.fetchall()]
+        if not strikes:
+            return []
+
+        placeholders = ",".join(["?"] * len(strikes))
+        cursor.execute(f"""
+            SELECT * FROM instruments
+            WHERE name = ? AND expiry = ? AND exch_seg = ? AND strike IN ({placeholders})
+        """, [underlying, target_expiry, exch_seg] + strikes)
+
+        out = []
+        for r in cursor.fetchall():
+            d = dict(r)
+            d["symboltoken"] = d.get("token", "")
+            d["tradingsymbol"] = d.get("symbol", "")
+            d["exchange"] = d.get("exch_seg", "")
+            out.append(d)
+        return out
