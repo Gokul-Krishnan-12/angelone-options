@@ -769,12 +769,19 @@ class StockUniverseManager:
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                # 1. Fetch available expiries for this stock
+                # 1. Fetch available expiries for this stock (prefer real broker contracts over synthetic)
                 cursor.execute("""
                     SELECT DISTINCT expiry FROM instruments
-                    WHERE name = ? AND instrumenttype = 'OPTSTK' AND expiry != ''
+                    WHERE name = ? AND instrumenttype = 'OPTSTK' AND expiry != '' AND token NOT LIKE 'NFO_%' AND token NOT LIKE 'SYN_%'
                 """, (symbol,))
                 raw_expiries = [r["expiry"] for r in cursor.fetchall()]
+
+                if not raw_expiries:
+                    cursor.execute("""
+                        SELECT DISTINCT expiry FROM instruments
+                        WHERE name = ? AND instrumenttype = 'OPTSTK' AND expiry != ''
+                    """, (symbol,))
+                    raw_expiries = [r["expiry"] for r in cursor.fetchall()]
 
                 if not raw_expiries:
                     # Fallback seed if missing
@@ -805,11 +812,11 @@ class StockUniverseManager:
 
                 target_expiry = valid_expiries[min(expiry_index, len(valid_expiries) - 1)][1]
 
-                # 2. Query contract nearest to target_strike
+                # 2. Query contract nearest to target_strike (prefer real broker numeric tokens)
                 cursor.execute("""
                     SELECT * FROM instruments
                     WHERE name = ? AND expiry = ? AND symbol LIKE ?
-                    ORDER BY ABS(strike - ?) ASC
+                    ORDER BY (token LIKE 'NFO_%' OR token LIKE 'SYN_%') ASC, ABS(strike - ?) ASC
                     LIMIT 1
                 """, (symbol, target_expiry, f"%{option_type}", target_strike))
                 row = cursor.fetchone()

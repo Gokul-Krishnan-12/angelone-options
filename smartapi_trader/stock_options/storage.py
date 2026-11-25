@@ -734,7 +734,7 @@ class StockOptionsStorage:
                     SELECT underlying, symbol, exit_time, exit_reason, net_pnl, created_at 
                     FROM stock_options_trades
                     WHERE (exit_time LIKE ? OR created_at LIKE ?)
-                    ORDER BY id DESC
+                    ORDER BY rowid DESC
                 """, (f"{date_str}%", f"{date_str}%"))
                 rows = cursor.fetchall()
                 for r in rows:

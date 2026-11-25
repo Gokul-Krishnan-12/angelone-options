@@ -406,13 +406,14 @@ class StockOptionsPaperAgent:
                             except Exception:
                                 pass
 
+                    is_synthetic = not (tok and str(tok).isdigit())
                     current_ltp = self.market_data.get_option_ltp(
                         symbol=sym,
                         underlying=underlying,
                         token=tok,
                         strike=strike,
                         option_type=opt_type,
-                        allow_modeled=False
+                        allow_modeled=is_synthetic
                     )
                 except Exception as e:
                     logger.debug(f"[PAPER_AGENT] Failed to fetch LTP for {sym}: {e}")
