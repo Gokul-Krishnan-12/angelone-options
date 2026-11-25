@@ -283,32 +283,33 @@ class SniperILSMEStrategy(BaseStrategy):
         # 2. Try Angel One SmartAPI live historical fetch if authenticated
         smart_api = getattr(self.auth_mgr, "smart_api", None)
         if self.auth_mgr and not self.auth_mgr.is_simulated and smart_api:
-            try:
-                import time as _pytime
-                _pytime.sleep(0.4)  # Prevent Angel One SmartAPI 3 req/sec rate limit violation
-                sym_info = self.symbols_cfg.get(underlying, {})
-                tok = sym_info.get("spot_token")
-                exch = sym_info.get("exchange", "NSE")
-                if tok:
-                    from datetime import timedelta
-                    from_d = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
-                    to_d = datetime.now().strftime("%Y-%m-%d")
-                    res = smart_api.getCandleData({
-                        "exchange": exch,
-                        "symboltoken": str(tok),
-                        "interval": "ONE_DAY",
-                        "fromdate": f"{from_d} 09:15",
-                        "todate": f"{to_d} 15:30"
-                    })
-                    data = res.get("data") or []
-                    valid = [d for d in data if d[0][:10] < today_str]
-                    if valid:
-                        last_day = valid[-1]
-                        pdh, pdl, close = float(last_day[2]), float(last_day[3]), float(last_day[4])
-                        logger.info(f"[STRATEGY] Loaded live broker PDH/PDL for {underlying} (Date: {last_day[0][:10]}) -> PDH: {pdh:.2f}, PDL: {pdl:.2f}, Prev Close: {close:.2f}")
-                        return pdh, pdl, close
-            except Exception as api_err:
-                logger.warning(f"[STRATEGY] SmartAPI daily candle fetch for {underlying} failed: {api_err}")
+            import time as _pytime
+            sym_info = self.symbols_cfg.get(underlying, {})
+            tok = sym_info.get("spot_token")
+            exch = sym_info.get("exchange", "NSE")
+            if tok:
+                from_d = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
+                to_d = datetime.now().strftime("%Y-%m-%d")
+                for attempt in range(3):
+                    try:
+                        _pytime.sleep(0.5 * (attempt + 1))  # Prevent Angel One SmartAPI 3 req/sec rate limit violation
+                        res = smart_api.getCandleData({
+                            "exchange": exch,
+                            "symboltoken": str(tok),
+                            "interval": "ONE_DAY",
+                            "fromdate": f"{from_d} 09:15",
+                            "todate": f"{to_d} 15:30"
+                        })
+                        data = (res.get("data") or []) if isinstance(res, dict) else []
+                        valid = [d for d in data if d[0][:10] < today_str]
+                        if valid:
+                            last_day = valid[-1]
+                            pdh, pdl, close = float(last_day[2]), float(last_day[3]), float(last_day[4])
+                            logger.info(f"[STRATEGY] Loaded live broker PDH/PDL for {underlying} (Date: {last_day[0][:10]}) -> PDH: {pdh:.2f}, PDL: {pdl:.2f}, Prev Close: {close:.2f}")
+                            return pdh, pdl, close
+                    except Exception as api_err:
+                        if attempt == 2:
+                            logger.warning(f"[STRATEGY] SmartAPI daily candle fetch for {underlying} failed: {api_err}")
 
         # 3. Fallback to reasonable index defaults
         default_levels = {

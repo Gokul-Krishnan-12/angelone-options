@@ -555,12 +555,17 @@ class RiskManager:
             reached_be_profit = profit_points >= (unit_risk * self.be_trigger_r)
             min_structural_profit = unit_risk * max(0.65, self.be_trigger_r * 0.8)
             if (reached_be_profit or (is_structural_mode and structural_confirmed and profit_points >= min_structural_profit)) and not pos.be_moved:
-                pos.stop_loss = pos.entry_price
+                cost_covered_be = self._round_to_tick(max(pos.entry_price + 1.0, pos.entry_price * 1.006))
+                if ltp > cost_covered_be + 0.10:
+                    be_sl = cost_covered_be
+                else:
+                    be_sl = self._round_to_tick(pos.entry_price)
+                pos.stop_loss = be_sl
                 pos.be_moved = True
                 pos.structural_be_confirmed = True
 
                 # Modify Native Exchange SL to Breakeven with dynamic buffer
-                new_trigger = self._round_to_tick(pos.entry_price)
+                new_trigger = self._round_to_tick(be_sl)
                 buffer = self._get_sl_limit_buffer(new_trigger)
                 new_limit = self._round_to_tick(max(0.05, new_trigger - buffer))
                 pos.sl_trigger_price = new_trigger

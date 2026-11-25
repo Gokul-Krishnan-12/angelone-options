@@ -114,7 +114,7 @@ risk:
 
   # Breakeven & Multi-Stage Profit Harvesting
   breakeven_mode: STRUCTURAL_SWING_BREAK # Moves SL to entry upon verified structural break
-  breakeven_trigger_r: 0.85     # Requires ≥+0.85R profit before moving SL to Breakeven
+  breakeven_trigger_r: 1.2      # Requires ≥+1.2R profit before moving SL to Breakeven
   structural_swing_break_confirmation: true
   partial_exit_r: 2.5           # Target 1: Book partial profit at +2.0R to +2.5R
   partial_exit_qty_pct: 0.5     # Close 50% of position at Target 1

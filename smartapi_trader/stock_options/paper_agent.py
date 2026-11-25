@@ -438,14 +438,15 @@ class StockOptionsPaperAgent:
             pos["unrealized_pnl_pct"] = unrealized_pnl_pct
 
             # 4. Autonomous Institutional Bracket Triggers
-            # 4a. Institutional Breakeven Protection Shift (Risk Elimination at +0.85R)
-            be_threshold = entry_p + (entry_p - sl) * 0.85 if sl < entry_p else entry_p * 1.12
+            # 4a. Institutional Breakeven Protection Shift (Risk Elimination at +1.2R, SL at +1.0% to cover slippage & charges)
+            be_trigger_r = float(self.storage.get_setting("stock_options_be_trigger_r") or 1.2)
+            be_threshold = entry_p + (entry_p - sl) * be_trigger_r if sl < entry_p else entry_p * 1.15
             if current_ltp >= be_threshold and sl < entry_p:
-                new_sl = round(entry_p * 1.005, 2)
+                new_sl = round(entry_p * 1.01, 2)
                 pos["stop_loss"] = new_sl
                 sl = new_sl
                 self.storage.update_position_brackets(sym, is_paper=True, stop_loss=new_sl, target_1=t1)
-                logger.info(f"[PAPER_AGENT] 🛡️ BREAKEVEN ENGAGED for {sym}: LTP ₹{current_ltp} >= Threshold ₹{be_threshold:.2f}. Stop-Loss raised to ₹{new_sl} (Capital Protected).")
+                logger.info(f"[PAPER_AGENT] 🛡️ BREAKEVEN ENGAGED for {sym}: LTP ₹{current_ltp} >= Threshold ₹{be_threshold:.2f} (+{be_trigger_r:.1f}R). Stop-Loss raised to ₹{new_sl} (+1.0% cost-covered).")
 
             # 4b. Stop Loss (LTP <= Stop Loss for option buyers)
             if sl > 0 and current_ltp <= sl:
@@ -457,9 +458,23 @@ class StockOptionsPaperAgent:
                 is_be_sl = (sl >= entry_p)
 
                 spot_invalidated = True
-                if not is_be_sl and inval_level > 0 and current_ltp > hard_sl_floor:
+                if not is_be_sl and inval_level > 0 and current_ltp > hard_sl_floor and self.market_data:
                     try:
-                        spot_p = await self.market_data.get_spot_price(underlying)
+                        # Ensure underlying equity spot token is subscribed to WebSocket for fast spot reads
+                        if hasattr(self.market_data, "_get_active_stream_client"):
+                            stream = self.market_data._get_active_stream_client()
+                            stk_meta = NSE_FO_STOCKS.get(underlying, {})
+                            stk_tok = str(stk_meta.get("token_nse") or "").strip()
+                            if stream and stk_tok and stk_tok not in stream.subscribed_tokens:
+                                try:
+                                    stream.subscribe(token=stk_tok, symbol=f"{underlying}-EQ", exchange="NSE", mode=2)
+                                except Exception:
+                                    pass
+
+                        spot_p = self.market_data.get_spot_ltp(underlying)
+                        if asyncio.iscoroutine(spot_p):
+                            spot_p = await spot_p
+                        spot_p = float(spot_p or 0.0)
                         if spot_p > 0:
                             if opt_type == "CE" and spot_p >= inval_level:
                                 spot_invalidated = False
@@ -519,8 +534,8 @@ class StockOptionsPaperAgent:
                     continue
 
             # 4c. Stagnation / Time-Decay Exit (60m holding without momentum displacement)
-            # Option buyers lose edge when positions stall. If held >= 60 minutes and hasn't hit Target,
-            # and floating PnL is stagnant (-8.0% <= PnL <= +8.0%), cut position to preserve capital & margin.
+            # Option buyers lose edge when positions stall flat or underwater.
+            # Never cut green trades (> +1.0%) early — only liquidate flat/losing positions (<= +1.0%) after 60m.
             entry_time_str = pos.get("entry_time") or pos.get("created_at") or ""
             holding_mins = 0.0
             if entry_time_str:
@@ -536,7 +551,7 @@ class StockOptionsPaperAgent:
                     pass
 
             max_stagnation_mins = float(self.storage.get_setting("stock_options_max_holding_mins") or 60.0)
-            if holding_mins >= max_stagnation_mins and -8.0 <= unrealized_pnl_pct <= 8.0:
+            if holding_mins >= max_stagnation_mins and unrealized_pnl_pct <= 1.0:
                 logger.info(
                     f"[PAPER_AGENT] ⏳ STAGNATION EXIT (Time-Decay Guard): {sym} held for {int(holding_mins)}m "
                     f"(PnL: {unrealized_pnl_pct:+.2f}%). Auto-liquidating virtual position to prevent theta decay."

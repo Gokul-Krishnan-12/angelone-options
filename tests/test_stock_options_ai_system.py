@@ -886,6 +886,163 @@ class TestStockOptionsAISystem(unittest.IsolatedAsyncioTestCase):
         # Should be blocked
         self.assertEqual(len(published_signals), 0, "Breakout signal must be blocked during RANGEBOUND_CHOP.")
 
+    # 26. Spot Invalidation Guard uses get_spot_ltp (defends shakeouts, exits on breach)
+    async def test_26_spot_invalidation_guard_uses_get_spot_ltp(self):
+        """Verifies Spot Invalidation Guard calls get_spot_ltp without AttributeError."""
+        mock_market_data = MagicMock()
+        mock_market_data.get_spot_ltp.return_value = 1140.0
+        mock_market_data.get_option_ltp.return_value = 40.0
+        self.paper_agent.market_data = mock_market_data
+
+        candidate = {
+            "symbol": "BAJFINANCE",
+            "bias": "BULLISH",
+            "technical": {
+                "reference_price": 1140.0,
+                "entry_trigger": 1140.0,
+                "invalidation_level": 1125.0
+            },
+            "primary_contract": {
+                "tradingsymbol": "BAJFINANCE 1150 CE",
+                "strike_price": 1150.0,
+                "option_type": "CE",
+                "indicative_premium": 40.0,
+                "expiry": "29DEC2026"
+            },
+            "trade_management": {
+                "stop_loss": 35.0,
+                "target_1": 52.0
+            }
+        }
+        res = await self.paper_agent.execute_simulated_trade(candidate, force_immediate=True)
+        self.assertEqual(res["status"], "success")
+
+        # Option dips to SL (34.5 <= 35.0), above 22% hard floor, while spot holds above 1125 -> defended
+        mock_market_data.get_option_ltp.return_value = 34.5
+        mock_market_data.get_spot_ltp.return_value = 1132.0
+        await self.paper_agent.update_open_positions_ltp()
+        open_pos = self.storage.get_positions(is_paper=True, open_only=True)
+        self.assertEqual(len(open_pos), 1, "Shakeout must be defended when spot holds above invalidation level.")
+
+        # Spot breaches invalidation (1120 < 1125) -> must exit immediately
+        mock_market_data.get_spot_ltp.return_value = 1120.0
+        await self.paper_agent.update_open_positions_ltp()
+        open_pos = self.storage.get_positions(is_paper=True, open_only=True)
+        self.assertEqual(len(open_pos), 0, "Position must close once spot breaches invalidation level.")
+
+    # 27. Breakeven at +1.2R (entry * 1.01) & Stagnation Exit Preserves Green Trades
+    async def test_27_breakeven_1_2r_cost_covered_and_stagnation_preserves_green(self):
+        """Verifies BE waits for +1.2R, shifts SL to +1.0%, and 60m stagnation skips green (>+1%) trades."""
+        from datetime import timedelta
+        mock_market_data = MagicMock()
+        mock_market_data.get_spot_ltp.return_value = 1880.0
+        mock_market_data.get_option_ltp.return_value = 40.0
+        self.paper_agent.market_data = mock_market_data
+
+        candidate = {
+            "symbol": "INFY",
+            "bias": "BULLISH",
+            "technical": {"reference_price": 1880.0, "entry_trigger": 1880.0, "invalidation_level": 1840.0},
+            "primary_contract": {"tradingsymbol": "INFY 1880 CE", "strike_price": 1880.0, "option_type": "CE", "indicative_premium": 40.0, "expiry": "29DEC2026"},
+            "trade_management": {"stop_loss": 35.0, "target_1": 52.0}
+        }
+        res = await self.paper_agent.execute_simulated_trade(candidate, force_immediate=True)
+        self.assertEqual(res["status"], "success")
+        pos = self.storage.get_positions(is_paper=True, open_only=True)[0]
+        entry_p = pos["entry_price"]
+        unit_risk = entry_p - pos["stop_loss"]
+
+        # At +0.90R -> Breakeven must NOT trigger yet
+        mock_market_data.get_option_ltp.return_value = round(entry_p + unit_risk * 0.90, 2)
+        await self.paper_agent.update_open_positions_ltp()
+        pos = self.storage.get_positions(is_paper=True, open_only=True)[0]
+        self.assertLess(pos["stop_loss"], entry_p, "BE must NOT engage before +1.2R.")
+
+        # Backdate position by 65 mins while in +4% profit -> Stagnation must NOT cut green trade
+        old_ts = (datetime.now() - timedelta(minutes=65)).strftime("%Y-%m-%d %H:%M:%S")
+        with self.storage._get_connection() as conn:
+            conn.execute("UPDATE stock_options_positions SET created_at = ? WHERE symbol = ?", (old_ts, pos["symbol"]))
+        mock_market_data.get_option_ltp.return_value = round(entry_p * 1.04, 2)
+        await self.paper_agent.update_open_positions_ltp()
+        self.assertEqual(len(self.storage.get_positions(is_paper=True, open_only=True)), 1, "Stagnation must preserve >+1% green trades.")
+
+        # At +1.25R -> Breakeven engages at entry * 1.01
+        mock_market_data.get_option_ltp.return_value = round(entry_p + unit_risk * 1.25, 2)
+        await self.paper_agent.update_open_positions_ltp()
+        pos = self.storage.get_positions(is_paper=True, open_only=True)[0]
+        self.assertAlmostEqual(pos["stop_loss"], round(entry_p * 1.01, 2), places=2)
+
+    # 28. Sector Confluence Does Not Mutate base_price & Accurately Detects Divergence
+    def test_28_sector_confluence_no_base_price_mutation(self):
+        """Verifies get_spot_ltp does not overwrite NSE_FO_STOCKS base_price and detects red peers."""
+        orig_base = NSE_FO_STOCKS["SBIN"]["base_price"]
+        mock_api = MagicMock()
+        mock_api.ltpData.return_value = {
+            "status": True,
+            "data": {"ltp": 900.0, "open": 920.0, "high": 922.0, "low": 895.0, "close": 918.0}
+        }
+        # Batch FULL mode returns all Banking peers red (ltp < open)
+        def fake_market_data(mode, exchangeTokens):
+            fetched = []
+            for tok in exchangeTokens.get("NSE", []):
+                fetched.append({
+                    "symbolToken": tok,
+                    "ltp": 900.0,
+                    "open": 925.0,
+                    "high": 926.0,
+                    "low": 898.0,
+                    "close": 920.0,
+                    "tradeVolume": 500000
+                })
+            return {"status": True, "data": {"fetched": fetched}}
+
+        mock_api.getMarketData.side_effect = fake_market_data
+        svc = StockMarketDataService(self.universe_mgr, smart_api=mock_api)
+
+        spot = svc.get_spot_ltp("SBIN")
+        self.assertEqual(spot, 900.0)
+        self.assertEqual(NSE_FO_STOCKS["SBIN"]["base_price"], orig_base, "Static base_price must never be overwritten.")
+
+        conf = svc.get_sector_confluence("HDFCBANK", intended_bias="BULLISH")
+        self.assertFalse(conf["aligned"], f"Bullish trade must reject when all peers are below open: {conf}")
+        self.assertEqual(conf["breadth_score"], 0.0)
+
+    # 29. Real 5m Candle Indicators & Live Option Chain OI (No Random/Proxy Values)
+    def test_29_real_candle_indicators_and_no_random_oi(self):
+        """Verifies VWAP, EMA9/21, RSI14, ATR14, vol_ratio & option chain OI are computed from real inputs."""
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        bars = []
+        price = 1000.0
+        for i in range(25):
+            o = price
+            c = price + 2.0
+            h = c + 1.0
+            l = o - 0.5
+            vol = 10000 if i < 24 else 25000  # 2.5x volume spike on latest bar
+            bars.append([f"{today_str} 09:{15 + (i % 45):02d}", o, h, l, c, vol])
+            price = c
+
+        metrics = StockMarketDataService._compute_real_candle_indicators(bars, fallback_spot=price)
+        self.assertIsNotNone(metrics)
+        self.assertGreater(metrics["ema9"], metrics["ema21"])
+        self.assertGreater(metrics["rsi_14"], 60.0)
+        self.assertAlmostEqual(metrics["volume_ratio"], 2.5, places=1)
+        self.assertGreater(metrics["vwap"], 1000.0)
+
+        # Verify summary uses real data without random fake OI percentages
+        mock_api = MagicMock()
+        mock_api.ltpData.return_value = {
+            "status": True,
+            "data": {"ltp": price, "open": 1000.0, "high": price + 1.0, "low": 999.5, "close": 998.0}
+        }
+        mock_api.getCandleData.return_value = {"status": True, "data": bars}
+        mock_api.getMarketData.return_value = {"status": False}
+        svc = StockMarketDataService(self.universe_mgr, smart_api=mock_api)
+        summary = svc.get_stock_technical_summary("RELIANCE")
+        self.assertEqual(summary["data_source"], "LIVE_CANDLES")
+        self.assertAlmostEqual(summary["volume_ratio"], 2.5, places=1)
+        self.assertNotIn("fresh OI addition", summary["oi_buildup"])
+
 
 if __name__ == "__main__":
     unittest.main()
