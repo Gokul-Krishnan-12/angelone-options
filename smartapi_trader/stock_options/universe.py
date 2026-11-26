@@ -209,7 +209,7 @@ NSE_FO_STOCKS: Dict[str, Dict[str, Any]] = {
         "strike_step": 20.0,
         "tick_size": 0.05,
         "base_price": 2520.0,
-        "token_nse": "1330"
+        "token_nse": "1394"
     },
     "COALINDIA": {
         "name": "Coal India Ltd",
@@ -533,7 +533,7 @@ NSE_FO_STOCKS: Dict[str, Dict[str, Any]] = {
         "strike_step": 1.0,
         "tick_size": 0.05,
         "base_price": 108.0,
-        "token_nse": "583"
+        "token_nse": "10794"
     },
     "PFC": {
         "name": "Power Finance Corporation",

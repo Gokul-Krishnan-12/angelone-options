@@ -29,7 +29,33 @@ class StockMarketDataService:
         self._spot_quote_cache: Dict[str, Dict[str, Any]] = {}  # symbol -> {ltp, open, high, low, close, volume, ts}
         self._candle_cache: Dict[str, Tuple[List[Any], float]] = {}  # symbol -> (bars, ts)
         self._oi_snapshot_cache: Dict[str, Tuple[int, float]] = {}  # token -> (initial_oi, ts)
+        self._invalid_spot_tokens: Dict[str, float] = {}  # symbol -> timestamp when token failed AB4046
+        self._resolved_nse_tokens: Dict[str, str] = {}  # symbol -> verified NSE equity token from instruments DB
         self._last_rest_ts: float = 0.0
+
+    def _resolve_nse_token(self, symbol: str) -> str:
+        """Resolves NSE equity token, checking instruments DB fallback if a static token failed."""
+        sym = symbol.upper().strip()
+        if sym in self._resolved_nse_tokens:
+            return self._resolved_nse_tokens[sym]
+        tok = str(NSE_FO_STOCKS.get(sym, {}).get("token_nse") or "").strip()
+        if sym not in self._invalid_spot_tokens and tok:
+            return tok
+        # Fallback lookup in instruments.db ({sym}-EQ)
+        try:
+            with self.universe_mgr._get_connection() as conn:
+                row = conn.execute(
+                    "SELECT token FROM instruments WHERE symbol = ? AND exch_seg = 'NSE' LIMIT 1",
+                    (f"{sym}-EQ",)
+                ).fetchone()
+                if row and row[0]:
+                    resolved = str(row[0]).strip()
+                    self._resolved_nse_tokens[sym] = resolved
+                    self._invalid_spot_tokens.pop(sym, None)
+                    return resolved
+        except Exception:
+            pass
+        return tok
 
     def _throttle_rest(self, min_gap: float = 0.36):
         """Enforces <= ~2.7 req/sec spacing for SmartAPI REST endpoints."""
@@ -415,8 +441,11 @@ class StockMarketDataService:
         vwap_diff_pct = round(((spot - vwap) / vwap) * 100.0, 2) if vwap > 0 else 0.0
         vwap_status = f"Trading Above VWAP (+{vwap_diff_pct}%)" if spot >= vwap else f"Trading Below VWAP ({vwap_diff_pct}%)"
 
-        # Sectoral Confluence Assessment (using live intraday open/prev_close, never mutated base_price)
-        sector_confluence = self.get_sector_confluence(symbol, intended_bias="BULLISH" if is_bullish else "BEARISH")
+        # Sectoral Confluence Assessment (skip redundant peer REST fetches during Stage-1 coarse screen)
+        if include_candles:
+            sector_confluence = self.get_sector_confluence(symbol, intended_bias="BULLISH" if is_bullish else "BEARISH")
+        else:
+            sector_confluence = self.get_sector_confluence(symbol, intended_bias="BULLISH" if is_bullish else "BEARISH", allow_rest=False)
 
         atm_chain = [
             {
@@ -601,7 +630,7 @@ class StockMarketDataService:
 
         return diversified
 
-    def get_sector_confluence(self, symbol: str, intended_bias: str = "BULLISH") -> Dict[str, Any]:
+    def get_sector_confluence(self, symbol: str, intended_bias: str = "BULLISH", allow_rest: bool = True) -> Dict[str, Any]:
         """
         Evaluates Sectoral Index and Sector Peer Breadth Confluence.
         Verifies if sector peers are moving in the same direction before confirming a breakout.
@@ -620,7 +649,7 @@ class StockMarketDataService:
             }
 
         peer_list = [p for p in peers[:5] if p in NSE_FO_STOCKS]
-        if peer_list:
+        if peer_list and allow_rest:
             self._batch_fetch_spot_quotes(peer_list)
 
         bullish_peers = 0
@@ -634,13 +663,15 @@ class StockMarketDataService:
             if q and q.get("ltp", 0) > 0:
                 spot = float(q["ltp"])
                 ref_p = float(q.get("open") or q.get("close") or p_meta.get("base_price", spot))
-            else:
+            elif allow_rest:
                 spot = self.get_spot_ltp(peer)
                 q2 = self._spot_quote_cache.get(peer)
                 if q2 and (q2.get("open") or q2.get("close")):
                     ref_p = float(q2.get("open") or q2.get("close"))
                 else:
                     ref_p = float(p_meta.get("base_price", spot))
+            else:
+                continue
             total_evaluated += 1
             if spot >= ref_p:
                 bullish_peers += 1
@@ -741,7 +772,7 @@ class StockMarketDataService:
         sym = symbol.upper().strip()
         meta = NSE_FO_STOCKS.get(sym, {})
         base_p = meta.get("base_price", 1000.0)
-        token = str(meta.get("token_nse") or "").strip()
+        token = self._resolve_nse_token(sym)
 
         # 1. First check WebSocket live tick stream (do NOT mutate static base_price)
         stream = self._get_active_stream_client()
@@ -754,12 +785,17 @@ class StockMarketDataService:
                     self._spot_quote_cache[sym]["ts"] = time.time()
                 return round(ws_ltp, 2)
 
-        # 2. Check 3-second cache to avoid hitting broker REST rate limits
+        # 2. Check 3-second cache (or recent batch quote) to avoid hitting broker REST rate limits
         now = time.time()
         cache_key = f"NSE_{token}" if token else f"NSE_{sym}"
         cached = self._ltp_cache.get(cache_key)
         if cached and (now - cached[1]) < 3.0:
             return round(cached[0], 2)
+
+        # Skip known invalid/missing tokens for 1 hour to prevent repeated AB4046 rate-limit burn
+        inv_ts = self._invalid_spot_tokens.get(sym)
+        if inv_ts and (now - inv_ts) < 3600.0:
+            return round(cached[0], 2) if (cached and cached[0] > 0) else base_p
 
         # 3. Query broker REST
         smart_conn = self._get_active_smart_api()
@@ -788,8 +824,20 @@ class StockMarketDataService:
                         return round(ltp, 2)
                 elif res and isinstance(res, dict) and not res.get("status"):
                     err_msg = res.get('message') or ""
+                    err_code = str(res.get('errorcode') or "")
+                    if err_code == "AB4046" or "not found in scrip master" in err_msg.lower():
+                        self._invalid_spot_tokens[sym] = now
+                        alt_tok = self._resolve_nse_token(sym)
+                        if alt_tok and alt_tok != token:
+                            res2 = smart_conn.ltpData(exchange="NSE", tradingsymbol=f"{sym}-EQ", symboltoken=alt_tok)
+                            if res2 and isinstance(res2, dict) and res2.get("status") and res2.get("data"):
+                                d2 = res2["data"]
+                                ltp2 = float(d2.get("ltp") or 0.0)
+                                if ltp2 > 0:
+                                    self._ltp_cache[f"NSE_{alt_tok}"] = (ltp2, now)
+                                    return round(ltp2, 2)
                     self._notify_rate_limit_if_detected(err_msg, f"NSE spot ({sym})")
-                    logger.debug(f"[MARKET_DATA] SmartAPI ltpData error for {sym}: {err_msg} ({res.get('errorcode')})")
+                    logger.debug(f"[MARKET_DATA] SmartAPI ltpData error for {sym}: {err_msg} ({err_code})")
             except Exception as e:
                 self._notify_rate_limit_if_detected(str(e), f"NSE spot ({sym})")
                 logger.debug(f"[MARKET_DATA] Live spot query for {sym} failed: {e}")

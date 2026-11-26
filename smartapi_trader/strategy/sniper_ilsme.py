@@ -141,6 +141,8 @@ class SniperILSMEStrategy(BaseStrategy):
         self.state[underlying] = {
             "pdh": pdh,
             "pdl": pdl,
+            "prev_close": ref_spot,
+            "day_open": 0.0,
             "session_high": max(pdh, or_h) if or_h > 0 else pdh,
             "session_low": min(pdl, or_l) if or_l < 999999.0 else pdl,
             "vwap": ref_spot,
@@ -433,6 +435,10 @@ class SniperILSMEStrategy(BaseStrategy):
                     self._init_index_state(sym_name)
                 st = self.state[sym_name]
                 st["last_spot"] = event.ltp
+                if getattr(event, "open", 0.0) and event.open > 0:
+                    st["day_open"] = float(event.open)
+                elif st.get("day_open", 0.0) <= 0 and ist_time() >= time(9, 15):
+                    st["day_open"] = float(event.ltp)
                 cur_high = max(event.high if event.high > 0 else event.ltp, event.ltp)
                 cur_low = min(event.low if event.low > 0 else event.ltp, event.ltp)
                 st["session_high"] = max(st["session_high"], cur_high)
@@ -452,7 +458,15 @@ class SniperILSMEStrategy(BaseStrategy):
                         pass
 
                 self.state_mgr.update_spot_telemetry(
-                    sym_name, event.ltp, st["vwap"], st["pdh"], st["pdl"], st["session_high"], st["session_low"]
+                    sym_name,
+                    event.ltp,
+                    st["vwap"],
+                    st["pdh"],
+                    st["pdl"],
+                    st["session_high"],
+                    st["session_low"],
+                    open_price=st.get("day_open", 0.0),
+                    prev_close=st.get("prev_close", 0.0),
                 )
                 
                 # Check for limit retracement fill if FVG/Breakout is armed
@@ -1054,12 +1068,20 @@ class SniperILSMEStrategy(BaseStrategy):
                     min_adx = float(self.cfg.get("min_adx_trend_threshold", 22.0))
                     is_trending_adx = (adx_val >= min_adx)
 
-                    # Volume check
+                    # Volume / Price-Action Impulse Check:
+                    # Spot indices (NIFTY/BANKNIFTY/SENSEX/MIDCPNIFTY) carry zero exchange volume in tick feeds
+                    # (CandleAggregator counts tick arrivals ~constant per 3m bar), so use candle body/range impulse
+                    # on spot indices instead of tick-arrival ratio.
+                    is_spot_index = underlying in {"NIFTY", "BANKNIFTY", "SENSEX", "MIDCPNIFTY", "FINNIFTY"}
+                    curr_rng = max(0.01, curr_bar.high - curr_bar.low)
+                    curr_body_ratio = abs(curr_bar.close - curr_bar.open) / curr_rng
                     vol_ok = True
                     if self.cfg.get("require_volume_expansion", True) and len(closed_3m) >= 20:
-                        vol_sma = sum(b.volume for b in closed_3m[-20:]) / 20.0
-                        # For pullbacks, require volume >= 1.1x vol_sma or higher than prior candle
-                        vol_ok = (curr_bar.volume >= (vol_sma * 1.1)) or (curr_bar.volume > closed_3m[-2].volume * 1.05)
+                        if is_spot_index:
+                            vol_ok = (curr_body_ratio >= 0.40) and (atr_val <= 1.0 or curr_rng >= atr_val * 0.55)
+                        else:
+                            vol_sma = sum(b.volume for b in closed_3m[-20:]) / 20.0
+                            vol_ok = (curr_bar.volume >= (vol_sma * 1.1)) or (curr_bar.volume > closed_3m[-2].volume * 1.05)
 
                     # 1. BULLISH 9 EMA PULLBACK BOUNCE
                     is_bullish_pullback = False
@@ -1145,11 +1167,16 @@ class SniperILSMEStrategy(BaseStrategy):
                             logger.info(f"[STRATEGY] Blocked Bearish Donchian Breakdown on {underlying}: Climax exhaustion ({self.max_consecutive_trend_bars} consecutive red bars).")
                             return
                         if self.cfg.get("require_volume_expansion", True) and len(closed_3m) >= 20:
-                            vol_sma = sum(b.volume for b in closed_3m[-20:]) / 20.0
-                            vol_mult = float(self.cfg.get("volume_expansion_multiplier", 1.25))
-                            if vol_sma > 0 and curr_bar.volume < (vol_sma * vol_mult):
-                                logger.info(f"[STRATEGY] 🛡️ Low Volume Breakdown Trap on {underlying}: Bar volume {curr_bar.volume} < {vol_mult}x 20-period SMA ({vol_sma:.0f}). Breakdown filtered.")
-                                return
+                            if is_spot_index:
+                                if curr_body_ratio < 0.45 or (atr_val > 1.0 and curr_rng < atr_val * 0.65):
+                                    logger.info(f"[STRATEGY] 🛡️ Weak Impulse Breakdown on {underlying}: Body {curr_body_ratio:.0%}, Range {curr_rng:.1f} vs ATR {atr_val:.1f}. Breakdown filtered.")
+                                    return
+                            else:
+                                vol_sma = sum(b.volume for b in closed_3m[-20:]) / 20.0
+                                vol_mult = float(self.cfg.get("volume_expansion_multiplier", 1.25))
+                                if vol_sma > 0 and curr_bar.volume < (vol_sma * vol_mult):
+                                    logger.info(f"[STRATEGY] 🛡️ Low Volume Breakdown Trap on {underlying}: Bar volume {curr_bar.volume} < {vol_mult}x 20-period SMA ({vol_sma:.0f}). Breakdown filtered.")
+                                    return
                         if (curr_bar.open - curr_bar.close) >= min_b:
                             swing_pts = max(18.0 if underlying == "NIFTY" else (55.0 if underlying == "SENSEX" else 35.0), d_high - curr_bar.close)
                             st["armed_fvg"] = {
@@ -1215,11 +1242,16 @@ class SniperILSMEStrategy(BaseStrategy):
                             logger.info(f"[STRATEGY] Blocked Bullish Donchian Breakout on {underlying}: Climax exhaustion ({self.max_consecutive_trend_bars} consecutive green bars).")
                             return
                         if self.cfg.get("require_volume_expansion", True) and len(closed_3m) >= 20:
-                            vol_sma = sum(b.volume for b in closed_3m[-20:]) / 20.0
-                            vol_mult = float(self.cfg.get("volume_expansion_multiplier", 1.25))
-                            if vol_sma > 0 and curr_bar.volume < (vol_sma * vol_mult):
-                                logger.info(f"[STRATEGY] 🛡️ Low Volume Breakout Trap on {underlying}: Bar volume {curr_bar.volume} < {vol_mult}x 20-period SMA ({vol_sma:.0f}). Breakout filtered.")
-                                return
+                            if is_spot_index:
+                                if curr_body_ratio < 0.45 or (atr_val > 1.0 and curr_rng < atr_val * 0.65):
+                                    logger.info(f"[STRATEGY] 🛡️ Weak Impulse Breakout on {underlying}: Body {curr_body_ratio:.0%}, Range {curr_rng:.1f} vs ATR {atr_val:.1f}. Breakout filtered.")
+                                    return
+                            else:
+                                vol_sma = sum(b.volume for b in closed_3m[-20:]) / 20.0
+                                vol_mult = float(self.cfg.get("volume_expansion_multiplier", 1.25))
+                                if vol_sma > 0 and curr_bar.volume < (vol_sma * vol_mult):
+                                    logger.info(f"[STRATEGY] 🛡️ Low Volume Breakout Trap on {underlying}: Bar volume {curr_bar.volume} < {vol_mult}x 20-period SMA ({vol_sma:.0f}). Breakout filtered.")
+                                    return
                         if (curr_bar.close - curr_bar.open) >= min_b:
                             swing_pts = max(18.0 if underlying == "NIFTY" else (55.0 if underlying == "SENSEX" else 35.0), curr_bar.close - d_low)
                             st["armed_fvg"] = {

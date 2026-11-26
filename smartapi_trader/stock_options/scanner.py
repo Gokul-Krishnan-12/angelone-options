@@ -263,43 +263,62 @@ class IntradayAIScanner:
                 try:
                     from smartapi_trader.web.app import ctx
                     if ctx.state_manager and hasattr(ctx.state_manager, "spot_levels"):
-                        macro_nifty = ctx.state_manager.spot_levels.get("NIFTY")
-                        macro_banknifty = ctx.state_manager.spot_levels.get("BANKNIFTY")
+                        n_lvl = ctx.state_manager.spot_levels.get("NIFTY")
+                        bn_lvl = ctx.state_manager.spot_levels.get("BANKNIFTY")
+                        macro_nifty = dict(n_lvl) if isinstance(n_lvl, dict) else None
+                        macro_banknifty = dict(bn_lvl) if isinstance(bn_lvl, dict) else None
                 except Exception:
                     pass
 
-                if not macro_nifty and self.market_data:
+                if self.market_data:
                     try:
                         stream = getattr(self.market_data, "_get_active_stream_client", lambda: None)()
                         if stream:
                             tick_n = stream.latest_ticks.get("99926000")
                             if tick_n and getattr(tick_n, "ltp", 0) > 0:
-                                macro_nifty = {
-                                    "spot": tick_n.ltp,
-                                    "open": tick_n.open,
-                                    "vwap": tick_n.open,
-                                    "day_change_pct": round(((tick_n.ltp - tick_n.close) / tick_n.close) * 100.0, 2) if tick_n.close else 0.0
-                                }
+                                if not macro_nifty:
+                                    macro_nifty = {
+                                        "spot": tick_n.ltp,
+                                        "open": tick_n.open,
+                                        "vwap": tick_n.open,
+                                        "close": tick_n.close,
+                                        "day_change_pct": round(((tick_n.ltp - tick_n.close) / tick_n.close) * 100.0, 2) if tick_n.close else 0.0
+                                    }
+                                else:
+                                    if not macro_nifty.get("open") and getattr(tick_n, "open", 0) > 0:
+                                        macro_nifty["open"] = tick_n.open
+                                    if not macro_nifty.get("close") and getattr(tick_n, "close", 0) > 0:
+                                        macro_nifty["close"] = tick_n.close
                             tick_bn = stream.latest_ticks.get("99926009")
                             if tick_bn and getattr(tick_bn, "ltp", 0) > 0:
-                                macro_banknifty = {
-                                    "spot": tick_bn.ltp,
-                                    "open": tick_bn.open,
-                                    "vwap": tick_bn.open,
-                                    "day_change_pct": round(((tick_bn.ltp - tick_bn.close) / tick_bn.close) * 100.0, 2) if tick_bn.close else 0.0
-                                }
+                                if not macro_banknifty:
+                                    macro_banknifty = {
+                                        "spot": tick_bn.ltp,
+                                        "open": tick_bn.open,
+                                        "vwap": tick_bn.open,
+                                        "close": tick_bn.close,
+                                        "day_change_pct": round(((tick_bn.ltp - tick_bn.close) / tick_bn.close) * 100.0, 2) if tick_bn.close else 0.0
+                                    }
+                                else:
+                                    if not macro_banknifty.get("open") and getattr(tick_bn, "open", 0) > 0:
+                                        macro_banknifty["open"] = tick_bn.open
+                                    if not macro_banknifty.get("close") and getattr(tick_bn, "close", 0) > 0:
+                                        macro_banknifty["close"] = tick_bn.close
                     except Exception:
                         pass
 
                 # Derive market regime for AI guidance
                 macro_regime = "NEUTRAL_CONSOLIDATION"
                 if macro_nifty and macro_nifty.get("spot", 0) > 0:
-                    n_spot = macro_nifty["spot"]
-                    n_vwap = macro_nifty.get("vwap") or n_spot
-                    n_open = macro_nifty.get("open") or n_spot
-                    if n_spot < n_vwap and n_spot < n_open:
+                    n_spot = float(macro_nifty["spot"])
+                    n_vwap = float(macro_nifty.get("vwap") or n_spot)
+                    n_open = float(macro_nifty.get("open") or 0.0)
+                    n_close = float(macro_nifty.get("close") or 0.0)
+                    ref_anchor = n_open if n_open > 0 else (n_close if n_close > 0 else n_vwap)
+                    buf = max(15.0, n_spot * 0.0006)
+                    if n_spot < (n_vwap - buf) and n_spot < (ref_anchor - buf):
                         macro_regime = "BEARISH_DOWNTREND (NIFTY below VWAP & Open)"
-                    elif n_spot > n_vwap and n_spot > n_open:
+                    elif n_spot > (n_vwap + buf) and n_spot > (ref_anchor + buf):
                         macro_regime = "BULLISH_UPTREND (NIFTY above VWAP & Open)"
 
                 market_context = {

@@ -178,7 +178,7 @@ strategy:
 
   # Rejection & Sweep Thresholds
   min_wick_ratio: 0.25          # Minimum 25% rejection wick for valid 15m sweep
-  sweep_ttl_minutes: 15.0       # Sweep validity window in minutes
+  sweep_ttl_minutes: 25.0       # Sweep validity window in minutes
   max_spike_candle_pct: 1.0     # Reject setup if candle was an abnormal single-tick spike
 
   # Fair Value Gap (FVG) Thresholds
@@ -187,8 +187,8 @@ strategy:
   fvg_ttl_minutes: 15.0
 
   # Volume & Momentum Confirmation
-  require_volume_expansion: true
-  volume_expansion_multiplier: 1.25 # Tick volume must be ≥1.25x 20-period SMA
+  require_volume_expansion: false # Spot indices carry tick counts, not exchange volume; use impulse checks
+  volume_expansion_multiplier: 1.25 # Used only on volume-bearing instruments
   volume_sma_period: 20
   min_open_interest: 50000
   max_bid_ask_spread_pct: 1.5

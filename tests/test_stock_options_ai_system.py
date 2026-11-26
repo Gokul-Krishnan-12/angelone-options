@@ -1043,6 +1043,50 @@ class TestStockOptionsAISystem(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(summary["volume_ratio"], 2.5, places=1)
         self.assertNotIn("fresh OI addition", summary["oi_buildup"])
 
+    # 30. StateManager Tracks Open/Close & Scanner Classifies Macro Trend Accurately
+    async def test_30_macro_regime_tracks_open_and_detects_uptrend(self):
+        """Verifies spot_levels tracks open/close and scanner classifies BULLISH_UPTREND."""
+        from smartapi_trader.core.state_manager import StateManager
+        sm = StateManager(self.event_bus)
+        sm.update_spot_telemetry(
+            "NIFTY", spot=25950.0, vwap=25855.0, pdh=25980.0, pdl=25620.0,
+            open_price=25876.0, prev_close=25820.0
+        )
+        lvl = sm.spot_levels["NIFTY"]
+        self.assertEqual(lvl["open"], 25876.0)
+        self.assertEqual(lvl["close"], 25820.0)
+
+        captured_ctx = {}
+        async def fake_analyze(*args, **kwargs):
+            captured_ctx.update(kwargs.get("market_context", {}))
+            return AIAnalysisResponse(
+                run_id="MACRO", run_type="INTRADAY_SCAN", timestamp="now",
+                intended_trading_date="2026-11-26", provider="Test", model="Test", candidates=[]
+            )
+
+        from smartapi_trader.web.app import ctx
+        old_sm = ctx.state_manager
+        ctx.state_manager = sm
+        try:
+            with patch.object(self.ai_service, "analyze", side_effect=fake_analyze), \
+                 patch.object(self.market_data, "rank_and_shortlist_stocks", return_value=[{"symbol": "RELIANCE", "spot": 1400.0}]):
+                await self.scanner.execute_scan(is_manual=True)
+            self.assertIn("BULLISH_UPTREND", captured_ctx.get("market_regime", ""))
+        finally:
+            ctx.state_manager = old_sm
+
+    # 31. Invalid Token AB4046 Caching Prevents Repeated Rate-Limit Loops
+    def test_31_invalid_token_ab4046_cached_and_fallback_resolved(self):
+        """Verifies AB4046 triggers DB lookup or 1-hour skip without spamming ltpData."""
+        mock_api = MagicMock()
+        mock_api.ltpData.return_value = {"status": False, "errorcode": "AB4046", "message": "Symbol token not found"}
+        svc = StockMarketDataService(self.universe_mgr, smart_api=mock_api)
+        svc.get_spot_ltp("ITC")
+        svc.get_spot_ltp("ITC")
+        svc.get_spot_ltp("ITC")
+        # First call attempts primary + DB lookup (at most 2 if alt token differed), subsequent calls make 0 calls
+        self.assertLessEqual(mock_api.ltpData.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

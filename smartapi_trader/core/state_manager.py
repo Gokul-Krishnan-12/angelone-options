@@ -599,11 +599,26 @@ class StateManager:
         logger.info("[STATE] Emergency Panic cleared. Engine resumed.")
         self.broadcast_state()
 
-    def update_spot_telemetry(self, underlying: str, spot: float, vwap: float, pdh: float = 0.0, pdl: float = 0.0, high: float = 0.0, low: float = 0.0):
+    def update_spot_telemetry(
+        self,
+        underlying: str,
+        spot: float,
+        vwap: float,
+        pdh: float = 0.0,
+        pdl: float = 0.0,
+        high: float = 0.0,
+        low: float = 0.0,
+        open_price: float = 0.0,
+        prev_close: float = 0.0,
+    ):
         if underlying in self.spot_levels:
             current = self.spot_levels[underlying]
             current["spot"] = spot
             current["vwap"] = vwap
+            if open_price > 0:
+                current["open"] = open_price
+            if prev_close > 0:
+                current["close"] = prev_close
             if pdh > 0 and pdl > 0 and pdh < pdl:
                 pdh, pdl = pdl, pdh
             if pdh > 0: current["pdh"] = pdh
