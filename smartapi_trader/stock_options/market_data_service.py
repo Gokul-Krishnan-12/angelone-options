@@ -32,6 +32,15 @@ class StockMarketDataService:
         self._invalid_spot_tokens: Dict[str, float] = {}  # symbol -> timestamp when token failed AB4046
         self._resolved_nse_tokens: Dict[str, str] = {}  # symbol -> verified NSE equity token from instruments DB
         self._last_rest_ts: float = 0.0
+        self._last_candle_ts: float = 0.0
+
+    def _throttle_candles(self, min_gap: float = 1.15):
+        """Enforces <= ~0.85 req/sec spacing for SmartAPI historical getCandleData."""
+        now = time.time()
+        elapsed = now - self._last_candle_ts
+        if elapsed < min_gap:
+            time.sleep(min_gap - elapsed)
+        self._last_candle_ts = time.time()
 
     def _resolve_nse_token(self, symbol: str) -> str:
         """Resolves NSE equity token, checking instruments DB fallback if a static token failed."""
@@ -126,7 +135,7 @@ class StockMarketDataService:
                 logger.debug(f"[MARKET_DATA] Batch quote fetch failed: {e}")
 
     def _fetch_intraday_candles(self, symbol: str, token: str, ttl_seconds: float = 120.0) -> List[List[Any]]:
-        """Fetches recent 5-minute OHLCV candles from SmartAPI with short caching."""
+        """Fetches recent 5-minute OHLCV candles from SmartAPI with rate-limit spacing and 1 retry."""
         now = time.time()
         cached = self._candle_cache.get(symbol)
         if cached and (now - cached[1]) < ttl_seconds:
@@ -136,26 +145,37 @@ class StockMarketDataService:
         if not smart_conn or not token or not str(token).isdigit():
             return []
 
-        try:
-            self._throttle_rest(0.36)
-            from_dt = (datetime.now() - timedelta(days=4)).strftime("%Y-%m-%d 09:15")
-            to_dt = datetime.now().strftime("%Y-%m-%d %H:%M")
-            res = smart_conn.getCandleData({
-                "exchange": "NSE",
-                "symboltoken": str(token),
-                "interval": "FIVE_MINUTE",
-                "fromdate": from_dt,
-                "todate": to_dt,
-            })
-            if res and isinstance(res, dict) and res.get("status") and res.get("data"):
-                bars = res["data"]
-                self._candle_cache[symbol] = (bars, time.time())
-                return bars
-            elif res and isinstance(res, dict) and not res.get("status"):
-                self._notify_rate_limit_if_detected(res.get("message"), f"NSE candles ({symbol})")
-        except Exception as e:
-            self._notify_rate_limit_if_detected(str(e), f"NSE candles ({symbol})")
-            logger.debug(f"[MARKET_DATA] Candle fetch failed for {symbol}: {e}")
+        from_dt = (datetime.now() - timedelta(days=4)).strftime("%Y-%m-%d 09:15")
+        to_dt = datetime.now().strftime("%Y-%m-%d %H:%M")
+        payload = {
+            "exchange": "NSE",
+            "symboltoken": str(token),
+            "interval": "FIVE_MINUTE",
+            "fromdate": from_dt,
+            "todate": to_dt,
+        }
+
+        for attempt in range(2):
+            try:
+                self._throttle_candles(1.15 if attempt == 0 else 1.6)
+                res = smart_conn.getCandleData(payload)
+                if res and isinstance(res, dict) and res.get("status") and res.get("data"):
+                    bars = res["data"]
+                    self._candle_cache[symbol] = (bars, time.time())
+                    return bars
+                elif res and isinstance(res, dict) and not res.get("status"):
+                    msg = str(res.get("message") or "")
+                    if attempt == 0 and any(w in msg.lower() for w in ("exceeding access rate", "429", "rate limit")):
+                        continue
+                    self._notify_rate_limit_if_detected(msg, f"NSE candles ({symbol})")
+                    break
+            except Exception as e:
+                err_str = str(e)
+                if attempt == 0 and any(w in err_str.lower() for w in ("exceeding access rate", "429", "rate limit")):
+                    continue
+                self._notify_rate_limit_if_detected(err_str, f"NSE candles ({symbol})")
+                logger.debug(f"[MARKET_DATA] Candle fetch failed for {symbol}: {e}")
+                break
         return cached[0] if cached else []
 
     @staticmethod
@@ -581,7 +601,7 @@ class StockMarketDataService:
 
         # Stage 2: Enrich top candidates with real 5m OHLCV indicators + live NFO option chain OI/spread
         smart_conn = self._get_active_smart_api()
-        deep_pool_size = min(len(coarse_scored), max(max_shortlist * 2, 8))
+        deep_pool_size = min(len(coarse_scored), max(max_shortlist, 6))
         if smart_conn:
             scored = []
             for item in coarse_scored[:deep_pool_size]:
@@ -650,7 +670,7 @@ class StockMarketDataService:
 
         peer_list = [p for p in peers[:5] if p in NSE_FO_STOCKS]
         if peer_list and allow_rest:
-            self._batch_fetch_spot_quotes(peer_list)
+            self._batch_fetch_spot_quotes(peer_list, ttl_seconds=60.0)
 
         bullish_peers = 0
         total_evaluated = 0

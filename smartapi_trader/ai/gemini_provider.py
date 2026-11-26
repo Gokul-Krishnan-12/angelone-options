@@ -86,6 +86,28 @@ Output strictly valid JSON with no markdown formatting or commentary outside the
 """
 
 
+INDEX_SENTINEL_INSTRUCTION = """You are an institutional macro derivatives strategist evaluating Indian Index Futures/Options (NIFTY 50, BANKNIFTY, SENSEX).
+Inspect the intraday index telemetry provided below and classify the overarching intraday index regime purely from Spot vs VWAP, Opening Range (or_high/or_low), Previous Day High/Low (pdh/pdl), and ADX.
+Do NOT ask for stock candidates; this is an index-only regime classification call.
+
+### INPUT TELEMETRY:
+{market_telemetry_json}
+
+### REGIME RULES:
+- "Trending Bullish": NIFTY (and/or SENSEX) spot is trading clearly above VWAP and above Opening Range high (or breaking out with ADX >= 22).
+- "Trending Bearish": NIFTY (and/or SENSEX) spot is trading clearly below VWAP and below Opening Range low (or breaking down with ADX >= 22).
+- "Rangebound Chop": Spot is oscillating inside Opening Range around VWAP without directional displacement.
+
+### OUTPUT FORMAT (strict JSON only):
+{{
+  "timestamp": "<ISO timestamp>",
+  "market_regime": "Trending Bullish | Trending Bearish | Rangebound Chop",
+  "no_trade_reason": "<1 sentence summarizing index regime>",
+  "setups": []
+}}
+"""
+
+
 class GeminiProvider(AIProvider):
     BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
@@ -120,18 +142,25 @@ class GeminiProvider(AIProvider):
                 warning="Google Gemini API key not configured. Candidate scanning is paused."
             )
 
-        user_content = json.dumps({
-            "run_type": run_type,
-            "intended_trading_date": intended_date,
-            "max_candidates": clamped_max,
-            "market_context": market_context,
-            "shortlisted_stocks": stock_data
-        }, indent=2)
+        if market_context.get("index_sentinel_request"):
+            user_content = json.dumps({
+                "timestamp": timestamp_str,
+                "telemetry": market_context.get("telemetry", {}),
+            }, indent=2)
+            prompt_text = INDEX_SENTINEL_INSTRUCTION.format(market_telemetry_json=user_content)
+        else:
+            user_content = json.dumps({
+                "run_type": run_type,
+                "intended_trading_date": intended_date,
+                "max_candidates": clamped_max,
+                "market_context": market_context,
+                "shortlisted_stocks": stock_data
+            }, indent=2)
 
-        prompt_text = SYSTEM_INSTRUCTION.format(
-            max_candidates=clamped_max,
-            market_telemetry_json=user_content
-        )
+            prompt_text = SYSTEM_INSTRUCTION.format(
+                max_candidates=clamped_max,
+                market_telemetry_json=user_content
+            )
 
         payload = {
             "contents": [

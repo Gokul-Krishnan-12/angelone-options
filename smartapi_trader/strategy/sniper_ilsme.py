@@ -333,8 +333,7 @@ class SniperILSMEStrategy(BaseStrategy):
     async def evaluate_index_regime_with_ai(self, force: bool = False) -> str:
         """
         Queries Gemini AI to evaluate the overarching Index Market Regime.
-        Acts as a macro sentinel: classifies market as TRENDING_BULLISH, TRENDING_BEARISH,
-        RANGEBOUND_CHOP, or STANDBY_DEFENSIVE to protect against false breakout traps.
+        Refreshes every 45 minutes throughout the session so breakouts after morning chop are not blocked all day.
         """
         now = now_ist()
         now_ts = sys_time.time()
@@ -344,9 +343,14 @@ class SniperILSMEStrategy(BaseStrategy):
         if not self.ai_service or not getattr(self.ai_service, "is_configured", False):
             return self.index_regime
 
+        # Reserve timestamp immediately to prevent concurrent calls when multiple indices settle at 09:30
+        self._last_regime_check_time = now_ts
         try:
             nifty_st = self.state.get("NIFTY", {})
             bn_st = self.state.get("BANKNIFTY", {})
+            sx_st = self.state.get("SENSEX", {})
+            nifty_tok = self.index_tokens.get("NIFTY", "")
+            nifty_adx = round(self._calculate_adx(nifty_tok, period=14), 1) if nifty_tok else 25.0
 
             telemetry = {
                 "timestamp": now.isoformat(),
@@ -359,6 +363,7 @@ class SniperILSMEStrategy(BaseStrategy):
                     "or_high": nifty_st.get("or_high", 0.0),
                     "or_low": nifty_st.get("or_low", 0.0),
                     "or_settled": nifty_st.get("or_settled", False),
+                    "adx_14": nifty_adx,
                 },
                 "BANKNIFTY": {
                     "spot": bn_st.get("last_spot", 0.0),
@@ -368,6 +373,15 @@ class SniperILSMEStrategy(BaseStrategy):
                     "or_high": bn_st.get("or_high", 0.0),
                     "or_low": bn_st.get("or_low", 0.0),
                     "or_settled": bn_st.get("or_settled", False),
+                },
+                "SENSEX": {
+                    "spot": sx_st.get("last_spot", 0.0),
+                    "vwap": sx_st.get("vwap", 0.0),
+                    "pdh": sx_st.get("pdh", 0.0),
+                    "pdl": sx_st.get("pdl", 0.0),
+                    "or_high": sx_st.get("or_high", 0.0),
+                    "or_low": sx_st.get("or_low", 0.0),
+                    "or_settled": sx_st.get("or_settled", False),
                 }
             }
 
@@ -379,7 +393,9 @@ class SniperILSMEStrategy(BaseStrategy):
                 max_candidates=1
             )
             regime = getattr(res, "market_summary", "") or ""
-            if "BEARISH" in regime.upper():
+            if "ERROR" in regime.upper() or "ABORTED" in regime.upper():
+                self.index_regime = "NORMAL"
+            elif "BEARISH" in regime.upper():
                 self.index_regime = "TRENDING_BEARISH"
             elif "BULLISH" in regime.upper():
                 self.index_regime = "TRENDING_BULLISH"
@@ -389,7 +405,6 @@ class SniperILSMEStrategy(BaseStrategy):
                 self.index_regime = "NORMAL"
 
             self._regime_reason = res.no_trade_reason or regime or "Sentinel evaluation completed."
-            self._last_regime_check_time = now_ts
             logger.info(f"[STRATEGY] 🧠 Gemini AI Sentinel evaluated Index Regime: {self.index_regime} ({self._regime_reason})")
             return self.index_regime
         except Exception as e:
@@ -510,6 +525,11 @@ class SniperILSMEStrategy(BaseStrategy):
             self.state[target_underlying]["vwap"] = event.vwap
 
             if tf == "15m":
+                if ist_time() > time(9, 30) and self._is_market_hours():
+                    try:
+                        asyncio.create_task(self.evaluate_index_regime_with_ai(force=False))
+                    except Exception:
+                        pass
                 await self._evaluate_15m_macro_sweep(target_underlying, event)
             elif tf == "3m":
                 await self._evaluate_3m_micro_displacement(target_underlying, event)
